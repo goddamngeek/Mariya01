@@ -1,9 +1,6 @@
-from datetime import datetime, timezone
-
-from app.config import ANTI_SPAM_SECONDS, OUTGOING_DEDUP_DAYS
+from app.config import OUTGOING_DEDUP_DAYS
 from app.db import (
     close_question,
-    get_last_reply_sent_at,
     get_open_question,
     insert_incoming_message,
     mark_reply_sent,
@@ -19,16 +16,10 @@ async def process_incoming_message(user_id: int, text: str) -> None:
     if open_question is not None:
         await close_question(open_question["id"])
 
-    await _maybe_send_reply(user_id)
+    await _send_reply(user_id)
 
 
-async def _maybe_send_reply(user_id: int) -> None:
-    last_sent = await get_last_reply_sent_at(user_id)
-    if last_sent is not None:
-        elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
-        if elapsed < ANTI_SPAM_SECONDS:
-            return
-
+async def _send_reply(user_id: int) -> None:
     reply = await pick_outgoing_message("reply", OUTGOING_DEDUP_DAYS, user_id)
     if reply is None:
         return

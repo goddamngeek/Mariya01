@@ -240,15 +240,6 @@ async def mark_question_sent(question_id: int) -> None:
 
 # --- reply -------------------------------------------------------------
 
-async def get_last_reply_sent_at(user_id: int) -> datetime | None:
-    pool = await get_pool()
-    return await pool.fetchval(
-        "SELECT sent_at FROM outgoing_messages WHERE category = 'reply' AND user_id = $1 "
-        "AND sent_at IS NOT NULL ORDER BY sent_at DESC LIMIT 1",
-        user_id,
-    )
-
-
 async def mark_reply_sent(reply_id: int) -> None:
     pool = await get_pool()
     await pool.execute(

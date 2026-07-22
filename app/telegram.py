@@ -20,6 +20,19 @@ async def send_message(chat_id: int | str, text: str) -> bool:
         return False
 
 
+async def send_message_debug(chat_id: int | str, text: str) -> tuple[bool, int | None, str]:
+    """Temporary variant of send_message() that also returns the raw
+    Telegram API response for debug logging. Remove once debugging is done."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, json={"chat_id": chat_id, "text": text})
+            return resp.status_code < 400, resp.status_code, resp.text
+    except httpx.HTTPError as exc:
+        logger.warning("telegram sendMessage failed: %s", exc)
+        return False, None, str(exc)
+
+
 async def send_message_with_button(
     chat_id: int | str, text: str, button_text: str, callback_data: str
 ) -> bool:

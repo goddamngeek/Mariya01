@@ -1,3 +1,5 @@
+import logging
+
 from app.config import OUTGOING_DEDUP_DAYS
 from app.db import (
     close_question,
@@ -6,7 +8,9 @@ from app.db import (
     mark_reply_sent,
     pick_outgoing_message,
 )
-from app.telegram import send_message
+from app.telegram import send_message_debug
+
+logger = logging.getLogger("queue_bot.service")
 
 
 async def process_incoming_message(user_id: int, text: str) -> None:
@@ -21,8 +25,14 @@ async def process_incoming_message(user_id: int, text: str) -> None:
 
 async def _send_reply(user_id: int) -> None:
     reply = await pick_outgoing_message("reply", OUTGOING_DEDUP_DAYS, user_id)
+    logger.info(
+        "pick_outgoing_message(reply) -> %s",
+        {"id": reply["id"], "text": reply["text"]} if reply is not None else None,
+    )
     if reply is None:
         return
 
-    if await send_message(user_id, reply["text"]):
+    ok, status_code, response_text = await send_message_debug(user_id, reply["text"])
+    logger.info("telegram send status=%s response=%s", status_code, response_text)
+    if ok:
         await mark_reply_sent(reply["id"])

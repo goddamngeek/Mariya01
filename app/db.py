@@ -251,7 +251,8 @@ async def mark_reply_sent(reply_id: int) -> None:
 
 async def pick_outgoing_message(category: str, dedup_days: int, user_id: int) -> asyncpg.Record | None:
     """Fresh (never sent) message first; otherwise a random one not sent
-    within the last `dedup_days` days. Scoped to a single user's pool."""
+    within the last `dedup_days` days; otherwise any message at all for this
+    user/category. None only if the pool is truly empty (0 rows)."""
     pool = await get_pool()
 
     row = await pool.fetchrow(
@@ -263,10 +264,18 @@ async def pick_outgoing_message(category: str, dedup_days: int, user_id: int) ->
         return row
 
     cutoff = utcnow() - timedelta(days=dedup_days)
-    return await pool.fetchrow(
+    row = await pool.fetchrow(
         "SELECT * FROM outgoing_messages WHERE category = $1 AND user_id = $2 "
         "AND sent_at IS NOT NULL AND sent_at < $3 ORDER BY RANDOM() LIMIT 1",
         category, user_id, cutoff,
+    )
+    if row is not None:
+        return row
+
+    return await pool.fetchrow(
+        "SELECT * FROM outgoing_messages WHERE category = $1 AND user_id = $2 "
+        "ORDER BY RANDOM() LIMIT 1",
+        category, user_id,
     )
 
 

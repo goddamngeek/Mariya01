@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 
 TIMEZONE = ZoneInfo("Europe/Moscow")
 
-PROACTIVE_WINDOW_START = time(13, 0)
-PROACTIVE_WINDOW_END = time(22, 0)
+PROACTIVE_WINDOW_START = time(17, 0)
+PROACTIVE_WINDOW_END = time(19, 0)
 
 DEFERRAL_DELAY_HOURS = 1
 MAX_DEFERRALS = 2

@@ -27,8 +27,11 @@ CREATE TABLE IF NOT EXISTS outgoing_messages (
 
 CREATE TABLE IF NOT EXISTS registered_users (
     chat_id BIGINT PRIMARY KEY,
-    registered_at TIMESTAMPTZ NOT NULL
+    registered_at TIMESTAMPTZ NOT NULL,
+    odysseus_session_id TEXT
 );
+
+ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 """
 
 SEED_QUESTIONS = [
@@ -117,6 +120,21 @@ async def get_registered_user_ids() -> list[int]:
     pool = await get_pool()
     rows = await pool.fetch("SELECT chat_id FROM registered_users")
     return [row["chat_id"] for row in rows]
+
+
+async def get_odysseus_session_id(chat_id: int) -> str | None:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT odysseus_session_id FROM registered_users WHERE chat_id = $1", chat_id
+    )
+
+
+async def set_odysseus_session_id(chat_id: int, session_id: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE registered_users SET odysseus_session_id = $1 WHERE chat_id = $2",
+        session_id, chat_id,
+    )
 
 
 # --- incoming messages -----------------------------------------------------

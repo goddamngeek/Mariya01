@@ -4,8 +4,10 @@ Odysseus chat service (see odysseus_client.py for the confirmed contract).
 Two independent mechanisms:
   1. Ingest — forward each unconfirmed incoming message to Odysseus so it
      can process/remember it. The response text is discarded; a successful
-     call just confirms the incoming message. Session per user_id persists
-     the conversation across sync runs.
+     call just confirms the incoming message. Each user_id has a persistent
+     Odysseus session (created once via /api/session, stored in the bot's
+     registered_users table, reused for every later message) so their whole
+     conversation stays in one chat visible in Odysseus's own UI.
   2. Pool refresh — unrelated to any specific incoming message. Periodically
      asks Odysseus (stateless, no session) to generate a batch of
      question/reply candidates and pushes them.
@@ -16,7 +18,7 @@ import re
 
 import httpx
 
-from odysseus_client import chat, load_sessions, save_sessions
+from odysseus_client import chat, create_session
 
 BOT_URL = os.environ.get("BOT_URL", "http://localhost:8000")
 BOT_SYNC_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
@@ -55,25 +57,51 @@ def push_outgoing(user_id: int, category: str, texts: list[str]) -> None:
     resp.raise_for_status()
 
 
+def get_stored_session(user_id: int) -> str | None:
+    resp = httpx.get(
+        f"{BOT_URL}/sync/session", headers=HEADERS, params={"user_id": user_id}, timeout=10
+    )
+    resp.raise_for_status()
+    return resp.json()["session_id"]
+
+
+def store_session(user_id: int, session_id: str) -> None:
+    resp = httpx.post(
+        f"{BOT_URL}/sync/session",
+        headers=HEADERS,
+        json={"user_id": user_id, "session_id": session_id},
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+
+def get_or_create_session(user_id: int) -> str:
+    session_id = get_stored_session(user_id)
+    if session_id:
+        return session_id
+
+    session_id = create_session(f"Telegram — {user_id}")
+    store_session(user_id, session_id)
+    return session_id
+
+
 # --- 1. ingest: forward incoming messages, just to confirm them ------------
 
 def ingest_incoming() -> None:
-    sessions = load_sessions()
     incoming = pull_incoming()
     confirmed_ids = []
 
     for message in incoming:
-        user_key = str(message["user_id"])
+        user_id = message["user_id"]
         try:
-            result = chat(message["text"], session=sessions.get(user_key))
+            session_id = get_or_create_session(user_id)
+            chat(message["text"], session=session_id)
         except httpx.HTTPError as exc:
             print(f"ingest failed for incoming id={message['id']}: {exc!r}")
             continue
 
-        sessions[user_key] = result["session_id"]
         confirmed_ids.append(message["id"])
 
-    save_sessions(sessions)
     ack(confirmed_ids)
 
 

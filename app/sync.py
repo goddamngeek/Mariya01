@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from app.config import SYNC_BEARER_TOKEN
-from app.db import ack_incoming_messages, insert_outgoing_messages, pull_unconfirmed_incoming
+from app.db import (
+    ack_incoming_messages,
+    get_odysseus_session_id,
+    insert_outgoing_messages,
+    pull_unconfirmed_incoming,
+    set_odysseus_session_id,
+)
 
 router = APIRouter(prefix="/sync")
 
@@ -28,6 +34,11 @@ class PushRequest(BaseModel):
     items: list[PushItem]
 
 
+class SetSessionRequest(BaseModel):
+    user_id: int
+    session_id: str
+
+
 @router.get("/pull", dependencies=[Depends(require_bearer)])
 async def pull():
     rows = await pull_unconfirmed_incoming()
@@ -40,6 +51,17 @@ async def pull():
 @router.post("/ack", dependencies=[Depends(require_bearer)])
 async def ack(body: AckRequest):
     await ack_incoming_messages(body.ids)
+    return {"ok": True}
+
+
+@router.get("/session", dependencies=[Depends(require_bearer)])
+async def get_session(user_id: int):
+    return {"session_id": await get_odysseus_session_id(user_id)}
+
+
+@router.post("/session", dependencies=[Depends(require_bearer)])
+async def set_session(body: SetSessionRequest):
+    await set_odysseus_session_id(body.user_id, body.session_id)
     return {"ok": True}
 
 

@@ -1,4 +1,4 @@
-"""Real Odysseus client. Contract confirmed manually:
+"""Real Odysseus client. Chat contract confirmed manually:
 
   POST {ODYSSEUS_URL}/api/v1/chat
     header: Authorization: Bearer <ODYSSEUS_TOKEN>
@@ -7,13 +7,19 @@
            "provider": "mistral", "session": <optional session_id>}
     resp: {"response": str, "session_id": str, "model": str}
 
-Session ids are per-user (see load_sessions/save_sessions) so a
-conversation can continue across separate sync runs.
+  POST {ODYSSEUS_URL}/api/session
+    header: Authorization: Bearer <ODYSSEUS_TOKEN>
+    body: {"name": str}
+    resp: assumed to contain the new session id under "session_id" or "id" —
+    NOT manually confirmed like /api/v1/chat was; verify against the real
+    response and adjust create_session() below if the key differs.
+
+Session ids live in the bot's registered_users table (fetched/stored via the
+bot's /sync/session endpoints), not locally — so the same conversation
+continues in Odysseus's UI regardless of which machine runs this script.
 """
 
-import json
 import os
-from pathlib import Path
 
 import httpx
 
@@ -25,7 +31,7 @@ MODEL = "mistral-large-latest"
 BASE_URL = "https://api.mistral.ai/v1"
 PROVIDER = "mistral"
 
-SESSIONS_FILE = Path(__file__).parent / "sessions.json"
+_AUTH_HEADERS = {"Authorization": f"Bearer {ODYSSEUS_TOKEN}"}
 
 
 def chat(message: str, session: str | None = None) -> dict:
@@ -40,20 +46,16 @@ def chat(message: str, session: str | None = None) -> dict:
         payload["session"] = session
 
     resp = httpx.post(
-        f"{ODYSSEUS_URL}/api/v1/chat",
-        headers={"Authorization": f"Bearer {ODYSSEUS_TOKEN}"},
-        json=payload,
-        timeout=30,
+        f"{ODYSSEUS_URL}/api/v1/chat", headers=_AUTH_HEADERS, json=payload, timeout=30
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def load_sessions() -> dict[str, str]:
-    if SESSIONS_FILE.exists():
-        return json.loads(SESSIONS_FILE.read_text())
-    return {}
-
-
-def save_sessions(sessions: dict[str, str]) -> None:
-    SESSIONS_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
+def create_session(name: str) -> str:
+    resp = httpx.post(
+        f"{ODYSSEUS_URL}/api/session", headers=_AUTH_HEADERS, json={"name": name}, timeout=30
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("session_id") or data["id"]

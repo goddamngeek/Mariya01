@@ -9,10 +9,13 @@
 
   POST {ODYSSEUS_URL}/api/session
     header: Authorization: Bearer <ODYSSEUS_TOKEN>
-    body: {"name": str}
+    body: {"name": str, "endpoint_url": <MISTRAL_BASE_URL>,
+           "model": <MISTRAL_MODEL>, "skip_validation": true}
     resp: assumed to contain the new session id under "session_id" or "id" —
     NOT manually confirmed like /api/v1/chat was; verify against the real
     response and adjust create_session() below if the key differs.
+    (endpoint_url/model/skip_validation are required — without them Odysseus
+    responds 400, confirmed manually.)
 
 Session ids live in the bot's registered_users table (fetched/stored via the
 bot's /sync/session endpoints), not locally — so the same conversation
@@ -26,8 +29,11 @@ import httpx
 ODYSSEUS_URL = os.environ.get("ODYSSEUS_URL", "http://localhost:7860")
 ODYSSEUS_TOKEN = os.environ.get("ODYSSEUS_TOKEN", "")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
+MISTRAL_BASE_URL = os.environ.get(
+    "MISTRAL_BASE_URL", "https://api.mistral.ai/v1/chat/completions"
+)
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-large-latest")
 
-MODEL = "mistral-large-latest"
 BASE_URL = "https://api.mistral.ai/v1"
 PROVIDER = "mistral"
 
@@ -37,7 +43,7 @@ _AUTH_HEADERS = {"Authorization": f"Bearer {ODYSSEUS_TOKEN}"}
 def chat(message: str, session: str | None = None) -> dict:
     payload = {
         "message": message,
-        "model": MODEL,
+        "model": MISTRAL_MODEL,
         "api_key": MISTRAL_API_KEY,
         "base_url": BASE_URL,
         "provider": PROVIDER,
@@ -53,8 +59,14 @@ def chat(message: str, session: str | None = None) -> dict:
 
 
 def create_session(name: str) -> str:
+    payload = {
+        "name": name,
+        "endpoint_url": MISTRAL_BASE_URL,
+        "model": MISTRAL_MODEL,
+        "skip_validation": True,
+    }
     resp = httpx.post(
-        f"{ODYSSEUS_URL}/api/session", headers=_AUTH_HEADERS, json={"name": name}, timeout=30
+        f"{ODYSSEUS_URL}/api/session", headers=_AUTH_HEADERS, json=payload, timeout=30
     )
     resp.raise_for_status()
     data = resp.json()

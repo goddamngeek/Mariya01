@@ -54,6 +54,8 @@ def chat(message: str, session: str | None = None) -> dict:
     resp = httpx.post(
         f"{ODYSSEUS_URL}/api/v1/chat", headers=_AUTH_HEADERS, json=payload, timeout=30
     )
+    if resp.status_code >= 400:
+        print(f"CHAT ERROR BODY: {resp.text}", flush=True)
     resp.raise_for_status()
     return resp.json()
 

@@ -68,6 +68,8 @@ def create_session(name: str) -> str:
     resp = httpx.post(
         f"{ODYSSEUS_URL}/api/session", headers=_AUTH_HEADERS, json=payload, timeout=30
     )
+    if resp.status_code >= 400:
+        print(f"SESSION ERROR BODY: {resp.text}", flush=True)
     resp.raise_for_status()
     data = resp.json()
     return data.get("session_id") or data["id"]

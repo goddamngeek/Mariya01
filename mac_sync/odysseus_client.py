@@ -40,6 +40,10 @@ PROVIDER = "mistral"
 _AUTH_HEADERS = {"Authorization": f"Bearer {ODYSSEUS_TOKEN}"}
 
 
+class SessionNotFoundError(Exception):
+    pass
+
+
 def chat(message: str, session: str | None = None) -> dict:
     payload = {
         "message": message,
@@ -56,6 +60,8 @@ def chat(message: str, session: str | None = None) -> dict:
     )
     if resp.status_code >= 400:
         print(f"CHAT ERROR BODY: {resp.text}", flush=True)
+    if resp.status_code == 404 and "Session not found" in resp.text:
+        raise SessionNotFoundError(resp.text)
     resp.raise_for_status()
     return resp.json()
 
@@ -74,4 +80,5 @@ def create_session(name: str) -> str:
         print(f"SESSION ERROR BODY: {resp.text}", flush=True)
     resp.raise_for_status()
     data = resp.json()
+    print (data)
     return data.get("session_id") or data["id"]

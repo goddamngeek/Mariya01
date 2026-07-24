@@ -18,7 +18,7 @@ import re
 
 import httpx
 
-from odysseus_client import chat, create_session
+from odysseus_client import SessionNotFoundError, chat, create_session
 
 BOT_URL = os.environ.get("BOT_URL", "http://localhost:8000")
 BOT_SYNC_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
@@ -77,12 +77,31 @@ def store_session(user_id: int, session_id: str) -> None:
 
 def get_or_create_session(user_id: int) -> str:
     session_id = get_stored_session(user_id)
+    print(f"[DEBUG] stored session: {session_id}")
+
     if session_id:
         return session_id
 
     session_id = create_session(f"Telegram — {user_id}")
+    print(f"[DEBUG] created session: {session_id}")
+
     store_session(user_id, session_id)
+    print("[DEBUG] stored on bot")
+
     return session_id
+
+
+def chat_with_session(user_id: int, message: str) -> dict:
+    session_id = get_stored_session(user_id)
+    try:
+        result = chat(message, session=session_id)
+    except SessionNotFoundError:
+        result = chat(message, session=None)  # сервер сам создаст новую сессию
+
+    new_session_id = result.get("session_id")
+    if new_session_id and new_session_id != session_id:
+        store_session(user_id, new_session_id)
+    return result
 
 
 # --- 1. ingest: forward incoming messages, just to confirm them ------------
@@ -93,9 +112,9 @@ def ingest_incoming() -> None:
 
     for message in incoming:
         user_id = message["user_id"]
+
         try:
-            session_id = get_or_create_session(user_id)
-            chat(message["text"], session=session_id)
+            chat_with_session(user_id, message["text"])
         except httpx.HTTPError as exc:
             print(f"ingest failed for incoming id={message['id']}: {exc!r}")
             continue

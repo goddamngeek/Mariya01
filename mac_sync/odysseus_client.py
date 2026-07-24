@@ -66,7 +66,7 @@ def create_session(name: str) -> str:
         "skip_validation": True,
     }
     resp = httpx.post(
-        f"{ODYSSEUS_URL}/api/session", headers=_AUTH_HEADERS, json=payload, timeout=30
+        f"{ODYSSEUS_URL}/api/session", headers=_AUTH_HEADERS, data=payload, timeout=30
     )
     if resp.status_code >= 400:
         print(f"SESSION ERROR BODY: {resp.text}", flush=True)

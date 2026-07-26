@@ -13,6 +13,16 @@ Two independent mechanisms:
      question/reply candidates and pushes them.
 """
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Anchored to this file's own directory, not the caller's CWD — cron/launchd
+# invoke this with an arbitrary working directory (often $HOME), so a bare
+# load_dotenv() would silently find nothing and every var would fall back
+# to its default.
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 import os
 import re
 

@@ -28,7 +28,7 @@ import re
 
 import httpx
 
-from odysseus_client import SessionNotFoundError, chat, create_session
+from odysseus_client import SessionNotFoundError, chat, create_session, get_active_endpoint
 
 BOT_URL = os.environ.get("BOT_URL", "http://localhost:8000")
 BOT_SYNC_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
@@ -101,12 +101,12 @@ def get_or_create_session(user_id: int) -> str:
     return session_id
 
 
-def chat_with_session(user_id: int, message: str) -> dict:
+def chat_with_session(user_id: int, message: str, base_url: str, model: str) -> dict:
     session_id = get_stored_session(user_id)
     try:
-        result = chat(message, session=session_id)
+        result = chat(message, base_url, model, session=session_id)
     except SessionNotFoundError:
-        result = chat(message, session=None)  # сервер сам создаст новую сессию
+        result = chat(message, base_url, model, session=None)  # сервер сам создаст новую сессию
 
     new_session_id = result.get("session_id")
     if new_session_id and new_session_id != session_id:
@@ -116,7 +116,7 @@ def chat_with_session(user_id: int, message: str) -> dict:
 
 # --- 1. ingest: forward incoming messages, just to confirm them ------------
 
-def ingest_incoming() -> None:
+def ingest_incoming(base_url: str, model: str) -> None:
     incoming = pull_incoming()
     confirmed_ids = []
 
@@ -124,7 +124,7 @@ def ingest_incoming() -> None:
         user_id = message["user_id"]
 
         try:
-            chat_with_session(user_id, message["text"])
+            chat_with_session(user_id, message["text"], base_url, model)
         except httpx.HTTPError as exc:
             print(f"ingest failed for incoming id={message['id']}: {exc!r}")
             continue
@@ -145,11 +145,11 @@ def _parse_lines(text: str) -> list[str]:
     return lines
 
 
-def refresh_pool(user_id: int, category: str) -> None:
+def refresh_pool(user_id: int, category: str, base_url: str, model: str) -> None:
     prompt = PROMPTS[category].format(n=POOL_REFRESH_COUNT)
 
     try:
-        result = chat(prompt, session=None)
+        result = chat(prompt, base_url, model, session=None)
     except httpx.HTTPError as exc:
         print(f"pool refresh failed for user={user_id} category={category}: {exc!r}")
         return
@@ -158,15 +158,16 @@ def refresh_pool(user_id: int, category: str) -> None:
     push_outgoing(user_id, category, candidates)
 
 
-def refresh_all_pools() -> None:
+def refresh_all_pools(base_url: str, model: str) -> None:
     for user_id in ALLOWED_CHAT_IDS:
         for category in ("reply", "question"):
-            refresh_pool(user_id, category)
+            refresh_pool(user_id, category, base_url, model)
 
 
 def run() -> None:
-    ingest_incoming()
-    refresh_all_pools()
+    base_url, model = get_active_endpoint()
+    ingest_incoming(base_url, model)
+    refresh_all_pools(base_url, model)
 
 
 if __name__ == "__main__":

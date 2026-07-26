@@ -19,7 +19,9 @@
            "session": <optional session_id>}
     resp: {"response": str, "session_id": str, "model": str}
 
-    base_url/model come from GET /api/models above, every call. api_key is
+    base_url/model are resolved once per sync.py run (via get_active_endpoint()
+    in run()) and passed into chat() as arguments — they don't change mid-run,
+    so there's no need to re-call GET /api/models per message. api_key is
     NOT discoverable that way (Odysseus doesn't expose it, by design) — set
     it in .env yourself for whichever provider is actually configured
     (Mistral, Yandex, ...). If the endpoint's own Admin-configured api_key
@@ -73,9 +75,7 @@ def get_active_endpoint() -> tuple[str, str]:
     return item["url"], models[0]
 
 
-def chat(message: str, session: str | None = None) -> dict:
-    base_url, model = get_active_endpoint()
-
+def chat(message: str, base_url: str, model: str, session: str | None = None) -> dict:
     payload = {"message": message, "base_url": base_url, "model": model}
     if LLM_API_KEY:
         payload["api_key"] = LLM_API_KEY

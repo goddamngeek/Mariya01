@@ -1,15 +1,29 @@
-"""Real Odysseus client. Chat contract confirmed manually:
+"""Real Odysseus client. Contracts confirmed manually:
+
+  GET {ODYSSEUS_URL}/api/models
+    header: Authorization: Bearer <ODYSSEUS_TOKEN>
+    resp: {"hosts": [...], "items": [{"url": str, "models": [str, ...],
+           "endpoint_id": str, "endpoint_name": str, ...}, ...]}
+    "url" is already the full chat-completions URL (build_chat_url() applied
+    server-side), not a bare base — but /api/v1/chat's own base_url handling
+    strips that suffix back off (normalize_base()), so passing it straight
+    through as base_url works either way. Used to auto-discover which
+    base_url/model to use from whatever endpoint is currently enabled in
+    Odysseus's own Admin -> Model Endpoints, so nothing here has to change
+    by hand when that's reconfigured in the UI.
 
   POST {ODYSSEUS_URL}/api/v1/chat
     header: Authorization: Bearer <ODYSSEUS_TOKEN>
-    body: {"message": str, "session": <optional session_id>}
+    body: {"message": str, "base_url": str, "model": str,
+           "api_key": <LLM_API_KEY, omitted if unset>,
+           "session": <optional session_id>}
     resp: {"response": str, "session_id": str, "model": str}
 
-  The bot sends no provider-specific fields (api_key, base_url, provider,
-  model) — Odysseus's own webhook_routes.py (sync_chat, "Case 3") falls
-  back to the first enabled ModelEndpoint configured in its own Admin UI
-  (Admin -> Model Endpoints) whenever the request has no api_key, so
-  Odysseus alone decides which provider/model to use.
+    base_url/model come from GET /api/models above, every call. api_key is
+    NOT discoverable that way (Odysseus doesn't expose it, by design) — set
+    it in .env yourself for whichever provider is actually configured
+    (Mistral, Yandex, ...). If the endpoint's own Admin-configured api_key
+    is enough, leave LLM_API_KEY unset.
 
   POST {ODYSSEUS_URL}/api/session
     header: Authorization: Bearer <ODYSSEUS_TOKEN>
@@ -17,10 +31,8 @@
     resp: assumed to contain the new session id under "session_id" or "id" —
     NOT manually confirmed like /api/v1/chat was; verify against the real
     response and adjust create_session() below if the key differs.
-    (endpoint_url/model/skip_validation are required — without them Odysseus
-    responds 400, confirmed manually.)
-    Unused in the current flow — Odysseus creates sessions itself via the
-    Case 3 fallback above. Kept for potential future use.
+    Unused in the current flow — Odysseus creates sessions itself via
+    /api/v1/chat's own session handling. Kept for potential future use.
 
 Session ids live in the bot's registered_users table (fetched/stored via the
 bot's /sync/session endpoints), not locally — so the same conversation
@@ -33,6 +45,7 @@ import httpx
 
 ODYSSEUS_URL = os.environ.get("ODYSSEUS_URL", "http://localhost:7860")
 ODYSSEUS_TOKEN = os.environ.get("ODYSSEUS_TOKEN", "")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 
 _AUTH_HEADERS = {"Authorization": f"Bearer {ODYSSEUS_TOKEN}"}
 
@@ -41,8 +54,31 @@ class SessionNotFoundError(Exception):
     pass
 
 
+def get_active_endpoint() -> tuple[str, str]:
+    """Auto-discover (base_url, model) from whatever's enabled right now in
+    Odysseus's Admin -> Model Endpoints, via GET /api/models."""
+    resp = httpx.get(f"{ODYSSEUS_URL}/api/models", headers=_AUTH_HEADERS, timeout=15)
+    resp.raise_for_status()
+    items = resp.json().get("items") or []
+    if not items:
+        raise RuntimeError("GET /api/models returned no endpoints — configure one in Odysseus Admin")
+
+    item = items[0]
+    models = item.get("models") or []
+    if not models:
+        raise RuntimeError(
+            f"Endpoint {item.get('endpoint_name')!r} has no available models (GET /api/models)"
+        )
+
+    return item["url"], models[0]
+
+
 def chat(message: str, session: str | None = None) -> dict:
-    payload = {"message": message}
+    base_url, model = get_active_endpoint()
+
+    payload = {"message": message, "base_url": base_url, "model": model}
+    if LLM_API_KEY:
+        payload["api_key"] = LLM_API_KEY
     if session is not None:
         payload["session"] = session
 
@@ -58,12 +94,11 @@ def chat(message: str, session: str | None = None) -> dict:
 
 
 def create_session(name: str) -> str:
+    base_url, model = get_active_endpoint()
     payload = {
         "name": name,
-        "endpoint_url": os.environ.get(
-            "MISTRAL_BASE_URL", "https://api.mistral.ai/v1/chat/completions"
-        ),
-        "model": os.environ.get("MISTRAL_MODEL", "mistral-large-latest"),
+        "endpoint_url": base_url,
+        "model": model,
         "skip_validation": True,
     }
     resp = httpx.post(

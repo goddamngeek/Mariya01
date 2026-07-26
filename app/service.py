@@ -1,3 +1,5 @@
+import traceback
+
 from app.config import OUTGOING_DEDUP_DAYS
 from app.db import (
     close_question,
@@ -6,7 +8,7 @@ from app.db import (
     mark_reply_sent,
     pick_outgoing_message,
 )
-from app.telegram import send_message_debug
+from app.telegram import send_message
 
 
 async def process_incoming_message(user_id: int, text: str) -> None:
@@ -22,16 +24,16 @@ async def process_incoming_message(user_id: int, text: str) -> None:
 async def _send_reply(user_id: int) -> None:
     try:
         reply = await pick_outgoing_message("reply", OUTGOING_DEDUP_DAYS, user_id)
-        print(
-            "pick_outgoing_message(reply) ->",
-            {"id": reply["id"], "text": reply["text"]} if reply is not None else None,
-        )
         if reply is None:
             return
 
-        ok, status_code, response_text = await send_message_debug(user_id, reply["text"])
-        print(f"telegram send status={status_code} response={response_text}")
-        if ok:
+        if await send_message(user_id, reply["text"]):
             await mark_reply_sent(reply["id"])
-    except Exception as e:
-        print(f"REPLY ERROR: {repr(e)}", flush=True)
+        else:
+            print(f"failed to send reply id={reply['id']} user={user_id}", flush=True)
+    except Exception:
+        # A bug here must not turn into a webhook 500 — Telegram retries
+        # failed webhook deliveries, which would re-run process_incoming_message
+        # and re-insert the same incoming message. Print the full traceback
+        # (not just the exception) so a real bug is still diagnosable.
+        traceback.print_exc()

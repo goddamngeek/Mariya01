@@ -1,10 +1,6 @@
-import logging
-
 import httpx
 
 from app.config import TELEGRAM_BOT_TOKEN
-
-logger = logging.getLogger("queue_bot.telegram")
 
 
 async def send_message(chat_id: int | str, text: str) -> bool:
@@ -16,21 +12,8 @@ async def send_message(chat_id: int | str, text: str) -> bool:
             resp.raise_for_status()
         return True
     except httpx.HTTPError as exc:
-        logger.warning("telegram sendMessage failed: %s", exc)
+        print(f"telegram sendMessage failed: {exc}", flush=True)
         return False
-
-
-async def send_message_debug(chat_id: int | str, text: str) -> tuple[bool, int | None, str]:
-    """Temporary variant of send_message() that also returns the raw
-    Telegram API response for debug logging. Remove once debugging is done."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json={"chat_id": chat_id, "text": text})
-            return resp.status_code < 400, resp.status_code, resp.text
-    except httpx.HTTPError as exc:
-        logger.warning("telegram sendMessage failed: %s", exc)
-        return False, None, str(exc)
 
 
 async def send_message_with_button(
@@ -51,7 +34,7 @@ async def send_message_with_button(
             resp.raise_for_status()
         return True
     except httpx.HTTPError as exc:
-        logger.warning("telegram sendMessage (with button) failed: %s", exc)
+        print(f"telegram sendMessage (with button) failed: {exc}", flush=True)
         return False
 
 
@@ -63,5 +46,5 @@ async def answer_callback_query(callback_query_id: str) -> bool:
             resp.raise_for_status()
         return True
     except httpx.HTTPError as exc:
-        logger.warning("telegram answerCallbackQuery failed: %s", exc)
+        print(f"telegram answerCallbackQuery failed: {exc}", flush=True)
         return False

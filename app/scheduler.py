@@ -1,4 +1,3 @@
-import logging
 import random
 from datetime import datetime, timedelta
 
@@ -19,8 +18,6 @@ from app.db import (
     pick_outgoing_message,
 )
 from app.telegram import send_message_with_button
-
-logger = logging.getLogger("queue_bot.scheduler")
 
 DEFER_BUTTON_TEXT = "Спросить позже"
 
@@ -51,22 +48,20 @@ async def _send_question(user_id: int, question) -> None:
     ):
         await mark_question_sent(question["id"])
     else:
-        logger.warning(
-            "failed to send question id=%s user=%s, will retry", question["id"], user_id
-        )
+        print(f"failed to send question id={question['id']} user={user_id}, will retry", flush=True)
 
 
 async def send_daily_question(user_id: int) -> None:
     if await has_pending_question(user_id):
-        logger.info(
-            "user=%s already has a question in flight (open or deferred), skipping today",
-            user_id,
+        print(
+            f"user={user_id} already has a question in flight (open or deferred), skipping today",
+            flush=True,
         )
         return
 
     question = await pick_outgoing_message("question", OUTGOING_DEDUP_DAYS, user_id)
     if question is None:
-        logger.info("no question available for user=%s today", user_id)
+        print(f"no question available for user={user_id} today", flush=True)
         return
 
     await _send_question(user_id, question)
@@ -86,7 +81,7 @@ async def schedule_today_question() -> None:
             id=f"daily_question_today_{user_id}",
             replace_existing=True,
         )
-        logger.info("scheduled today's question for user=%s at %s", user_id, run_date.isoformat())
+        print(f"scheduled today's question for user={user_id} at {run_date.isoformat()}", flush=True)
 
 
 async def release_due_questions() -> None:

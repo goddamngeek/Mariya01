@@ -5,9 +5,11 @@ Two independent mechanisms:
   1. Ingest — forward each unconfirmed incoming message to Odysseus so it
      can process/remember it. The response text is discarded; a successful
      call just confirms the incoming message. Each user_id has a persistent
-     Odysseus session (created once via /api/session, stored in the bot's
-     registered_users table, reused for every later message) so their whole
-     conversation stays in one chat visible in Odysseus's own UI.
+     Odysseus session — the bot's registered_users table stores whatever
+     session_id Odysseus hands back, and it's reused for every later message
+     (Odysseus provisions the session itself on first contact, see
+     odysseus_client.chat()) — so their whole conversation stays in one chat
+     visible in Odysseus's own UI.
   2. Pool refresh — unrelated to any specific incoming message. Periodically
      asks Odysseus (stateless, no session) to generate a batch of
      question/reply candidates and pushes them.
@@ -28,7 +30,7 @@ import re
 
 import httpx
 
-from odysseus_client import SessionNotFoundError, chat, create_session, get_active_endpoint
+from odysseus_client import SessionNotFoundError, chat, get_active_endpoint
 
 BOT_URL = os.environ.get("BOT_URL", "http://localhost:8000")
 BOT_SYNC_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
@@ -83,22 +85,6 @@ def store_session(user_id: int, session_id: str) -> None:
         timeout=10,
     )
     resp.raise_for_status()
-
-
-def get_or_create_session(user_id: int) -> str:
-    session_id = get_stored_session(user_id)
-    print(f"[DEBUG] stored session: {session_id}")
-
-    if session_id:
-        return session_id
-
-    session_id = create_session(f"Telegram — {user_id}")
-    print(f"[DEBUG] created session: {session_id}")
-
-    store_session(user_id, session_id)
-    print("[DEBUG] stored on bot")
-
-    return session_id
 
 
 def chat_with_session(user_id: int, message: str, base_url: str, model: str) -> dict:

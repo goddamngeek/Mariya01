@@ -7,6 +7,14 @@ TIMEZONE = ZoneInfo("Europe/Moscow")
 PROACTIVE_WINDOW_START = time(17, 0)
 PROACTIVE_WINDOW_END = time(19, 0)
 
+WATER_REMINDER_WINDOWS = [
+    (time(10, 0), time(12, 0)),
+    (time(12, 0), time(15, 0)),
+    (time(15, 0), time(18, 0)),
+    (time(18, 0), time(22, 0)),
+]
+WATER_REMINDER_TEXT = "Не забудь попить воды 💧"
+
 DEFERRAL_DELAY_HOURS = 1
 MAX_DEFERRALS = 2
 OUTGOING_DEDUP_DAYS = 3

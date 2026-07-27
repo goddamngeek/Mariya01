@@ -1,5 +1,5 @@
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -9,6 +9,8 @@ from app.config import (
     PROACTIVE_WINDOW_END,
     PROACTIVE_WINDOW_START,
     TIMEZONE,
+    WATER_REMINDER_TEXT,
+    WATER_REMINDER_WINDOWS,
 )
 from app.db import (
     get_due_deferred_questions,
@@ -18,29 +20,23 @@ from app.db import (
     pick_outgoing_message,
 )
 from app.ingest import ingest_incoming
-from app.telegram import send_message_with_button
+from app.telegram import send_message, send_message_with_button
 
 DEFER_BUTTON_TEXT = "Спросить позже"
 
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 
-def _random_time_today() -> datetime:
+def _random_time_in_window(start: time, end: time) -> datetime:
     now = datetime.now(TIMEZONE)
-    start = now.replace(
-        hour=PROACTIVE_WINDOW_START.hour,
-        minute=PROACTIVE_WINDOW_START.minute,
-        second=0,
-        microsecond=0,
-    )
-    end = now.replace(
-        hour=PROACTIVE_WINDOW_END.hour,
-        minute=PROACTIVE_WINDOW_END.minute,
-        second=0,
-        microsecond=0,
-    )
-    window_seconds = int((end - start).total_seconds())
-    return start + timedelta(seconds=random.randint(0, window_seconds))
+    start_dt = now.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
+    end_dt = now.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+    window_seconds = int((end_dt - start_dt).total_seconds())
+    return start_dt + timedelta(seconds=random.randint(0, window_seconds))
+
+
+def _random_time_today() -> datetime:
+    return _random_time_in_window(PROACTIVE_WINDOW_START, PROACTIVE_WINDOW_END)
 
 
 async def _send_question(user_id: int, question) -> None:
@@ -90,11 +86,42 @@ async def release_due_questions() -> None:
         await _send_question(row["user_id"], row)
 
 
+async def send_water_reminder(user_id: int) -> None:
+    if not await send_message(user_id, WATER_REMINDER_TEXT):
+        print(f"failed to send water reminder to user={user_id}", flush=True)
+
+
+async def schedule_today_water_reminders() -> None:
+    now = datetime.now(TIMEZONE)
+    for user_id in await get_registered_user_ids():
+        for i, (start, end) in enumerate(WATER_REMINDER_WINDOWS):
+            run_date = _random_time_in_window(start, end)
+            if run_date <= now:
+                continue
+            scheduler.add_job(
+                send_water_reminder,
+                trigger="date",
+                run_date=run_date,
+                args=[user_id],
+                id=f"water_reminder_{user_id}_{i}",
+                replace_existing=True,
+            )
+            print(
+                f"scheduled water reminder #{i} for user={user_id} at {run_date.isoformat()}",
+                flush=True,
+            )
+
+
 async def start_scheduler() -> None:
     scheduler.add_job(
         schedule_today_question,
         trigger=CronTrigger(hour=0, minute=5, timezone=TIMEZONE),
         id="schedule_daily_question",
+    )
+    scheduler.add_job(
+        schedule_today_water_reminders,
+        trigger=CronTrigger(hour=0, minute=5, timezone=TIMEZONE),
+        id="schedule_daily_water_reminders",
     )
     scheduler.add_job(
         release_due_questions,
@@ -110,3 +137,4 @@ async def start_scheduler() -> None:
     )
     scheduler.start()
     await schedule_today_question()
+    await schedule_today_water_reminders()

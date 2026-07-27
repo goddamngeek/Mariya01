@@ -1,18 +1,13 @@
 """Runs on the Mac (cron/launchd). Bridges the bot's sync API and the real
 Odysseus chat service (see odysseus_client.py for the confirmed contract).
 
-Two independent mechanisms:
-  1. Ingest — forward each unconfirmed incoming message to Odysseus so it
-     can process/remember it. The response text is discarded; a successful
-     call just confirms the incoming message. Each user_id has a persistent
-     Odysseus session — the bot's registered_users table stores whatever
-     session_id Odysseus hands back, and it's reused for every later message
-     (Odysseus provisions the session itself on first contact, see
-     odysseus_client.chat()) — so their whole conversation stays in one chat
-     visible in Odysseus's own UI.
-  2. Pool refresh — unrelated to any specific incoming message. Periodically
-     asks Odysseus (stateless, no session) to generate a batch of
-     question/reply candidates and pushes them.
+Ingest — forward each unconfirmed incoming message to Odysseus so it can
+process/remember it. The response text is discarded; a successful call just
+confirms the incoming message. Each user_id has a persistent Odysseus
+session — the bot's registered_users table stores whatever session_id
+Odysseus hands back, and it's reused for every later message (Odysseus
+provisions the session itself on first contact, see odysseus_client.chat())
+— so their whole conversation stays in one chat visible in Odysseus's own UI.
 """
 
 from pathlib import Path
@@ -26,7 +21,6 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import os
-import re
 
 import httpx
 
@@ -34,18 +28,8 @@ from odysseus_client import SessionNotFoundError, chat, get_active_endpoint
 
 BOT_URL = os.environ.get("BOT_URL", "http://localhost:8000")
 BOT_SYNC_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
-ALLOWED_CHAT_IDS = [int(x) for x in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if x.strip()]
 
 HEADERS = {"Authorization": f"Bearer {BOT_SYNC_TOKEN}"}
-
-POOL_REFRESH_COUNT = 5
-
-PROMPTS = {
-    "reply": "Сгенерируй {n} коротких подтверждений, без повторов, нейтральным стилем.",
-    "question": "Сгенерируй {n} коротких вопросов о том, как прошёл день, без повторов, нейтральным стилем.",
-}
-
-_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*•]|\d+[.\)])\s*")
 
 
 def pull_incoming() -> list[dict]:
@@ -58,14 +42,6 @@ def ack(ids: list[int]) -> None:
     if not ids:
         return
     resp = httpx.post(f"{BOT_URL}/sync/ack", headers=HEADERS, json={"ids": ids}, timeout=10)
-    resp.raise_for_status()
-
-
-def push_outgoing(user_id: int, category: str, texts: list[str]) -> None:
-    items = [{"user_id": user_id, "category": category, "text": t} for t in texts]
-    if not items:
-        return
-    resp = httpx.post(f"{BOT_URL}/sync/push", headers=HEADERS, json={"items": items}, timeout=10)
     resp.raise_for_status()
 
 
@@ -100,8 +76,6 @@ def chat_with_session(user_id: int, message: str, base_url: str, model: str) -> 
     return result
 
 
-# --- 1. ingest: forward incoming messages, just to confirm them ------------
-
 def ingest_incoming(base_url: str, model: str) -> None:
     incoming = pull_incoming()
     confirmed_ids = []
@@ -120,40 +94,9 @@ def ingest_incoming(base_url: str, model: str) -> None:
     ack(confirmed_ids)
 
 
-# --- 2. pool refresh: independent, generates new question/reply candidates -
-
-def _parse_lines(text: str) -> list[str]:
-    lines = []
-    for raw_line in text.splitlines():
-        line = _LIST_MARKER_RE.sub("", raw_line).strip()
-        if line:
-            lines.append(line)
-    return lines
-
-
-def refresh_pool(user_id: int, category: str, base_url: str, model: str) -> None:
-    prompt = PROMPTS[category].format(n=POOL_REFRESH_COUNT)
-
-    try:
-        result = chat(prompt, base_url, model, session=None)
-    except httpx.HTTPError as exc:
-        print(f"pool refresh failed for user={user_id} category={category}: {exc!r}")
-        return
-
-    candidates = _parse_lines(result["response"])
-    push_outgoing(user_id, category, candidates)
-
-
-def refresh_all_pools(base_url: str, model: str) -> None:
-    for user_id in ALLOWED_CHAT_IDS:
-        for category in ("reply", "question"):
-            refresh_pool(user_id, category, base_url, model)
-
-
 def run() -> None:
     base_url, model = get_active_endpoint()
     ingest_incoming(base_url, model)
-    refresh_all_pools(base_url, model)
 
 
 if __name__ == "__main__":

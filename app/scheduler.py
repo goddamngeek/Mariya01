@@ -9,7 +9,7 @@ from app.config import (
     PROACTIVE_WINDOW_END,
     PROACTIVE_WINDOW_START,
     TIMEZONE,
-    WATER_REMINDER_TEXT,
+    WATER_REMINDER_TEXTS,
     WATER_REMINDER_WINDOWS,
 )
 from app.db import (
@@ -87,7 +87,8 @@ async def release_due_questions() -> None:
 
 
 async def send_water_reminder(user_id: int) -> None:
-    if not await send_message(user_id, WATER_REMINDER_TEXT):
+    text = random.choice(WATER_REMINDER_TEXTS)
+    if not await send_message(user_id, text):
         print(f"failed to send water reminder to user={user_id}", flush=True)
 
 

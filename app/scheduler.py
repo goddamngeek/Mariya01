@@ -17,6 +17,7 @@ from app.db import (
     mark_question_sent,
     pick_outgoing_message,
 )
+from app.ingest import ingest_incoming
 from app.telegram import send_message_with_button
 
 DEFER_BUTTON_TEXT = "Спросить позже"
@@ -100,6 +101,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_due_questions",
+    )
+    scheduler.add_job(
+        ingest_incoming,
+        trigger="interval",
+        seconds=60,
+        id="ingest_incoming_to_odysseus",
     )
     scheduler.start()
     await schedule_today_question()

@@ -17,3 +17,7 @@ DATABASE_URL = os.environ.get(
 )
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 SYNC_BEARER_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
+
+ODYSSEUS_URL = os.environ.get("ODYSSEUS_URL", "")
+ODYSSEUS_TOKEN = os.environ.get("ODYSSEUS_TOKEN", "")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")

@@ -1,23 +1,29 @@
-"""Periodic job (see scheduler.py): forward each unconfirmed incoming
-message to Odysseus so it can process/remember it. Ported from
-mac_sync/sync.py's ingest mechanism — this version calls the bot's own db.py
-directly instead of going over HTTP to its own /sync/* endpoints, since it
-now runs inside the same process. The /sync/* endpoints stay for external/
-manual use (see app/sync.py), just no longer self-called from here.
+"""Periodic job (see scheduler.py): forward each unconfirmed PASSIVE incoming
+message to Odysseus so it can analyze/log it. Ported from mac_sync/sync.py's
+ingest mechanism — this version calls the bot's own db.py directly instead of
+going over HTTP to its own /sync/* endpoints, since it now runs inside the
+same process. The /sync/* endpoints stay for external/manual use (see
+app/sync.py), just no longer self-called from here.
+
+ACTIVE messages (real questions) are handled separately and immediately —
+see handle_active_message(), called straight from app/service.py rather than
+waiting for this poll — so this module only ever processes kind='passive'.
 """
 
+import traceback
 from datetime import datetime
 
 import httpx
 
-from app.config import TIMEZONE, USER_NAMES
+from app.config import INGEST_PROMPT_TEMPLATE, TIMEZONE, USER_NAMES
 from app.db import (
     ack_incoming_messages,
     get_odysseus_session_id,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
 )
-from app.odysseus_client import SessionNotFoundError, chat, get_active_endpoint
+from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint
+from app.telegram import send_message
 
 
 def _tag_message(user_id: int, text: str, received_at: datetime) -> str:
@@ -26,12 +32,19 @@ def _tag_message(user_id: int, text: str, received_at: datetime) -> str:
     return f"[{name} {local_time.strftime('%d.%m.%Y %H:%M')} МСК] {text}"
 
 
-async def _chat_with_session(user_id: int, message: str, base_url: str, model: str) -> dict:
+def _build_prompt(user_id: int, kind: str) -> str:
+    name = USER_NAMES.get(user_id, str(user_id))
+    return INGEST_PROMPT_TEMPLATE.replace("__NAME__", name).replace("__KIND__", kind)
+
+
+async def _chat_with_session(
+    user_id: int, message: str, base_url: str, model: str, system_prompt: str
+) -> dict:
     session_id = await get_odysseus_session_id(user_id)
     try:
-        result = await chat(message, base_url, model, session=session_id)
+        result = await agent_chat(message, base_url, model, session=session_id, system_prompt=system_prompt)
     except SessionNotFoundError:
-        result = await chat(message, base_url, model, session=None)  # сервер сам создаст новую сессию
+        result = await agent_chat(message, base_url, model, session=None, system_prompt=system_prompt)
 
     new_session_id = result.get("session_id")
     if new_session_id and new_session_id != session_id:
@@ -40,7 +53,7 @@ async def _chat_with_session(user_id: int, message: str, base_url: str, model: s
 
 
 async def ingest_incoming() -> None:
-    incoming = await pull_unconfirmed_incoming()
+    incoming = [m for m in await pull_unconfirmed_incoming() if m["kind"] == "passive"]
     if not incoming:
         return
 
@@ -50,7 +63,8 @@ async def ingest_incoming() -> None:
     for message in incoming:
         try:
             tagged_text = _tag_message(message["user_id"], message["text"], message["created_at"])
-            await _chat_with_session(message["user_id"], tagged_text, base_url, model)
+            system_prompt = _build_prompt(message["user_id"], "пассивное")
+            await _chat_with_session(message["user_id"], tagged_text, base_url, model, system_prompt)
         except httpx.HTTPError as exc:
             print(f"ingest failed for incoming id={message['id']}: {exc!r}", flush=True)
             continue
@@ -58,3 +72,23 @@ async def ingest_incoming() -> None:
         confirmed_ids.append(message["id"])
 
     await ack_incoming_messages(confirmed_ids)
+
+
+async def handle_active_message(message_id: int, user_id: int, text: str, received_at: datetime) -> None:
+    """Answer a real question right away — called as a fire-and-forget task
+    from app/service.py as soon as the webhook receives it, not from the 60s
+    ingest_incoming() poll, since a real answer shouldn't wait up to a minute."""
+    try:
+        base_url, model = await get_active_endpoint()
+        tagged_text = _tag_message(user_id, text, received_at)
+        system_prompt = _build_prompt(user_id, "активное")
+        result = await _chat_with_session(user_id, tagged_text, base_url, model, system_prompt)
+
+        answer = (result.get("response") or "").strip()
+        if answer and not await send_message(user_id, answer):
+            print(f"failed to deliver active answer to user={user_id}", flush=True)
+
+        await ack_incoming_messages([message_id])
+    except Exception:
+        print(f"handle_active_message failed for incoming id={message_id}:", flush=True)
+        traceback.print_exc()

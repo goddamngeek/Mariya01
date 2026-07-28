@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS incoming_messages (
     user_id BIGINT NOT NULL,
     text TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    confirmed_at TIMESTAMPTZ
+    confirmed_at TIMESTAMPTZ,
+    kind TEXT NOT NULL DEFAULT 'passive'
 );
 
 CREATE TABLE IF NOT EXISTS outgoing_messages (
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS registered_users (
 );
 
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
+ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 """
 
 SEED_QUESTIONS = [
@@ -139,19 +141,19 @@ async def set_odysseus_session_id(chat_id: int, session_id: str) -> None:
 
 # --- incoming messages -----------------------------------------------------
 
-async def insert_incoming_message(user_id: int, text: str) -> int:
+async def insert_incoming_message(user_id: int, text: str, kind: str = "passive") -> int:
     pool = await get_pool()
     return await pool.fetchval(
-        "INSERT INTO incoming_messages (user_id, text, created_at) VALUES ($1, $2, $3) "
+        "INSERT INTO incoming_messages (user_id, text, created_at, kind) VALUES ($1, $2, $3, $4) "
         "RETURNING id",
-        user_id, text, utcnow(),
+        user_id, text, utcnow(), kind,
     )
 
 
 async def pull_unconfirmed_incoming() -> list[asyncpg.Record]:
     pool = await get_pool()
     return await pool.fetch(
-        "SELECT id, user_id, text, created_at FROM incoming_messages "
+        "SELECT id, user_id, text, created_at, kind FROM incoming_messages "
         "WHERE confirmed_at IS NULL ORDER BY id"
     )
 

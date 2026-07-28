@@ -4,19 +4,21 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from app.config import SYNC_BEARER_TOKEN, TIMEZONE
+from app.config import OUTGOING_DEDUP_DAYS, SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
     claim_reminder,
     get_odysseus_session_id,
     insert_outgoing_messages,
     insert_reminder,
+    pick_outgoing_message,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
     utcnow,
 )
 from app.people import NAME_TO_USER_ID
 from app.reminders import deliver_reminder
+from app.scheduler import _send_question
 
 router = APIRouter(prefix="/sync")
 
@@ -119,3 +121,19 @@ async def schedule_reminder(body: ScheduleReminderRequest):
         await deliver_reminder(reminder_id, sender_id, target_id, body.message)
 
     return {"ok": True, "id": reminder_id}
+
+
+class ResendQuestionRequest(BaseModel):
+    user_id: int
+
+
+@router.post("/resend_question", dependencies=[Depends(require_bearer)])
+async def resend_question(body: ResendQuestionRequest):
+    """Manual on-demand trigger, reusing the exact same code path as the
+    00:05 MSK daily job — for testing the passive-message flow without
+    waiting for the scheduled time."""
+    question = await pick_outgoing_message("question", OUTGOING_DEDUP_DAYS, body.user_id)
+    if question is None:
+        raise HTTPException(404, "no question available for this user right now")
+    await _send_question(body.user_id, question)
+    return {"ok": True, "question_id": question["id"]}

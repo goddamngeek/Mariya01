@@ -81,12 +81,22 @@ async def ingest_incoming() -> None:
             # Every passive message must end in a trilium_notes append per
             # INGEST_PROMPT_TEMPLATE's passive branch — never optional here,
             # unlike handle_active_message() below which covers general Q&A too.
-            await _chat_with_session(
+            result = await _chat_with_session(
                 message["user_id"], tagged_text, base_url, model, system_prompt,
                 require_tool=True,
             )
-        except Exception as exc:
-            print(f"ingest failed for incoming id={message['id']}: {exc!r}", flush=True)
+            # forced_fallback is only present when the model never called a
+            # tool even after correction; False means the deterministic
+            # fallback in Odysseus ALSO couldn't act (unexpected message
+            # shape) — nothing was actually logged despite the HTTP 200, so
+            # this must not be acked, or the message is lost for good.
+            if result.get("forced_fallback") is False:
+                print(f"ingest: nothing was logged for incoming id={message['id']} "
+                      f"(require_tool fallback failed) — will retry", flush=True)
+                continue
+        except Exception:
+            print(f"ingest failed for incoming id={message['id']}:", flush=True)
+            traceback.print_exc()
             continue
 
         confirmed_ids.append(message["id"])

@@ -13,6 +13,11 @@ from app.db import (
 from app.ingest import handle_active_message
 from app.telegram import send_message
 
+# asyncio only holds a weak reference to a task with no other referrer, so an
+# unreferenced fire-and-forget task is eligible for GC before it completes
+# (documented asyncio behavior) — keep a strong reference here until it's done.
+_background_tasks: set[asyncio.Task] = set()
+
 
 async def process_incoming_message(user_id: int, text: str) -> None:
     # A pending question at arrival time means this message is the user's
@@ -31,7 +36,9 @@ async def process_incoming_message(user_id: int, text: str) -> None:
         # A real, formulated answer is coming from Odysseus shortly — the
         # generic pool "reply" (принял / понял, разберусь) would just be
         # redundant noise ahead of it.
-        asyncio.create_task(handle_active_message(message_id, user_id, text, received_at))
+        task = asyncio.create_task(handle_active_message(message_id, user_id, text, received_at))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
     else:
         await _send_reply(user_id)
 

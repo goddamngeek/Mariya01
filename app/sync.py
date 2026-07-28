@@ -8,7 +8,10 @@ from app.config import OUTGOING_DEDUP_DAYS, SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
     claim_reminder,
+    close_question,
+    count_open_questions,
     get_odysseus_session_id,
+    get_open_question,
     insert_outgoing_messages,
     insert_reminder,
     pick_outgoing_message,
@@ -132,12 +135,30 @@ class ResendQuestionRequest(BaseModel):
 async def resend_question(body: ResendQuestionRequest):
     """Manual on-demand trigger, reusing the exact same code path as the
     00:05 MSK daily job — for testing the passive-message flow without
-    waiting for the scheduled time."""
+    waiting for the scheduled time. Unlike send_daily_question(), this isn't
+    gated by has_pending_question() (the whole point is to bypass the
+    schedule) — so it must close any question already open for this user
+    itself, or that older row would never get closed by anything and
+    has_pending_question() would silently block every future daily question
+    for them forever."""
+    existing = await get_open_question(body.user_id)
+    if existing is not None:
+        await close_question(existing["id"])
+
     question = await pick_outgoing_message("question", OUTGOING_DEDUP_DAYS, body.user_id)
     if question is None:
         raise HTTPException(404, "no question available for this user right now")
     await _send_question(body.user_id, question)
     return {"ok": True, "question_id": question["id"]}
+
+
+@router.get("/open_questions", dependencies=[Depends(require_bearer)])
+async def open_questions():
+    """Diagnostic: count of currently-open questions per known user. Should
+    always be 0 or 1 — anything higher means has_pending_question() will
+    silently block that user's daily question forever (see resend_question's
+    docstring)."""
+    return {name: await count_open_questions(uid) for name, uid in NAME_TO_USER_ID.items()}
 
 
 class ReprocessActiveRequest(BaseModel):

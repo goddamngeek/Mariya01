@@ -207,6 +207,15 @@ async def get_outgoing_by_id(message_id: int) -> asyncpg.Record | None:
     return await pool.fetchrow("SELECT * FROM outgoing_messages WHERE id = $1", message_id)
 
 
+async def count_open_questions(user_id: int) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT COUNT(*) FROM outgoing_messages WHERE category = 'question' "
+        "AND user_id = $1 AND is_open = TRUE",
+        user_id,
+    )
+
+
 async def close_question(question_id: int) -> None:
     pool = await get_pool()
     await pool.execute(

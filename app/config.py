@@ -9,9 +9,9 @@ PROACTIVE_WINDOW_END = time(19, 0)
 
 WATER_REMINDER_WINDOWS = [
     (time(10, 0), time(12, 0)),
-    (time(12, 0), time(15, 0)),
-    (time(15, 0), time(18, 0)),
-    (time(18, 0), time(22, 0)),
+    (time(13, 0), time(15, 0)),
+    (time(16, 0), time(18, 0)),
+    (time(19, 0), time(22, 0)),
 ]
 WATER_REMINDER_TEXTS = [
     "Эй, а водичку сегодня пил?",

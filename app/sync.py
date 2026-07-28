@@ -16,6 +16,7 @@ from app.db import (
     set_odysseus_session_id,
     utcnow,
 )
+from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import deliver_reminder
 from app.scheduler import _send_question
@@ -137,3 +138,23 @@ async def resend_question(body: ResendQuestionRequest):
         raise HTTPException(404, "no question available for this user right now")
     await _send_question(body.user_id, question)
     return {"ok": True, "question_id": question["id"]}
+
+
+class ReprocessActiveRequest(BaseModel):
+    id: int
+
+
+@router.post("/reprocess_active", dependencies=[Depends(require_bearer)])
+async def reprocess_active(body: ReprocessActiveRequest):
+    """Re-run handle_active_message() for a still-unconfirmed incoming row —
+    for recovering an active message that failed before ever reaching
+    Odysseus (e.g. an outage), since unlike passive messages it isn't retried
+    by the 60s ingest poll. Looks the row up by id rather than trusting
+    caller-supplied text/user_id, so this can't be used to inject arbitrary
+    messages into the pipeline."""
+    rows = await pull_unconfirmed_incoming()
+    row = next((r for r in rows if r["id"] == body.id), None)
+    if row is None:
+        raise HTTPException(404, "no such unconfirmed message")
+    await handle_active_message(row["id"], row["user_id"], row["text"], row["created_at"])
+    return {"ok": True}

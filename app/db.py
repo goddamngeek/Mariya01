@@ -341,8 +341,15 @@ async def get_due_reminders() -> list[asyncpg.Record]:
     )
 
 
-async def mark_reminder_sent(reminder_id: int) -> None:
+async def claim_reminder(reminder_id: int) -> bool:
+    """Atomically mark a reminder as sent, but only if nobody has claimed it
+    yet. The immediate ("now") delivery check in app/sync.py and the 60s
+    release_due_reminders() poll can both see the same unsent row — this
+    single conditional UPDATE is what guarantees only one of them actually
+    sends it, instead of both racing past a separate read-then-write check."""
     pool = await get_pool()
-    await pool.execute(
-        "UPDATE reminders SET sent_at = $1 WHERE id = $2", utcnow(), reminder_id
+    result = await pool.fetchval(
+        "UPDATE reminders SET sent_at = $1 WHERE id = $2 AND sent_at IS NULL RETURNING id",
+        utcnow(), reminder_id,
     )
+    return result is not None

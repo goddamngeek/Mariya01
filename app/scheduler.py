@@ -14,12 +14,12 @@ from app.config import (
     format_reminder_message,
 )
 from app.db import (
+    claim_reminder,
     get_due_deferred_questions,
     get_due_reminders,
     get_registered_user_ids,
     has_pending_question,
     mark_question_sent,
-    mark_reminder_sent,
     pick_outgoing_message,
 )
 from app.ingest import ingest_incoming
@@ -91,11 +91,14 @@ async def release_due_questions() -> None:
 
 async def release_due_reminders() -> None:
     for row in await get_due_reminders():
+        # claim_reminder() is the atomic gate — if an immediate ("now")
+        # delivery in app/sync.py already claimed this row moments ago, we
+        # skip it here instead of sending it a second time.
+        if not await claim_reminder(row["id"]):
+            continue
         text = format_reminder_message(row["sender_chat_id"], row["target_chat_id"], row["message"])
-        if await send_message(row["target_chat_id"], text):
-            await mark_reminder_sent(row["id"])
-        else:
-            print(f"failed to send reminder id={row['id']}, will retry", flush=True)
+        if not await send_message(row["target_chat_id"], text):
+            print(f"failed to send reminder id={row['id']}", flush=True)
 
 
 async def send_water_reminder(user_id: int) -> None:

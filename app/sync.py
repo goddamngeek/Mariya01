@@ -7,10 +7,10 @@ from pydantic import BaseModel
 from app.config import NAME_TO_USER_ID, SYNC_BEARER_TOKEN, TIMEZONE, format_reminder_message
 from app.db import (
     ack_incoming_messages,
+    claim_reminder,
     get_odysseus_session_id,
     insert_outgoing_messages,
     insert_reminder,
-    mark_reminder_sent,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
     utcnow,
@@ -111,11 +111,12 @@ async def schedule_reminder(body: ScheduleReminderRequest):
     reminder_id = await insert_reminder(target_id, sender_id, body.message, run_at)
 
     # Due right now (or already past) — don't make the user wait for the next
-    # 60s poll tick; the scheduler's release_due_reminders() will simply find
-    # nothing left to do for this row once it's marked sent.
-    if run_at <= utcnow() + timedelta(seconds=30):
+    # 60s poll tick. claim_reminder() is the atomic gate: if release_due_
+    # reminders() happens to tick at the same moment and wins the claim first,
+    # we just skip — it's already being sent, no double delivery.
+    if run_at <= utcnow() + timedelta(seconds=30) and await claim_reminder(reminder_id):
         text = format_reminder_message(sender_id, target_id, body.message)
-        if await send_message(target_id, text):
-            await mark_reminder_sent(reminder_id)
+        if not await send_message(target_id, text):
+            print(f"failed to send reminder id={reminder_id} immediately", flush=True)
 
     return {"ok": True, "id": reminder_id}

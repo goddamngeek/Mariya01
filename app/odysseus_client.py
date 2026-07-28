@@ -56,31 +56,12 @@ async def get_active_endpoint() -> tuple[str, str]:
     return item["url"], models[0]
 
 
-async def chat(message: str, base_url: str, model: str, session: str | None = None) -> dict:
-    payload = {"message": message, "base_url": base_url, "model": model}
-    if LLM_API_KEY:
-        payload["api_key"] = LLM_API_KEY
-    if session is not None:
-        payload["session"] = session
-
-    resp = await get_client().post(
-        f"{ODYSSEUS_URL}/api/v1/chat", headers=_AUTH_HEADERS, json=payload
-    )
-
-    if resp.status_code == 404 and "Session not found" in resp.text:
-        raise SessionNotFoundError(session)
-    if resp.status_code >= 400:
-        print(f"CHAT ERROR BODY: {resp.text}", flush=True)
-    resp.raise_for_status()
-    return resp.json()
-
-
 async def agent_chat(
     message: str, base_url: str, model: str, session: str | None = None,
     system_prompt: str | None = None,
 ) -> dict:
-    """Like chat(), but hits /api/v1/agent_chat — runs the real multi-round
-    tool-execution loop (trilium_notes) instead of a single bare LLM call.
+    """Hits /api/v1/agent_chat — runs the real multi-round tool-execution
+    loop (trilium_notes, schedule_send) instead of a single bare LLM call.
     Longer timeout since tool rounds add real latency on top of the model call."""
     payload = {"message": message, "base_url": base_url, "model": model}
     if LLM_API_KEY:

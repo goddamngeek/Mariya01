@@ -28,9 +28,12 @@ async def process_incoming_message(user_id: int, text: str) -> None:
         await close_question(open_question["id"])
 
     if kind == "active":
+        # A real, formulated answer is coming from Odysseus shortly — the
+        # generic pool "reply" (принял / понял, разберусь) would just be
+        # redundant noise ahead of it.
         asyncio.create_task(handle_active_message(message_id, user_id, text, received_at))
-
-    await _send_reply(user_id)
+    else:
+        await _send_reply(user_id)
 
 
 async def _send_reply(user_id: int) -> None:

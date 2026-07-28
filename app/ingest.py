@@ -38,13 +38,20 @@ def _build_prompt(user_id: int, kind: str) -> str:
 
 
 async def _chat_with_session(
-    user_id: int, message: str, base_url: str, model: str, system_prompt: str
+    user_id: int, message: str, base_url: str, model: str, system_prompt: str,
+    require_tool: bool = False,
 ) -> dict:
     session_id = await get_odysseus_session_id(user_id)
     try:
-        result = await agent_chat(message, base_url, model, session=session_id, system_prompt=system_prompt)
+        result = await agent_chat(
+            message, base_url, model, session=session_id,
+            system_prompt=system_prompt, require_tool=require_tool,
+        )
     except SessionNotFoundError:
-        result = await agent_chat(message, base_url, model, session=None, system_prompt=system_prompt)
+        result = await agent_chat(
+            message, base_url, model, session=None,
+            system_prompt=system_prompt, require_tool=require_tool,
+        )
 
     new_session_id = result.get("session_id")
     if new_session_id and new_session_id != session_id:
@@ -71,7 +78,13 @@ async def ingest_incoming() -> None:
         try:
             tagged_text = _tag_message(message["user_id"], message["text"], message["created_at"])
             system_prompt = _build_prompt(message["user_id"], "пассивное")
-            await _chat_with_session(message["user_id"], tagged_text, base_url, model, system_prompt)
+            # Every passive message must end in a trilium_notes append per
+            # INGEST_PROMPT_TEMPLATE's passive branch — never optional here,
+            # unlike handle_active_message() below which covers general Q&A too.
+            await _chat_with_session(
+                message["user_id"], tagged_text, base_url, model, system_prompt,
+                require_tool=True,
+            )
         except Exception as exc:
             print(f"ingest failed for incoming id={message['id']}: {exc!r}", flush=True)
             continue

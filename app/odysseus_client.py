@@ -73,11 +73,17 @@ async def get_active_endpoint() -> tuple[str, str]:
 
 async def agent_chat(
     message: str, base_url: str, model: str, session: str | None = None,
-    system_prompt: str | None = None,
+    system_prompt: str | None = None, require_tool: bool = False,
 ) -> dict:
     """Hits /api/v1/agent_chat — runs the real multi-round tool-execution
     loop (trilium_notes, schedule_send) instead of a single bare LLM call.
-    Longer timeout since tool rounds add real latency on top of the model call."""
+
+    require_tool=True tells Odysseus a tool call is mandatory for this
+    message (true for every passive-log message) — if the model instead
+    just narrates a fake "done" with nothing actually called (observed
+    live, repeatedly), Odysseus retries once with a correction rather than
+    silently returning the lie as a success. Longer client timeout since
+    both the extra tool round-trips and that retry add real latency."""
     payload = {"message": message, "base_url": base_url, "model": model}
     if LLM_API_KEY:
         payload["api_key"] = LLM_API_KEY
@@ -85,9 +91,11 @@ async def agent_chat(
         payload["session"] = session
     if system_prompt is not None:
         payload["system_prompt"] = system_prompt
+    if require_tool:
+        payload["require_tool"] = True
 
     resp = await get_client().post(
-        f"{ODYSSEUS_URL}/api/v1/agent_chat", headers=_AUTH_HEADERS, json=payload, timeout=90
+        f"{ODYSSEUS_URL}/api/v1/agent_chat", headers=_AUTH_HEADERS, json=payload, timeout=150
     )
 
     if resp.status_code == 404 and "Session not found" in resp.text:

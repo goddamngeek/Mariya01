@@ -1,5 +1,5 @@
-fastapi
-uvicorn[standard]
-asyncpg
-httpx
-apscheduler
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
+asyncpg==0.31.0
+httpx==0.28.1
+apscheduler==3.11.3

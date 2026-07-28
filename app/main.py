@@ -5,10 +5,11 @@ from fastapi import FastAPI, Request
 from app.callbacks import process_callback_query
 from app.config import MAX_REGISTERED_USERS
 from app.db import close_pool, count_registered, init_db, is_registered, register_user, seed_defaults
+from app.odysseus_client import close_client as close_odysseus_client
 from app.scheduler import scheduler, start_scheduler
 from app.service import process_incoming_message
 from app.sync import router as sync_router
-from app.telegram import send_message
+from app.telegram import close_client as close_telegram_client, send_message
 
 
 @asynccontextmanager
@@ -17,6 +18,8 @@ async def lifespan(app: FastAPI):
     await start_scheduler()
     yield
     scheduler.shutdown(wait=False)
+    await close_telegram_client()
+    await close_odysseus_client()
     await close_pool()
 
 

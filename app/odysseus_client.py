@@ -12,6 +12,24 @@ from app.config import LLM_API_KEY, ODYSSEUS_TOKEN, ODYSSEUS_URL
 
 _AUTH_HEADERS = {"Authorization": f"Bearer {ODYSSEUS_TOKEN}"}
 
+_client: httpx.AsyncClient | None = None
+
+
+def get_client() -> httpx.AsyncClient:
+    """Shared, keep-alive client — reused across calls instead of paying a
+    fresh TCP+TLS handshake to Odysseus on every request."""
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=30)
+    return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
 
 class SessionNotFoundError(Exception):
     pass
@@ -20,8 +38,9 @@ class SessionNotFoundError(Exception):
 async def get_active_endpoint() -> tuple[str, str]:
     """Auto-discover (base_url, model) from whatever's enabled right now in
     Odysseus's Admin -> Model Endpoints, via GET /api/models."""
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(f"{ODYSSEUS_URL}/api/models", headers=_AUTH_HEADERS)
+    resp = await get_client().get(
+        f"{ODYSSEUS_URL}/api/models", headers=_AUTH_HEADERS, timeout=15
+    )
     resp.raise_for_status()
     items = resp.json().get("items") or []
     if not items:
@@ -44,10 +63,9 @@ async def chat(message: str, base_url: str, model: str, session: str | None = No
     if session is not None:
         payload["session"] = session
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{ODYSSEUS_URL}/api/v1/chat", headers=_AUTH_HEADERS, json=payload
-        )
+    resp = await get_client().post(
+        f"{ODYSSEUS_URL}/api/v1/chat", headers=_AUTH_HEADERS, json=payload
+    )
 
     if resp.status_code == 404 and "Session not found" in resp.text:
         raise SessionNotFoundError(session)

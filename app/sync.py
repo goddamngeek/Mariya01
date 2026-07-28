@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from app.config import NAME_TO_USER_ID, SYNC_BEARER_TOKEN, TIMEZONE, format_reminder_message
+from app.config import SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
     claim_reminder,
@@ -15,7 +15,8 @@ from app.db import (
     set_odysseus_session_id,
     utcnow,
 )
-from app.telegram import send_message
+from app.people import NAME_TO_USER_ID
+from app.reminders import deliver_reminder
 
 router = APIRouter(prefix="/sync")
 
@@ -115,8 +116,6 @@ async def schedule_reminder(body: ScheduleReminderRequest):
     # reminders() happens to tick at the same moment and wins the claim first,
     # we just skip — it's already being sent, no double delivery.
     if run_at <= utcnow() + timedelta(seconds=30) and await claim_reminder(reminder_id):
-        text = format_reminder_message(sender_id, target_id, body.message)
-        if not await send_message(target_id, text):
-            print(f"failed to send reminder id={reminder_id} immediately", flush=True)
+        await deliver_reminder(reminder_id, sender_id, target_id, body.message)
 
     return {"ok": True, "id": reminder_id}

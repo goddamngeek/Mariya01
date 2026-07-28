@@ -11,7 +11,6 @@ from app.config import (
     TIMEZONE,
     WATER_REMINDER_TEXTS,
     WATER_REMINDER_WINDOWS,
-    format_reminder_message,
 )
 from app.db import (
     claim_reminder,
@@ -23,6 +22,7 @@ from app.db import (
     pick_outgoing_message,
 )
 from app.ingest import ingest_incoming
+from app.reminders import deliver_reminder
 from app.telegram import send_message, send_message_with_button
 
 DEFER_BUTTON_TEXT = "Спросить позже"
@@ -96,9 +96,7 @@ async def release_due_reminders() -> None:
         # skip it here instead of sending it a second time.
         if not await claim_reminder(row["id"]):
             continue
-        text = format_reminder_message(row["sender_chat_id"], row["target_chat_id"], row["message"])
-        if not await send_message(row["target_chat_id"], text):
-            print(f"failed to send reminder id={row['id']}", flush=True)
+        await deliver_reminder(row["id"], row["sender_chat_id"], row["target_chat_id"], row["message"])
 
 
 async def send_water_reminder(user_id: int) -> None:

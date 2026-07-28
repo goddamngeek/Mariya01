@@ -13,9 +13,7 @@ waiting for this poll — so this module only ever processes kind='passive'.
 import traceback
 from datetime import datetime
 
-import httpx
-
-from app.config import INGEST_PROMPT_TEMPLATE, TIMEZONE, USER_NAMES
+from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
     get_odysseus_session_id,
@@ -23,6 +21,8 @@ from app.db import (
     set_odysseus_session_id,
 )
 from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint
+from app.people import USER_NAMES
+from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.telegram import send_message
 
 
@@ -57,7 +57,14 @@ async def ingest_incoming() -> None:
     if not incoming:
         return
 
-    base_url, model = await get_active_endpoint()
+    try:
+        base_url, model = await get_active_endpoint()
+    except Exception:
+        # Must not crash the 60s scheduler job — e.g. get_active_endpoint()
+        # raises RuntimeError if Odysseus has no enabled model configured.
+        print("ingest_incoming: could not resolve active endpoint:", flush=True)
+        traceback.print_exc()
+        return
 
     confirmed_ids = []
     for message in incoming:
@@ -65,7 +72,7 @@ async def ingest_incoming() -> None:
             tagged_text = _tag_message(message["user_id"], message["text"], message["created_at"])
             system_prompt = _build_prompt(message["user_id"], "пассивное")
             await _chat_with_session(message["user_id"], tagged_text, base_url, model, system_prompt)
-        except httpx.HTTPError as exc:
+        except Exception as exc:
             print(f"ingest failed for incoming id={message['id']}: {exc!r}", flush=True)
             continue
 

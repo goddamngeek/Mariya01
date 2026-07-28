@@ -6,6 +6,8 @@ by hand since the sync (mac_sync) and async (bot) versions can't share code
 without adding a shared package neither side otherwise needs.
 """
 
+import time
+
 import httpx
 
 from app.config import LLM_API_KEY, ODYSSEUS_TOKEN, ODYSSEUS_URL
@@ -13,6 +15,10 @@ from app.config import LLM_API_KEY, ODYSSEUS_TOKEN, ODYSSEUS_URL
 _AUTH_HEADERS = {"Authorization": f"Bearer {ODYSSEUS_TOKEN}"}
 
 _client: httpx.AsyncClient | None = None
+
+_ENDPOINT_CACHE_TTL = 60  # seconds — matches the ingest poll cadence
+_endpoint_cache: tuple[str, str] | None = None
+_endpoint_cache_at: float = 0.0
 
 
 def get_client() -> httpx.AsyncClient:
@@ -37,7 +43,14 @@ class SessionNotFoundError(Exception):
 
 async def get_active_endpoint() -> tuple[str, str]:
     """Auto-discover (base_url, model) from whatever's enabled right now in
-    Odysseus's Admin -> Model Endpoints, via GET /api/models."""
+    Odysseus's Admin -> Model Endpoints, via GET /api/models. Cached briefly —
+    this was firing on every single message (each active question, plus every
+    60s ingest batch) for config that rarely changes."""
+    global _endpoint_cache, _endpoint_cache_at
+    now = time.monotonic()
+    if _endpoint_cache is not None and (now - _endpoint_cache_at) < _ENDPOINT_CACHE_TTL:
+        return _endpoint_cache
+
     resp = await get_client().get(
         f"{ODYSSEUS_URL}/api/models", headers=_AUTH_HEADERS, timeout=15
     )
@@ -53,7 +66,9 @@ async def get_active_endpoint() -> tuple[str, str]:
             f"Endpoint {item.get('endpoint_name')!r} has no available models (GET /api/models)"
         )
 
-    return item["url"], models[0]
+    _endpoint_cache = (item["url"], models[0])
+    _endpoint_cache_at = now
+    return _endpoint_cache
 
 
 async def agent_chat(

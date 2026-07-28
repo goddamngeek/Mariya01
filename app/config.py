@@ -36,6 +36,11 @@ MAX_DEFERRALS = 2
 OUTGOING_DEDUP_DAYS = 3
 MAX_REGISTERED_USERS = 2
 
+USER_NAMES = {
+    335712401: "МАША",
+    136382691: "ОСТАП",
+}
+
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/odysseus_queue_bot"
 )

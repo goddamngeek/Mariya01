@@ -10,7 +10,7 @@ from datetime import datetime
 
 import httpx
 
-from app.config import TIMEZONE
+from app.config import TIMEZONE, USER_NAMES
 from app.db import (
     ack_incoming_messages,
     get_odysseus_session_id,
@@ -20,9 +20,10 @@ from app.db import (
 from app.odysseus_client import SessionNotFoundError, chat, get_active_endpoint
 
 
-def _tag_with_received_time(text: str, received_at: datetime) -> str:
+def _tag_message(user_id: int, text: str, received_at: datetime) -> str:
+    name = USER_NAMES.get(user_id, str(user_id))
     local_time = received_at.astimezone(TIMEZONE)
-    return f"[Сообщение получено {local_time.strftime('%d.%m.%Y %H:%M')} МСК] {text}"
+    return f"[{name} {local_time.strftime('%d.%m.%Y %H:%M')} МСК] {text}"
 
 
 async def _chat_with_session(user_id: int, message: str, base_url: str, model: str) -> dict:
@@ -48,7 +49,7 @@ async def ingest_incoming() -> None:
     confirmed_ids = []
     for message in incoming:
         try:
-            tagged_text = _tag_with_received_time(message["text"], message["created_at"])
+            tagged_text = _tag_message(message["user_id"], message["text"], message["created_at"])
             await _chat_with_session(message["user_id"], tagged_text, base_url, model)
         except httpx.HTTPError as exc:
             print(f"ingest failed for incoming id={message['id']}: {exc!r}", flush=True)

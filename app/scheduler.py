@@ -11,12 +11,15 @@ from app.config import (
     TIMEZONE,
     WATER_REMINDER_TEXTS,
     WATER_REMINDER_WINDOWS,
+    format_reminder_message,
 )
 from app.db import (
     get_due_deferred_questions,
+    get_due_reminders,
     get_registered_user_ids,
     has_pending_question,
     mark_question_sent,
+    mark_reminder_sent,
     pick_outgoing_message,
 )
 from app.ingest import ingest_incoming
@@ -86,6 +89,15 @@ async def release_due_questions() -> None:
         await _send_question(row["user_id"], row)
 
 
+async def release_due_reminders() -> None:
+    for row in await get_due_reminders():
+        text = format_reminder_message(row["sender_chat_id"], row["target_chat_id"], row["message"])
+        if await send_message(row["target_chat_id"], text):
+            await mark_reminder_sent(row["id"])
+        else:
+            print(f"failed to send reminder id={row['id']}, will retry", flush=True)
+
+
 async def send_water_reminder(user_id: int) -> None:
     text = random.choice(WATER_REMINDER_TEXTS)
     if not await send_message(user_id, text):
@@ -129,6 +141,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_due_questions",
+    )
+    scheduler.add_job(
+        release_due_reminders,
+        trigger="interval",
+        seconds=60,
+        id="release_due_reminders",
     )
     scheduler.add_job(
         ingest_incoming,

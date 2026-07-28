@@ -32,6 +32,16 @@ CREATE TABLE IF NOT EXISTS registered_users (
     odysseus_session_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS reminders (
+    id SERIAL PRIMARY KEY,
+    target_chat_id BIGINT NOT NULL,
+    sender_chat_id BIGINT NOT NULL,
+    message TEXT NOT NULL,
+    run_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    sent_at TIMESTAMPTZ
+);
+
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 """
@@ -310,4 +320,29 @@ async def insert_outgoing_messages(items: list[tuple[int, str, str]]) -> None:
         "(user_id, category, text, created_at, is_open, deferral_count) "
         "VALUES ($1, $2, $3, $4, FALSE, 0)",
         [(user_id, category, text, created_at) for user_id, category, text in items],
+    )
+
+
+# --- reminders (schedule_send tool) -----------------------------------------
+
+async def insert_reminder(target_chat_id: int, sender_chat_id: int, message: str, run_at: datetime) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "INSERT INTO reminders (target_chat_id, sender_chat_id, message, run_at, created_at) "
+        "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        target_chat_id, sender_chat_id, message, run_at, utcnow(),
+    )
+
+
+async def get_due_reminders() -> list[asyncpg.Record]:
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM reminders WHERE sent_at IS NULL AND run_at <= $1", utcnow()
+    )
+
+
+async def mark_reminder_sent(reminder_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE reminders SET sent_at = $1 WHERE id = $2", utcnow(), reminder_id
     )

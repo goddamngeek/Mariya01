@@ -54,7 +54,7 @@ def format_reminder_message(sender_id: int, target_id: int, message: str) -> str
         return f"Напоминание: {message}"
     sender_name = USER_NAMES.get(sender_id, str(sender_id)).capitalize()
     verb = "просил" if USER_GENDER.get(sender_id) == "m" else "просила"
-    return f"{sender_name} {verb} передать: {message}"
+    return f"{sender_name} {verb} передать, что {message}"
 
 INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло не напрямую, а через Telegram-бота от человека по имени __NAME__. Оно начинается с тега [__NAME__ ДД.ММ.ГГГГ ЧЧ:ММ МСК] — это метаданные (кто и когда написал), текст после тега — слова человека.
 

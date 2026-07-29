@@ -402,6 +402,19 @@ async def insert_card(user_id: int, trilium_note_id: str | None, front: str, bac
     )
 
 
+async def dedupe_cards(user_id: int) -> int:
+    """Delete duplicate cards (identical front+back) for a user, keeping the
+    lowest id per duplicate group. Returns how many rows were removed."""
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM cards a USING cards b "
+        "WHERE a.user_id = $1 AND b.user_id = $1 "
+        "AND a.front = b.front AND a.back = b.back AND a.id > b.id",
+        user_id,
+    )
+    return int(result.split()[-1]) if result else 0
+
+
 async def get_due_cards(user_id: int) -> list[asyncpg.Record]:
     pool = await get_pool()
     return await pool.fetch(

@@ -10,6 +10,7 @@ from app.db import (
     claim_reminder,
     close_question,
     count_open_questions,
+    dedupe_cards,
     get_odysseus_session_id,
     get_open_question,
     insert_card,
@@ -163,6 +164,22 @@ async def save_flashcard_endpoint(body: SaveFlashcardRequest):
 
     card_id = await insert_card(user_id, None, body.front.strip(), body.back.strip())
     return {"ok": True, "card_id": card_id}
+
+
+class DedupeCardsRequest(BaseModel):
+    person_name: str
+
+
+@router.post("/dedupe_cards", dependencies=[Depends(require_bearer)])
+async def dedupe_cards_endpoint(body: DedupeCardsRequest):
+    """Remove duplicate flashcards (identical front+back) for a person,
+    keeping the earliest of each — for cleaning up after a repeated
+    save_flashcard batch (e.g. a retried card-generation request)."""
+    user_id = _resolve_name(body.person_name)
+    if user_id is None:
+        raise HTTPException(400, f"Unknown person name: {body.person_name!r}")
+    removed = await dedupe_cards(user_id)
+    return {"ok": True, "removed": removed}
 
 
 class ResendQuestionRequest(BaseModel):

@@ -68,8 +68,24 @@ def _looks_like_card_generation(text: str) -> bool:
     search step entirely and just claim "no access" to the note instead of
     trying. There's no deterministic fallback for this (require_tool_type=
     "none" — see webhook_routes.py), but the corrective retry alone still
-    gives it one more real chance to actually search."""
-    return "карточ" in text.lower()
+    gives it one more real chance to actually search. Checked BEFORE
+    _looks_like_start_review (below) since "сделай карточки для повторения
+    из заметки X" contains both "карточ" and "повтор" — generation-specific
+    words (сделай/создай/заметк) win the ambiguity."""
+    lowered = text.lower()
+    return "карточ" in lowered and any(kw in lowered for kw in ("сделай", "создай", "заметк"))
+
+
+def _looks_like_start_review(text: str) -> bool:
+    """"го повторим карточки" / "хочу повторить карточки" / "давай карточки"
+    — start a review session. Unlike card generation this IS fully
+    deterministic (start_review_session is a pure trigger, no content
+    judgment needed) and so CAN have a real fallback. Confirmed live: asked
+    to start review, the model just narrated a fake session ("Давай начнём
+    с первой карточки...") with zero tool calls — the user never got a real
+    card message with buttons, just a hallucinated conversation."""
+    lowered = text.lower()
+    return "карточ" in lowered and "повтор" in lowered
 
 
 async def _chat_with_session(
@@ -156,22 +172,28 @@ async def handle_active_message(
         system_prompt = _build_prompt(user_id, "активное")
 
         relay_intent = _looks_like_relay_or_reminder(text)
+        # Order matters: card_gen must be checked before start_review, since
+        # "сделай карточки для повторения из заметки X" matches both.
         card_gen_intent = _looks_like_card_generation(text)
+        start_review_intent = (not card_gen_intent) and _looks_like_start_review(text)
         if relay_intent:
             require_tool_type = "schedule_send"
+        elif start_review_intent:
+            require_tool_type = "start_flashcard_session"
         elif card_gen_intent:
             require_tool_type = "none"
         else:
             require_tool_type = None
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=relay_intent or card_gen_intent, require_tool_type=require_tool_type,
+            require_tool=relay_intent or start_review_intent or card_gen_intent,
+            require_tool_type=require_tool_type,
         )
-        if relay_intent and result.get("forced_fallback") is False:
+        if (relay_intent or start_review_intent) and result.get("forced_fallback") is False:
             # Both the model and the deterministic fallback failed to act —
             # unlike passive messages there's no 60s retry poll for active
             # ones, so this is a real, visible loss, not just a delayed retry.
-            print(f"handle_active_message: relay/reminder not delivered for "
+            print(f"handle_active_message: {require_tool_type} not delivered for "
                   f"incoming id={message_id} (require_tool fallback failed)", flush=True)
 
         answer = (result.get("response") or "").strip()

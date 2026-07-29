@@ -19,6 +19,7 @@ from app.db import (
     claim_reminder,
     create_card_reminder,
     get_due_card_reminders,
+    get_due_cards,
     get_due_deferred_questions,
     get_due_reminders,
     get_idle_card_sessions,
@@ -125,6 +126,13 @@ async def send_daily_card_reminder(user_id: int) -> None:
     if await has_pending_card_reminder(user_id):
         print(f"user={user_id} already has a card reminder in flight, skipping today", flush=True)
         return
+    # Confirmed live: a user with zero flashcards still got prompted
+    # ("Готовы карточки на повторение?") and reasonably tried to engage with
+    # an offer that didn't actually apply to them. Mirrors send_daily_question
+    # skipping when pick_outgoing_message finds nothing to send.
+    if not await get_due_cards(user_id):
+        print(f"no due cards for user={user_id} today, skipping card reminder", flush=True)
+        return
     reminder_id = await create_card_reminder(user_id)
     await _send_card_reminder(user_id, reminder_id)
 
@@ -148,6 +156,8 @@ async def schedule_today_card_reminder() -> None:
 
 async def release_due_card_reminders() -> None:
     for row in await get_due_card_reminders():
+        if not await get_due_cards(row["user_id"]):
+            continue
         await release_card_reminder(row["id"])
         await _send_card_reminder(row["user_id"], row["id"])
 

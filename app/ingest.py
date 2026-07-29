@@ -53,6 +53,16 @@ def _looks_like_relay_or_reminder(text: str) -> bool:
     return any(kw in lowered for kw in _RELAY_OR_REMINDER_KEYWORDS)
 
 
+def _looks_like_card_generation(text: str) -> bool:
+    """Same reasoning as _looks_like_relay_or_reminder, but for save_flashcard
+    generation — confirmed live the model can skip the required trilium_notes
+    search step entirely and just claim "no access" to the note instead of
+    trying. There's no deterministic fallback for this (require_tool_type=
+    "none" — see webhook_routes.py), but the corrective retry alone still
+    gives it one more real chance to actually search."""
+    return "карточ" in text.lower()
+
+
 async def _chat_with_session(
     user_id: int, message: str, base_url: str, model: str, system_prompt: str,
     require_tool: bool = False, require_tool_type: str | None = None,
@@ -132,9 +142,16 @@ async def handle_active_message(message_id: int, user_id: int, text: str, receiv
         system_prompt = _build_prompt(user_id, "активное")
 
         relay_intent = _looks_like_relay_or_reminder(text)
+        card_gen_intent = _looks_like_card_generation(text)
+        if relay_intent:
+            require_tool_type = "schedule_send"
+        elif card_gen_intent:
+            require_tool_type = "none"
+        else:
+            require_tool_type = None
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=relay_intent, require_tool_type="schedule_send" if relay_intent else None,
+            require_tool=relay_intent or card_gen_intent, require_tool_type=require_tool_type,
         )
         if relay_intent and result.get("forced_fallback") is False:
             # Both the model and the deterministic fallback failed to act —

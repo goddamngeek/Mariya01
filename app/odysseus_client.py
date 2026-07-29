@@ -66,7 +66,17 @@ async def get_active_endpoint() -> tuple[str, str]:
             f"Endpoint {item.get('endpoint_name')!r} has no available models (GET /api/models)"
         )
 
-    _endpoint_cache = (item["url"], models[0])
+    # Prefer yandexgpt over whatever happens to be first in the list
+    # (currently aliceai-llm) — confirmed live 2026-07-29: yandexgpt
+    # reliably makes real native tool calls (trilium_notes, schedule_send,
+    # save_flashcard incl. the search-then-generate flashcard flow) via
+    # this exact endpoint, while aliceai-llm produced zero native tool
+    # calls across an entire night of testing. Falls back to models[0]
+    # if yandexgpt isn't in the list (e.g. a different endpoint/provider).
+    preferred = next((m for m in models if "yandexgpt" in m.lower()), None)
+    model = preferred or models[0]
+
+    _endpoint_cache = (item["url"], model)
     _endpoint_cache_at = now
     return _endpoint_cache
 

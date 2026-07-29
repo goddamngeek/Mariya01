@@ -12,6 +12,7 @@ from app.db import (
     count_open_questions,
     get_odysseus_session_id,
     get_open_question,
+    insert_card,
     insert_outgoing_messages,
     insert_reminder,
     pick_outgoing_message,
@@ -19,6 +20,7 @@ from app.db import (
     set_odysseus_session_id,
     utcnow,
 )
+from app.flashcard_session import start_review_session
 from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import deliver_reminder
@@ -125,6 +127,42 @@ async def schedule_reminder(body: ScheduleReminderRequest):
         await deliver_reminder(reminder_id, sender_id, target_id, body.message)
 
     return {"ok": True, "id": reminder_id}
+
+
+class StartFlashcardSessionRequest(BaseModel):
+    person_name: str
+
+
+@router.post("/start_flashcard_session", dependencies=[Depends(require_bearer)])
+async def start_flashcard_session_endpoint(body: StartFlashcardSessionRequest):
+    """Called by Odysseus's start_flashcard_session tool when the user asks
+    (in a normal message) to review flashcards. No start_message_id — this
+    path has no bot-sent message to keep around, unlike the button-based
+    daily reminder in scheduler.py."""
+    user_id = _resolve_name(body.person_name)
+    if user_id is None:
+        raise HTTPException(400, f"Unknown person name: {body.person_name!r}")
+
+    started = await start_review_session(user_id, start_message_id=None)
+    return {"ok": True, "started": started}
+
+
+class SaveFlashcardRequest(BaseModel):
+    person_name: str
+    front: str
+    back: str
+
+
+@router.post("/save_flashcard", dependencies=[Depends(require_bearer)])
+async def save_flashcard_endpoint(body: SaveFlashcardRequest):
+    user_id = _resolve_name(body.person_name)
+    if user_id is None:
+        raise HTTPException(400, f"Unknown person name: {body.person_name!r}")
+    if not body.front.strip() or not body.back.strip():
+        raise HTTPException(400, "front and back must both be non-empty")
+
+    card_id = await insert_card(user_id, None, body.front.strip(), body.back.strip())
+    return {"ok": True, "card_id": card_id}
 
 
 class ResendQuestionRequest(BaseModel):

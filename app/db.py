@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS incoming_messages (
     text TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
     confirmed_at TIMESTAMPTZ,
-    kind TEXT NOT NULL DEFAULT 'passive'
+    kind TEXT NOT NULL DEFAULT 'passive',
+    reply_to_text TEXT
 );
 
 CREATE TABLE IF NOT EXISTS outgoing_messages (
@@ -83,6 +84,7 @@ CREATE TABLE IF NOT EXISTS card_reminders (
 
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
+ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
 """
 
 SEED_QUESTIONS = [
@@ -190,19 +192,21 @@ async def set_odysseus_session_id(chat_id: int, session_id: str) -> None:
 
 # --- incoming messages -----------------------------------------------------
 
-async def insert_incoming_message(user_id: int, text: str, kind: str = "passive") -> int:
+async def insert_incoming_message(
+    user_id: int, text: str, kind: str = "passive", reply_to_text: str | None = None,
+) -> int:
     pool = await get_pool()
     return await pool.fetchval(
-        "INSERT INTO incoming_messages (user_id, text, created_at, kind) VALUES ($1, $2, $3, $4) "
-        "RETURNING id",
-        user_id, text, utcnow(), kind,
+        "INSERT INTO incoming_messages (user_id, text, created_at, kind, reply_to_text) "
+        "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        user_id, text, utcnow(), kind, reply_to_text,
     )
 
 
 async def pull_unconfirmed_incoming() -> list[asyncpg.Record]:
     pool = await get_pool()
     return await pool.fetch(
-        "SELECT id, user_id, text, created_at, kind FROM incoming_messages "
+        "SELECT id, user_id, text, created_at, kind, reply_to_text FROM incoming_messages "
         "WHERE confirmed_at IS NULL ORDER BY id"
     )
 

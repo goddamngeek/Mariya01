@@ -19,7 +19,7 @@ from app.telegram import send_message
 _background_tasks: set[asyncio.Task] = set()
 
 
-async def process_incoming_message(user_id: int, text: str) -> None:
+async def process_incoming_message(user_id: int, text: str, reply_to_text: str | None = None) -> None:
     # A pending question at arrival time means this message is the user's
     # answer to it (passive) rather than a spontaneous question (active) —
     # see app/ingest.py for how each kind is handled downstream.
@@ -27,7 +27,7 @@ async def process_incoming_message(user_id: int, text: str) -> None:
     kind = "passive" if open_question is not None else "active"
     received_at = utcnow()
 
-    message_id = await insert_incoming_message(user_id, text, kind)
+    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
 
     if open_question is not None:
         await close_question(open_question["id"])
@@ -36,7 +36,9 @@ async def process_incoming_message(user_id: int, text: str) -> None:
         # A real, formulated answer is coming from Odysseus shortly — the
         # generic pool "reply" (принял / понял, разберусь) would just be
         # redundant noise ahead of it.
-        task = asyncio.create_task(handle_active_message(message_id, user_id, text, received_at))
+        task = asyncio.create_task(
+            handle_active_message(message_id, user_id, text, received_at, reply_to_text)
+        )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
     else:

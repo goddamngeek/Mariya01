@@ -64,7 +64,14 @@ async def telegram_webhook(request: Request):
     if not await is_registered(chat_id):
         return {"ok": True}
 
-    await process_incoming_message(chat_id, text)
+    # Telegram's native "reply" feature attaches the full replied-to message
+    # here — without this, a reply like "напомни об этом Маше" loses which
+    # earlier message "этом" refers to entirely, since only the new text
+    # ever reached Odysseus.
+    reply_to = message.get("reply_to_message") or {}
+    reply_to_text = reply_to.get("text")
+
+    await process_incoming_message(chat_id, text, reply_to_text=reply_to_text)
 
     return {"ok": True}
 

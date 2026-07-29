@@ -232,5 +232,5 @@ async def reprocess_active(body: ReprocessActiveRequest):
     row = next((r for r in rows if r["id"] == body.id), None)
     if row is None:
         raise HTTPException(404, "no such unconfirmed message")
-    await handle_active_message(row["id"], row["user_id"], row["text"], row["created_at"])
+    await handle_active_message(row["id"], row["user_id"], row["text"], row["created_at"], row["reply_to_text"])
     return {"ok": True}

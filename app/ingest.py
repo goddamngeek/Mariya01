@@ -26,10 +26,19 @@ from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.telegram import send_message
 
 
-def _tag_message(user_id: int, text: str, received_at: datetime) -> str:
+def _tag_message(
+    user_id: int, text: str, received_at: datetime, reply_to_text: str | None = None,
+) -> str:
     name = USER_NAMES.get(user_id, str(user_id))
     local_time = received_at.astimezone(TIMEZONE)
-    return f"[{name} {local_time.strftime('%d.%m.%Y %H:%M')} МСК] {text}"
+    tag = f"[{name} {local_time.strftime('%d.%m.%Y %H:%M')} МСК]"
+    if reply_to_text:
+        # Telegram's native "reply" feature — without this, a reply like
+        # "напомни об этом Маше" loses which earlier message "этом" refers
+        # to entirely, since only the new text ever reached Odysseus.
+        quoted = reply_to_text.strip().replace("\n", " ")[:300]
+        return f'{tag} (в ответ на сообщение: "{quoted}") {text}'
+    return f"{tag} {text}"
 
 
 def _build_prompt(user_id: int, kind: str) -> str:
@@ -104,7 +113,9 @@ async def ingest_incoming() -> None:
     confirmed_ids = []
     for message in incoming:
         try:
-            tagged_text = _tag_message(message["user_id"], message["text"], message["created_at"])
+            tagged_text = _tag_message(
+                message["user_id"], message["text"], message["created_at"], message["reply_to_text"],
+            )
             system_prompt = _build_prompt(message["user_id"], "пассивное")
             # Every passive message must end in a trilium_notes append per
             # INGEST_PROMPT_TEMPLATE's passive branch — never optional here,
@@ -132,13 +143,16 @@ async def ingest_incoming() -> None:
     await ack_incoming_messages(confirmed_ids)
 
 
-async def handle_active_message(message_id: int, user_id: int, text: str, received_at: datetime) -> None:
+async def handle_active_message(
+    message_id: int, user_id: int, text: str, received_at: datetime,
+    reply_to_text: str | None = None,
+) -> None:
     """Answer a real question right away — called as a fire-and-forget task
     from app/service.py as soon as the webhook receives it, not from the 60s
     ingest_incoming() poll, since a real answer shouldn't wait up to a minute."""
     try:
         base_url, model = await get_active_endpoint()
-        tagged_text = _tag_message(user_id, text, received_at)
+        tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")
 
         relay_intent = _looks_like_relay_or_reminder(text)

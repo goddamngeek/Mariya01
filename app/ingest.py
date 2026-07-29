@@ -17,9 +17,11 @@ from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
     get_odysseus_session_id,
+    get_open_card_session,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
 )
+from app.flashcard_session import restart_review_session, stop_review_session
 from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint
 from app.people import USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
@@ -86,6 +88,28 @@ def _looks_like_start_review(text: str) -> bool:
     card message with buttons, just a hallucinated conversation."""
     lowered = text.lower()
     return "карточ" in lowered and "повтор" in lowered
+
+
+_STOP_SESSION_KEYWORDS = ("стоп", "останов", "хватит", "отмен", "прекрати")
+_RESTART_SESSION_KEYWORDS = ("заново", "сначала")
+
+
+def _looks_like_stop_session(text: str) -> bool:
+    """"стоп"/"хватит"/"отмена" mid-session. There is no tool for this at
+    all (only start_flashcard_session exists) — confirmed live, without
+    real handling the model just hallucinates a plausible "остановлено"
+    with nothing behind it. Only checked when a session IS actually open
+    (see handle_active_message), so these common words don't hijack
+    unrelated messages."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in _STOP_SESSION_KEYWORDS)
+
+
+def _looks_like_restart_session(text: str) -> bool:
+    """"давай заново"/"начни сначала" mid-session — same reasoning as
+    _looks_like_stop_session."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in _RESTART_SESSION_KEYWORDS)
 
 
 async def _chat_with_session(
@@ -167,6 +191,23 @@ async def handle_active_message(
     from app/service.py as soon as the webhook receives it, not from the 60s
     ingest_incoming() poll, since a real answer shouldn't wait up to a minute."""
     try:
+        # Session-control commands ("стоп"/"давай заново") are handled
+        # entirely in code, before ever reaching Odysseus — there's no tool
+        # for this at all, so the model would otherwise just hallucinate a
+        # plausible "остановлено"/"началось заново" with nothing real
+        # behind it (confirmed live). Only checked when a session is
+        # actually open, so these common words don't hijack unrelated
+        # messages the rest of the time.
+        if await get_open_card_session(user_id) is not None:
+            if _looks_like_restart_session(text):
+                await restart_review_session(user_id)
+                await ack_incoming_messages([message_id])
+                return
+            if _looks_like_stop_session(text):
+                await stop_review_session(user_id)
+                await ack_incoming_messages([message_id])
+                return
+
         base_url, model = await get_active_endpoint()
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")

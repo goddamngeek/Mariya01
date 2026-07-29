@@ -120,16 +120,17 @@ async def handle_card_grade(user_id: int, clicked_message_id: int, card_id: int,
         await _close_session(session, completed=True)
 
 
-async def _close_session(session, completed: bool) -> None:
+async def _close_session(session, completed: bool, text: str | None = None) -> None:
     chat_id = session["user_id"]
     await close_card_session(session["id"])
     for mid in session["message_ids"]:
         await delete_message(chat_id, mid)
 
-    if completed:
-        text = f"Готово: {session['reviewed_count']}/{session['total_count']}. {random.choice(PRAISE_PHRASES)}"
-    else:
-        text = random.choice(POSTPONE_PHRASES)
+    if text is None:
+        if completed:
+            text = f"Готово: {session['reviewed_count']}/{session['total_count']}. {random.choice(PRAISE_PHRASES)}"
+        else:
+            text = random.choice(POSTPONE_PHRASES)
     await send_message(chat_id, text)
 
 
@@ -139,3 +140,33 @@ async def close_idle_session(session) -> None:
     the card mid-review just keeps its existing schedule and resurfaces
     whenever it's next due."""
     await _close_session(session, completed=False)
+
+
+async def stop_review_session(user_id: int) -> bool:
+    """User explicitly asked to stop mid-session ("стоп"/"хватит"/"отмена").
+    Handled entirely in code, before ever reaching Odysseus — there's no
+    tool for this at all, so the model would otherwise just hallucinate a
+    plausible "остановлено" with nothing real behind it (confirmed live).
+    Returns False if no session was open (nothing to stop)."""
+    session = await get_open_card_session(user_id)
+    if session is None:
+        return False
+    await _close_session(
+        session, completed=False,
+        text="Хорошо, остановил повторение. Скажи, когда захочешь продолжить.",
+    )
+    return True
+
+
+async def restart_review_session(user_id: int, start_message_id: int | None = None) -> str:
+    """"давай заново"/"начни сначала" — close any open session silently (no
+    separate "stopped" message; the new first card speaks for itself) and
+    start fresh. Same reasoning as stop_review_session: no tool for this,
+    handled entirely in code. Returns the same status strings as
+    start_review_session."""
+    session = await get_open_card_session(user_id)
+    if session is not None:
+        await close_card_session(session["id"])
+        for mid in session["message_ids"]:
+            await delete_message(session["user_id"], mid)
+    return await start_review_session(user_id, start_message_id)

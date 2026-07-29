@@ -145,8 +145,8 @@ async def start_flashcard_session_endpoint(body: StartFlashcardSessionRequest):
     if user_id is None:
         raise HTTPException(400, f"Unknown person name: {body.person_name!r}")
 
-    started = await start_review_session(user_id, start_message_id=None)
-    return {"ok": True, "started": started}
+    status = await start_review_session(user_id, start_message_id=None)
+    return {"ok": True, "started": status == "started", "status": status}
 
 
 class SaveFlashcardRequest(BaseModel):

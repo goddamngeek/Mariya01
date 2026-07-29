@@ -72,19 +72,23 @@ async def _send_next_card(user_id: int, session_id: int) -> bool:
     return True
 
 
-async def start_review_session(user_id: int, start_message_id: int | None) -> bool:
-    """Returns False if a session is already open (caller should tell the
-    user one is already in progress) or if there are no due cards right now."""
+async def start_review_session(user_id: int, start_message_id: int | None) -> str:
+    """Returns "started", "already_open", or "no_cards" — distinct outcomes,
+    not a bare bool, since a caller (Odysseus's require_tool fallback) needs
+    to tell the user WHY nothing happened rather than staying silent.
+    Confirmed live: a user with zero flashcards asked to start review and
+    got no response at all — the model's own text came back empty and
+    nothing else explained the silence."""
     if await get_open_card_session(user_id) is not None:
-        return False
+        return "already_open"
 
     due = await get_due_cards(user_id)
     if not due:
-        return False
+        return "no_cards"
 
     session_id = await create_card_session(user_id, start_message_id, total_count=len(due))
     await _send_next_card(user_id, session_id)
-    return True
+    return "started"
 
 
 async def handle_card_grade(user_id: int, clicked_message_id: int, card_id: int, know: bool) -> None:

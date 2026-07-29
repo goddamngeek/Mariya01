@@ -75,7 +75,12 @@ def _looks_like_card_generation(text: str) -> bool:
     из заметки X" contains both "карточ" and "повтор" — generation-specific
     words (сделай/создай/заметк) win the ambiguity."""
     lowered = text.lower()
-    return "карточ" in lowered and any(kw in lowered for kw in ("сделай", "создай", "заметк"))
+    return "карточ" in lowered and any(
+        kw in lowered for kw in ("сделай", "создай", "заметк", "возьми", "добавь", "сгенерир")
+    )
+
+
+_START_REVIEW_VERBS = ("начать", "начни", "давай", "хочу", "пора", "запусти", "го", "продолжим", "погнали")
 
 
 def _looks_like_start_review(text: str) -> bool:
@@ -85,9 +90,16 @@ def _looks_like_start_review(text: str) -> bool:
     judgment needed) and so CAN have a real fallback. Confirmed live: asked
     to start review, the model just narrated a fake session ("Давай начнём
     с первой карточки...") with zero tool calls — the user never got a real
-    card message with buttons, just a hallucinated conversation."""
+    card message with buttons, just a hallucinated conversation.
+
+    Also confirmed live: "начать повторение" (no "карточ" at all) fell
+    through this heuristic entirely and got an ungoverned, silently empty
+    reply — so a bare "повтор" paired with a start-type verb counts too, not
+    just "карточ"+"повтор" together."""
     lowered = text.lower()
-    return "карточ" in lowered and "повтор" in lowered
+    if "карточ" in lowered and "повтор" in lowered:
+        return True
+    return "повтор" in lowered and any(v in lowered for v in _START_REVIEW_VERBS)
 
 
 _STOP_SESSION_KEYWORDS = ("стоп", "останов", "хватит", "отмен", "прекрати")

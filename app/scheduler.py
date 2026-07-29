@@ -108,7 +108,9 @@ async def release_due_reminders() -> None:
         # skip it here instead of sending it a second time.
         if not await claim_reminder(row["id"]):
             continue
-        await deliver_reminder(row["id"], row["sender_chat_id"], row["target_chat_id"], row["message"])
+        await deliver_reminder(
+            row["id"], row["sender_chat_id"], row["target_chat_id"], row["message"], row["anonymous"],
+        )
 
 
 async def _send_card_reminder(user_id: int, reminder_id: int) -> None:

@@ -13,9 +13,17 @@ USER_GENDER = {
 }
 
 
-def format_reminder_message(sender_id: int, target_id: int, message: str) -> str:
+def format_reminder_message(
+    sender_id: int, target_id: int, message: str, anonymous: bool = False,
+) -> str:
     if sender_id == target_id:
         return f"Напоминание: {message}"
+
+    if anonymous:
+        # Delivered as if the bot itself is saying it — no "X просил
+        # передать" attribution at all, per explicit request ("передай, но
+        # не говори что от меня").
+        return message.strip()
 
     sender_raw = USER_NAMES.get(sender_id, str(sender_id))
     # The model sometimes redundantly re-introduces the sender inside the

@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS reminders (
     message TEXT NOT NULL,
     run_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    sent_at TIMESTAMPTZ
+    sent_at TIMESTAMPTZ,
+    anonymous BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS cards (
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS card_reminders (
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS anonymous BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 SEED_QUESTIONS = [
@@ -377,12 +379,15 @@ async def insert_outgoing_messages(items: list[tuple[int, str, str]]) -> None:
 
 # --- reminders (schedule_send tool) -----------------------------------------
 
-async def insert_reminder(target_chat_id: int, sender_chat_id: int, message: str, run_at: datetime) -> int:
+async def insert_reminder(
+    target_chat_id: int, sender_chat_id: int, message: str, run_at: datetime,
+    anonymous: bool = False,
+) -> int:
     pool = await get_pool()
     return await pool.fetchval(
-        "INSERT INTO reminders (target_chat_id, sender_chat_id, message, run_at, created_at) "
-        "VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        target_chat_id, sender_chat_id, message, run_at, utcnow(),
+        "INSERT INTO reminders (target_chat_id, sender_chat_id, message, run_at, created_at, anonymous) "
+        "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        target_chat_id, sender_chat_id, message, run_at, utcnow(), anonymous,
     )
 
 

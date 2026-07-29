@@ -93,6 +93,7 @@ class ScheduleReminderRequest(BaseModel):
     target_name: str
     message: str
     run_at: Optional[str] = None  # ISO 8601 (Moscow local time) or "now"/empty for immediate
+    anonymous: bool = False  # deliver with no "X просил передать" attribution
 
 
 def _resolve_name(name: str) -> Optional[int]:
@@ -118,14 +119,14 @@ async def schedule_reminder(body: ScheduleReminderRequest):
             parsed = parsed.replace(tzinfo=TIMEZONE)
         run_at = parsed.astimezone(timezone.utc)
 
-    reminder_id = await insert_reminder(target_id, sender_id, body.message, run_at)
+    reminder_id = await insert_reminder(target_id, sender_id, body.message, run_at, body.anonymous)
 
     # Due right now (or already past) — don't make the user wait for the next
     # 60s poll tick. claim_reminder() is the atomic gate: if release_due_
     # reminders() happens to tick at the same moment and wins the claim first,
     # we just skip — it's already being sent, no double delivery.
     if run_at <= utcnow() + timedelta(seconds=30) and await claim_reminder(reminder_id):
-        await deliver_reminder(reminder_id, sender_id, target_id, body.message)
+        await deliver_reminder(reminder_id, sender_id, target_id, body.message, body.anonymous)
 
     return {"ok": True, "id": reminder_id}
 

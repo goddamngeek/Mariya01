@@ -95,9 +95,15 @@ def _looks_like_start_review(text: str) -> bool:
     Also confirmed live: "начать повторение" (no "карточ" at all) fell
     through this heuristic entirely and got an ungoverned, silently empty
     reply — so a bare "повтор" paired with a start-type verb counts too, not
-    just "карточ"+"повтор" together."""
+    just "карточ"+"повтор" together. And "давай карточки" itself — cited
+    right in prompts.py as a supported trigger phrase — never matched
+    either, since it has no "повтор" at all; "карточ" paired with a
+    start-type verb now counts too (card generation is checked first by the
+    caller, so this can't steal a real generation request)."""
     lowered = text.lower()
     if "карточ" in lowered and "повтор" in lowered:
+        return True
+    if "карточ" in lowered and any(v in lowered for v in _START_REVIEW_VERBS):
         return True
     return "повтор" in lowered and any(v in lowered for v in _START_REVIEW_VERBS)
 

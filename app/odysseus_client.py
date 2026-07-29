@@ -74,16 +74,21 @@ async def get_active_endpoint() -> tuple[str, str]:
 async def agent_chat(
     message: str, base_url: str, model: str, session: str | None = None,
     system_prompt: str | None = None, require_tool: bool = False,
+    require_tool_type: str | None = None,
 ) -> dict:
     """Hits /api/v1/agent_chat — runs the real multi-round tool-execution
     loop (trilium_notes, schedule_send) instead of a single bare LLM call.
 
     require_tool=True tells Odysseus a tool call is mandatory for this
-    message (true for every passive-log message) — if the model instead
-    just narrates a fake "done" with nothing actually called (observed
-    live, repeatedly), Odysseus retries once with a correction rather than
-    silently returning the lie as a success. Longer client timeout since
-    both the extra tool round-trips and that retry add real latency."""
+    message (true for every passive-log message, and for active messages
+    the bot's own keyword heuristic flags as relay/reminder intent) — if
+    the model instead just narrates a fake "done" with nothing actually
+    called (observed live, repeatedly, in different unparseable formats
+    each time), Odysseus retries once with a correction, then falls back to
+    doing it deterministically itself rather than silently returning the
+    lie as a success. require_tool_type picks which fallback ("trilium_notes"
+    default, or "schedule_send"). Longer client timeout since both the extra
+    tool round-trips and that retry add real latency."""
     payload = {"message": message, "base_url": base_url, "model": model}
     if LLM_API_KEY:
         payload["api_key"] = LLM_API_KEY
@@ -93,6 +98,8 @@ async def agent_chat(
         payload["system_prompt"] = system_prompt
     if require_tool:
         payload["require_tool"] = True
+    if require_tool_type is not None:
+        payload["require_tool_type"] = require_tool_type
 
     resp = await get_client().post(
         f"{ODYSSEUS_URL}/api/v1/agent_chat", headers=_AUTH_HEADERS, json=payload, timeout=150

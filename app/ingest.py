@@ -37,20 +37,38 @@ def _build_prompt(user_id: int, kind: str) -> str:
     return INGEST_PROMPT_TEMPLATE.replace("__NAME__", name).replace("__KIND__", kind)
 
 
+_RELAY_OR_REMINDER_KEYWORDS = ("передай", "передать", "скажи", "напомни")
+
+
+def _looks_like_relay_or_reminder(text: str) -> bool:
+    """Lightweight heuristic gate for require_tool on ACTIVE messages —
+    unlike passive messages (always require trilium_notes), active covers
+    general Q&A too, so this can't be unconditional. Confirmed live: a real
+    relay request ("передай Остапу...") silently failed to reach him because
+    the model's schedule_send attempt came out malformed in a different,
+    unparseable way each time. A false positive here just costs an unneeded
+    retry/fallback message; a false negative silently drops a real relay —
+    the keyword check is intentionally loose in the risk-accepting direction."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in _RELAY_OR_REMINDER_KEYWORDS)
+
+
 async def _chat_with_session(
     user_id: int, message: str, base_url: str, model: str, system_prompt: str,
-    require_tool: bool = False,
+    require_tool: bool = False, require_tool_type: str | None = None,
 ) -> dict:
     session_id = await get_odysseus_session_id(user_id)
     try:
         result = await agent_chat(
             message, base_url, model, session=session_id,
             system_prompt=system_prompt, require_tool=require_tool,
+            require_tool_type=require_tool_type,
         )
     except SessionNotFoundError:
         result = await agent_chat(
             message, base_url, model, session=None,
             system_prompt=system_prompt, require_tool=require_tool,
+            require_tool_type=require_tool_type,
         )
 
     new_session_id = result.get("session_id")
@@ -83,7 +101,7 @@ async def ingest_incoming() -> None:
             # unlike handle_active_message() below which covers general Q&A too.
             result = await _chat_with_session(
                 message["user_id"], tagged_text, base_url, model, system_prompt,
-                require_tool=True,
+                require_tool=True, require_tool_type="trilium_notes",
             )
             # forced_fallback is only present when the model never called a
             # tool even after correction; False means the deterministic
@@ -112,7 +130,18 @@ async def handle_active_message(message_id: int, user_id: int, text: str, receiv
         base_url, model = await get_active_endpoint()
         tagged_text = _tag_message(user_id, text, received_at)
         system_prompt = _build_prompt(user_id, "активное")
-        result = await _chat_with_session(user_id, tagged_text, base_url, model, system_prompt)
+
+        relay_intent = _looks_like_relay_or_reminder(text)
+        result = await _chat_with_session(
+            user_id, tagged_text, base_url, model, system_prompt,
+            require_tool=relay_intent, require_tool_type="schedule_send" if relay_intent else None,
+        )
+        if relay_intent and result.get("forced_fallback") is False:
+            # Both the model and the deterministic fallback failed to act —
+            # unlike passive messages there's no 60s retry poll for active
+            # ones, so this is a real, visible loss, not just a delayed retry.
+            print(f"handle_active_message: relay/reminder not delivered for "
+                  f"incoming id={message_id} (require_tool fallback failed)", flush=True)
 
         answer = (result.get("response") or "").strip()
         if answer and not await send_message(user_id, answer):

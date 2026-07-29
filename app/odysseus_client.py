@@ -66,14 +66,24 @@ async def get_active_endpoint() -> tuple[str, str]:
             f"Endpoint {item.get('endpoint_name')!r} has no available models (GET /api/models)"
         )
 
-    # Prefer yandexgpt over whatever happens to be first in the list
-    # (currently aliceai-llm) — confirmed live 2026-07-29: yandexgpt
-    # reliably makes real native tool calls (trilium_notes, schedule_send,
-    # save_flashcard incl. the search-then-generate flashcard flow) via
-    # this exact endpoint, while aliceai-llm produced zero native tool
-    # calls across an entire night of testing. Falls back to models[0]
-    # if yandexgpt isn't in the list (e.g. a different endpoint/provider).
-    preferred = next((m for m in models if "yandexgpt" in m.lower()), None)
+    # Prefer yandexgpt/latest specifically over whatever happens to be first
+    # in the list (currently aliceai-llm) — confirmed live 2026-07-29:
+    # yandexgpt reliably makes real native tool calls (trilium_notes,
+    # schedule_send, save_flashcard incl. the search-then-generate flashcard
+    # flow) via this exact endpoint, while aliceai-llm produced zero native
+    # tool calls across an entire night of testing. Exact family match, not
+    # substring — "yandexgpt-5-lite"/"yandexgpt-5-pro" also contain
+    # "yandexgpt" but weren't the variant actually verified. Falls back to
+    # models[0] if the exact yandexgpt/latest URI isn't in the list (e.g. a
+    # different endpoint/provider).
+    def _model_family(uri: str) -> str:
+        parts = uri.split("/")
+        return parts[-2] if len(parts) >= 2 else uri
+
+    preferred = next(
+        (m for m in models if _model_family(m) == "yandexgpt" and m.endswith("/latest")),
+        None,
+    )
     model = preferred or models[0]
 
     _endpoint_cache = (item["url"], model)

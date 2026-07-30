@@ -14,6 +14,7 @@ from app.db import (
     get_due_cards,
     get_odysseus_session_id,
     get_open_question,
+    get_water_reminders_for_date,
     insert_card,
     insert_outgoing_messages,
     insert_reminder,
@@ -225,6 +226,23 @@ async def due_cards():
     warranted (send_daily_card_reminder/release_due_card_reminders both gate
     on this being non-empty before sending)."""
     return {name: len(await get_due_cards(uid)) for name, uid in NAME_TO_USER_ID.items()}
+
+
+@router.get("/water_reminders_today", dependencies=[Depends(require_bearer)])
+async def water_reminders_today():
+    """Diagnostic: today's water_reminders rows per known user, regardless
+    of send state — for confirming ensure_today_water_reminders() actually
+    created today's slots (and which ones have fired) after the migration
+    off in-memory APScheduler date-jobs."""
+    today = datetime.now(TIMEZONE).date()
+    return {
+        name: [
+            {"window": r["window_index"], "due_at": r["due_at"].isoformat(),
+             "sent_at": r["sent_at"].isoformat() if r["sent_at"] else None}
+            for r in await get_water_reminders_for_date(uid, today)
+        ]
+        for name, uid in NAME_TO_USER_ID.items()
+    }
 
 
 class ReprocessActiveRequest(BaseModel):

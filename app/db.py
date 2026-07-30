@@ -587,6 +587,18 @@ async def mark_water_reminder_sent(reminder_id: int) -> None:
     await pool.execute("UPDATE water_reminders SET sent_at = $1 WHERE id = $2", utcnow(), reminder_id)
 
 
+async def get_water_reminders_for_date(user_id: int, for_date) -> list[asyncpg.Record]:
+    """Diagnostic: today's rows for a user regardless of send state — for
+    confirming ensure_today_water_reminders() actually created them, unlike
+    get_due_water_reminders() which only surfaces still-unsent ones."""
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT window_index, due_at, sent_at FROM water_reminders "
+        "WHERE user_id = $1 AND for_date = $2 ORDER BY window_index",
+        user_id, for_date,
+    )
+
+
 async def claim_reminder(reminder_id: int) -> bool:
     """Atomically mark a reminder as sent, but only if nobody has claimed it
     yet. The immediate ("now") delivery check in app/sync.py and the 60s

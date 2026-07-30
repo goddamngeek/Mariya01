@@ -83,6 +83,22 @@ CREATE TABLE IF NOT EXISTS card_reminders (
     sent_at TIMESTAMPTZ
 );
 
+-- DB-backed like card_reminders/outgoing_messages, unlike the old purely
+-- in-memory APScheduler date-jobs this replaces: a row's due_at survives
+-- any number of process restarts untouched, so a redeploy can never again
+-- silently reroll an already-past slot and drop the day's reminder (see
+-- scheduler.py's release_due_water_reminders / ensure_today_water_reminders
+-- for the confirmed-live bug this fixes). One row per (user, window, day).
+CREATE TABLE IF NOT EXISTS water_reminders (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    window_index INTEGER NOT NULL,
+    for_date DATE NOT NULL,
+    due_at TIMESTAMPTZ NOT NULL,
+    sent_at TIMESTAMPTZ,
+    UNIQUE (user_id, window_index, for_date)
+);
+
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
@@ -539,6 +555,36 @@ async def release_card_reminder(reminder_id: int) -> None:
         "UPDATE card_reminders SET is_open = TRUE, due_at = NULL, sent_at = $1 WHERE id = $2",
         utcnow(), reminder_id,
     )
+
+
+# --- water reminders (DB-backed due_at, same shape as card_reminders' release
+# side — no is_open/deferral here since there's nothing to defer, just a
+# fire-once slot per user/window/day) -----------------------------------
+
+async def ensure_water_reminder(user_id: int, window_index: int, for_date, due_at: datetime) -> None:
+    """Idempotent — ON CONFLICT DO NOTHING means calling this again for a
+    (user, window, day) that already has a row (e.g. every restart re-runs
+    the day's setup) is always a harmless no-op, unlike the old in-memory
+    APScheduler jobs it replaces which got wiped and re-rolled on every
+    restart."""
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO water_reminders (user_id, window_index, for_date, due_at) "
+        "VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, window_index, for_date) DO NOTHING",
+        user_id, window_index, for_date, due_at,
+    )
+
+
+async def get_due_water_reminders() -> list[asyncpg.Record]:
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM water_reminders WHERE sent_at IS NULL AND due_at <= $1", utcnow(),
+    )
+
+
+async def mark_water_reminder_sent(reminder_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE water_reminders SET sent_at = $1 WHERE id = $2", utcnow(), reminder_id)
 
 
 async def claim_reminder(reminder_id: int) -> bool:

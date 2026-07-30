@@ -18,15 +18,18 @@ from app.config import (
 from app.db import (
     claim_reminder,
     create_card_reminder,
+    ensure_water_reminder,
     get_due_card_reminders,
     get_due_cards,
     get_due_deferred_questions,
     get_due_reminders,
+    get_due_water_reminders,
     get_idle_card_sessions,
     get_registered_user_ids,
     has_pending_card_reminder,
     has_pending_question,
     mark_question_sent,
+    mark_water_reminder_sent,
     pick_outgoing_message,
     release_card_reminder,
 )
@@ -181,31 +184,33 @@ async def close_idle_card_sessions() -> None:
         await close_idle_session(session)
 
 
-async def send_water_reminder(user_id: int) -> None:
-    text = random.choice(WATER_REMINDER_TEXTS)
-    if not await send_message(user_id, text):
-        print(f"failed to send water reminder to user={user_id}", flush=True)
-
-
-async def schedule_today_water_reminders() -> None:
+async def ensure_today_water_reminders() -> None:
+    """DB-backed (water_reminders table), unlike the old in-memory
+    APScheduler date-jobs this replaces — ensure_water_reminder() is an
+    idempotent INSERT ... ON CONFLICT DO NOTHING, so re-running this on
+    every process restart (not just the 00:05 cron tick) is always safe:
+    a row already created for today is left completely untouched, so a
+    redeploy can no longer reroll or drop an already-scheduled slot the way
+    the old in-memory version confirmed-live could. Actual sending happens
+    from release_due_water_reminders() below, polled every 60s regardless
+    of how many times the process has restarted since this ran."""
     now = datetime.now(TIMEZONE)
+    today = now.date()
     for user_id in await get_registered_user_ids():
         for i, (start, end) in enumerate(WATER_REMINDER_WINDOWS):
-            run_date = _random_time_in_window(start, end)
-            if run_date <= now:
-                continue
-            scheduler.add_job(
-                send_water_reminder,
-                trigger="date",
-                run_date=run_date,
-                args=[user_id],
-                id=f"water_reminder_{user_id}_{i}",
-                replace_existing=True,
-            )
-            print(
-                f"scheduled water reminder #{i} for user={user_id} at {run_date.isoformat()}",
-                flush=True,
-            )
+            due_at = _random_time_in_window(start, end)
+            if due_at <= now:
+                continue  # window already fully elapsed today — nothing to schedule
+            await ensure_water_reminder(user_id, i, today, due_at)
+
+
+async def release_due_water_reminders() -> None:
+    for row in await get_due_water_reminders():
+        text = random.choice(WATER_REMINDER_TEXTS)
+        if await send_message(row["user_id"], text):
+            await mark_water_reminder_sent(row["id"])
+        else:
+            print(f"failed to send water reminder id={row['id']} user={row['user_id']}, will retry", flush=True)
 
 
 async def start_scheduler() -> None:
@@ -215,7 +220,7 @@ async def start_scheduler() -> None:
         id="schedule_daily_question",
     )
     scheduler.add_job(
-        schedule_today_water_reminders,
+        ensure_today_water_reminders,
         trigger=CronTrigger(hour=0, minute=5, timezone=TIMEZONE),
         id="schedule_daily_water_reminders",
     )
@@ -243,6 +248,12 @@ async def start_scheduler() -> None:
         id="release_due_reminders",
     )
     scheduler.add_job(
+        release_due_water_reminders,
+        trigger="interval",
+        seconds=60,
+        id="release_due_water_reminders",
+    )
+    scheduler.add_job(
         ingest_incoming,
         trigger="interval",
         seconds=60,
@@ -256,5 +267,5 @@ async def start_scheduler() -> None:
     )
     scheduler.start()
     await schedule_today_question()
-    await schedule_today_water_reminders()
+    await ensure_today_water_reminders()
     await schedule_today_card_reminder()

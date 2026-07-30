@@ -1,7 +1,7 @@
 from app.config import DEFERRAL_DELAY_HOURS
 from app.db import apply_deferral, consume_card_reminder, defer_card_reminder, get_outgoing_by_id, is_registered
 from app.flashcard_session import handle_card_grade, start_review_session
-from app.telegram import answer_callback_query, clear_message_buttons
+from app.telegram import answer_callback_query, clear_message_buttons, delete_message, send_message
 
 
 async def process_callback_query(callback_query: dict) -> None:
@@ -50,12 +50,18 @@ async def _handle_card_reminder_callback(user_id: int, message_id: int, data: st
     if len(parts) != 3 or not parts[1].isdigit() or parts[2] not in ("now", "later"):
         return
     reminder_id = int(parts[1])
-    await clear_message_buttons(user_id, message_id)
 
     if parts[2] == "later":
+        # Unlike "Сейчас" (below), there's no session starting here to
+        # explain the message's continued presence — confirmed live: leaving
+        # it in place (buttons-only cleared) read as the tap having done
+        # nothing at all, and nothing told the user it was actually deferred.
         await defer_card_reminder(reminder_id, DEFERRAL_DELAY_HOURS)
+        await delete_message(user_id, message_id)
+        await send_message(user_id, f"Хорошо, напомню через {DEFERRAL_DELAY_HOURS} ч.")
         return
 
+    await clear_message_buttons(user_id, message_id)
     await consume_card_reminder(reminder_id)
     # The reminder message itself is "the message that started the session"
     # and stays put per spec — only the per-card messages get cleaned up.

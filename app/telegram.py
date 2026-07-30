@@ -33,6 +33,35 @@ async def send_message(chat_id: int | str, text: str) -> bool:
         return False
 
 
+REVIEW_BUTTON_TEXT = "🗂 Повторить карточки"
+
+
+async def send_message_with_persistent_keyboard(chat_id: int | str, text: str) -> bool:
+    """Attaches a persistent reply keyboard (stays visible at the bottom of
+    the chat across every future message, unlike an inline button which is
+    pinned to the one message it was sent on) with a single "start review"
+    button — added so starting a review session doesn't depend on phrasing
+    a message right for Odysseus's NL heuristics at all; tapping it sends
+    REVIEW_BUTTON_TEXT back as a plain message, intercepted directly in
+    main.py before anything reaches Odysseus."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": {
+            "keyboard": [[{"text": REVIEW_BUTTON_TEXT}]],
+            "resize_keyboard": True,
+        },
+    }
+    try:
+        resp = await get_client().post(url, json=payload)
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        print(f"telegram sendMessage (with persistent keyboard) failed: {exc}", flush=True)
+        return False
+
+
 async def send_message_with_button(
     chat_id: int | str, text: str, button_text: str, callback_data: str
 ) -> bool:

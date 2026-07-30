@@ -11,6 +11,7 @@ from app.db import (
     close_question,
     count_open_questions,
     dedupe_cards,
+    get_due_cards,
     get_odysseus_session_id,
     get_open_question,
     insert_card,
@@ -215,6 +216,15 @@ async def open_questions():
     silently block that user's daily question forever (see resend_question's
     docstring)."""
     return {name: await count_open_questions(uid) for name, uid in NAME_TO_USER_ID.items()}
+
+
+@router.get("/due_cards", dependencies=[Depends(require_bearer)])
+async def due_cards():
+    """Diagnostic: count of currently-due flashcards per known user — for
+    confirming whether a daily card reminder that was sent was actually
+    warranted (send_daily_card_reminder/release_due_card_reminders both gate
+    on this being non-empty before sending)."""
+    return {name: len(await get_due_cards(uid)) for name, uid in NAME_TO_USER_ID.items()}
 
 
 class ReprocessActiveRequest(BaseModel):

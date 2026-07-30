@@ -108,6 +108,27 @@ def _looks_like_start_review(text: str) -> bool:
     return "повтор" in lowered and any(v in lowered for v in _START_REVIEW_VERBS)
 
 
+_NOTE_REQUEST_KEYWORDS = ("запиши", "зафиксируй", "запомни", "занеси")
+
+
+def _looks_like_note_request(text: str) -> bool:
+    """"запиши в заметку...", "зафиксируй что...", "запомни это" — an ACTIVE
+    request to log something to Trilium (see prompts.py's "зафиксировать/
+    записать/запомнить" instruction). Unlike passive messages (ALWAYS forced
+    to trilium_notes — see ingest_incoming), active messages had NO
+    require_tool coverage for this at all until now: confirmed live, asked
+    to log credit-card principles to his journal, the model replied "Готово,
+    заметка... добавлена" with 0 native calls / 0 tool blocks — a pure
+    hallucinated confirmation, and since require_tool_type was never set for
+    this message shape, there was no retry and no fallback to catch it. Kept
+    narrow (explicit "добавь" needs "заметк"/"журнал" alongside it) so it
+    doesn't collide with card generation's "добавь карточки"."""
+    lowered = text.lower()
+    if any(kw in lowered for kw in _NOTE_REQUEST_KEYWORDS):
+        return True
+    return "добавь" in lowered and any(kw in lowered for kw in ("заметк", "журнал"))
+
+
 _STOP_SESSION_KEYWORDS = ("стоп", "останов", "хватит", "отмен", "прекрати")
 _RESTART_SESSION_KEYWORDS = ("заново", "сначала")
 
@@ -235,20 +256,25 @@ async def handle_active_message(
         # "сделай карточки для повторения из заметки X" matches both.
         card_gen_intent = _looks_like_card_generation(text)
         start_review_intent = (not card_gen_intent) and _looks_like_start_review(text)
+        note_intent = (
+            not (card_gen_intent or start_review_intent) and _looks_like_note_request(text)
+        )
         if relay_intent:
             require_tool_type = "schedule_send"
         elif start_review_intent:
             require_tool_type = "start_flashcard_session"
         elif card_gen_intent:
             require_tool_type = "none"
+        elif note_intent:
+            require_tool_type = "trilium_notes"
         else:
             require_tool_type = None
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=relay_intent or start_review_intent or card_gen_intent,
+            require_tool=relay_intent or start_review_intent or card_gen_intent or note_intent,
             require_tool_type=require_tool_type,
         )
-        if (relay_intent or start_review_intent) and result.get("forced_fallback") is False:
+        if (relay_intent or start_review_intent or note_intent) and result.get("forced_fallback") is False:
             # Both the model and the deterministic fallback failed to act —
             # unlike passive messages there's no 60s retry poll for active
             # ones, so this is a real, visible loss, not just a delayed retry.

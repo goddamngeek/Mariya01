@@ -44,11 +44,25 @@ scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 
 def _random_time_in_window(start: time, end: time) -> datetime:
+    """Every schedule_today_*() call re-picks today's random slot from
+    scratch — not just at the 00:05 cron tick, but on EVERY process restart
+    too (schedule_today_* runs from lifespan() on every deploy). Confirmed
+    live: with the window's lower bound fixed at `start` regardless of the
+    current time, a restart landing partway through an already-open window
+    could roll a slot that's already in the past — and the caller's
+    `run_date <= now: skip` then silently dropped that window's reminder for
+    the rest of the day, with no retry (water reminders have no due_at/
+    release-job safety net at all, unlike card reminders and questions).
+    Clamping the lower bound to `now` guarantees a fresh restart always rolls
+    a still-future slot for any window that hasn't fully elapsed yet."""
     now = datetime.now(TIMEZONE)
     start_dt = now.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
     end_dt = now.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
-    window_seconds = int((end_dt - start_dt).total_seconds())
-    return start_dt + timedelta(seconds=random.randint(0, window_seconds))
+    lower = max(start_dt, now)
+    if lower >= end_dt:
+        return lower  # window already fully elapsed — caller's run_date<=now skip still applies
+    window_seconds = int((end_dt - lower).total_seconds())
+    return lower + timedelta(seconds=random.randint(0, window_seconds))
 
 
 def _random_time_today() -> datetime:

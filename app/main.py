@@ -10,12 +10,7 @@ from app.odysseus_client import close_client as close_odysseus_client
 from app.scheduler import scheduler, start_scheduler
 from app.service import process_incoming_message
 from app.sync import router as sync_router
-from app.telegram import (
-    REVIEW_BUTTON_TEXT,
-    close_client as close_telegram_client,
-    send_message,
-    send_message_with_persistent_keyboard,
-)
+from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
 
 _REVIEW_STATUS_TEXT = {
     "already_open": "Сессия повторения уже идёт.",
@@ -26,6 +21,7 @@ _REVIEW_STATUS_TEXT = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await set_bot_commands()
     await start_scheduler()
     yield
     scheduler.shutdown(wait=False)
@@ -40,7 +36,7 @@ app.include_router(sync_router)
 
 async def handle_start(chat_id: int) -> None:
     if await is_registered(chat_id):
-        await send_message_with_persistent_keyboard(chat_id, "бот активен")
+        await send_message(chat_id, "бот активен")
         return
 
     if await count_registered() >= MAX_REGISTERED_USERS:
@@ -49,7 +45,7 @@ async def handle_start(chat_id: int) -> None:
 
     await register_user(chat_id)
     await seed_defaults({chat_id})
-    await send_message_with_persistent_keyboard(chat_id, "бот активен, ты зарегистрирован")
+    await send_message(chat_id, "бот активен, ты зарегистрирован")
 
 
 @app.post("/webhook/telegram")
@@ -75,7 +71,7 @@ async def telegram_webhook(request: Request):
     if not await is_registered(chat_id):
         return {"ok": True}
 
-    if text.strip() in (REVIEW_BUTTON_TEXT, "/cards"):
+    if text.strip() == "/cards":
         # Direct trigger, entirely bypassing Odysseus and its NL heuristics —
         # requested as a simpler, guaranteed-reliable alternative after
         # several rounds of hardening "хочу повторить карточки"-style intent

@@ -18,6 +18,7 @@ from app.config import (
 from app.db import (
     claim_reminder,
     create_card_reminder,
+    create_ezhednevnik_prompt,
     ensure_water_reminder,
     get_due_card_reminders,
     get_due_cards,
@@ -26,6 +27,7 @@ from app.db import (
     get_due_water_reminders,
     get_idle_card_sessions,
     get_registered_user_ids,
+    has_open_ezhednevnik,
     has_pending_card_reminder,
     has_pending_question,
     mark_question_sent,
@@ -35,6 +37,7 @@ from app.db import (
 )
 from app.flashcard_session import close_idle_session
 from app.ingest import ingest_incoming
+from app.prompts import EZHEDNEVNIK_QUESTION_TEXT
 from app.reminders import deliver_reminder
 from app.telegram import send_message, send_message_with_button, send_message_with_buttons
 
@@ -117,6 +120,24 @@ async def schedule_today_question() -> None:
 async def release_due_questions() -> None:
     for row in await get_due_deferred_questions():
         await _send_question(row["user_id"], row)
+
+
+async def send_ezhednevnik_prompts(slot: str) -> None:
+    """Fixed-time daily journal check-in — replaces the old random-pool
+    daily question above (schedule_today_question/send_daily_question are
+    no longer scheduled in start_scheduler(), left in place only in case
+    a question was already in flight at deploy time). Two fixed times
+    instead of one random window: 'am' at noon (just the before-lunch
+    feeling), 'pm' in the evening (the rest of the ЕЖЕДНЕВНИК questions) —
+    see prompts.py's EZHEDNEVNIK_QUESTION_TEXT for the exact wording."""
+    text = EZHEDNEVNIK_QUESTION_TEXT[slot]
+    for user_id in await get_registered_user_ids():
+        if await has_open_ezhednevnik(user_id):
+            print(f"user={user_id} already has an open ezhednevnik check-in, skipping {slot}", flush=True)
+            continue
+        await create_ezhednevnik_prompt(user_id, slot)
+        if not await send_message(user_id, text):
+            print(f"failed to send ezhednevnik {slot} prompt to user={user_id}", flush=True)
 
 
 async def release_due_reminders() -> None:
@@ -214,10 +235,23 @@ async def release_due_water_reminders() -> None:
 
 
 async def start_scheduler() -> None:
+    # schedule_today_question / send_daily_question above are no longer
+    # scheduled here — replaced by the fixed-time ezhednevnik check-ins
+    # below, per explicit choice over keeping the old random daily question.
+    # release_due_questions stays registered (harmless) purely to still
+    # release any question that was already deferred at the moment this
+    # shipped; nothing new will ever create one going forward.
     scheduler.add_job(
-        schedule_today_question,
-        trigger=CronTrigger(hour=0, minute=5, timezone=TIMEZONE),
-        id="schedule_daily_question",
+        send_ezhednevnik_prompts,
+        trigger=CronTrigger(hour=12, minute=0, timezone=TIMEZONE),
+        args=["am"],
+        id="ezhednevnik_am",
+    )
+    scheduler.add_job(
+        send_ezhednevnik_prompts,
+        trigger=CronTrigger(hour=18, minute=0, timezone=TIMEZONE),
+        args=["pm"],
+        id="ezhednevnik_pm",
     )
     scheduler.add_job(
         ensure_today_water_reminders,
@@ -266,6 +300,5 @@ async def start_scheduler() -> None:
         id="close_idle_card_sessions",
     )
     scheduler.start()
-    await schedule_today_question()
     await ensure_today_water_reminders()
     await schedule_today_card_reminder()

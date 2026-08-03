@@ -7,7 +7,9 @@ app/sync.py), just no longer self-called from here.
 
 ACTIVE messages (real questions) are handled separately and immediately —
 see handle_active_message(), called straight from app/service.py rather than
-waiting for this poll — so this module only ever processes kind='passive'.
+waiting for this poll — so this module's ingest_incoming() only ever
+processes kind='passive' and kind='ezhednevnik_am'/'ezhednevnik_pm' (replies
+to the daily journal check-ins, see EZHEDNEVNIK_PROMPT_TEMPLATE).
 """
 
 import traceback
@@ -24,7 +26,12 @@ from app.db import (
 from app.flashcard_session import restart_review_session, stop_review_session
 from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint
 from app.people import USER_NAMES
-from app.prompts import INGEST_PROMPT_TEMPLATE
+from app.prompts import (
+    EZHEDNEVNIK_PROMPT_TEMPLATE,
+    EZHEDNEVNIK_SLOT_INSTRUCTIONS,
+    EZHEDNEVNIK_SLOT_LABELS,
+    INGEST_PROMPT_TEMPLATE,
+)
 from app.telegram import send_message
 
 
@@ -46,6 +53,17 @@ def _tag_message(
 def _build_prompt(user_id: int, kind: str) -> str:
     name = USER_NAMES.get(user_id, str(user_id))
     return INGEST_PROMPT_TEMPLATE.replace("__NAME__", name).replace("__KIND__", kind)
+
+
+def _build_ezhednevnik_prompt(user_id: int, slot: str) -> str:
+    name = USER_NAMES.get(user_id, str(user_id))
+    return (
+        EZHEDNEVNIK_PROMPT_TEMPLATE
+        .replace("__NAME__", name)
+        .replace("__SLOT__", slot)
+        .replace("__SLOT_LABEL__", EZHEDNEVNIK_SLOT_LABELS[slot])
+        .replace("__SLOT_INSTRUCTIONS__", EZHEDNEVNIK_SLOT_INSTRUCTIONS[slot])
+    )
 
 
 _RELAY_OR_REMINDER_KEYWORDS = ("передай", "передать", "скажи", "напомни")
@@ -255,8 +273,14 @@ async def _chat_with_session(
     return result
 
 
+_EZHEDNEVNIK_KINDS = ("ezhednevnik_am", "ezhednevnik_pm")
+
+
 async def ingest_incoming() -> None:
-    incoming = [m for m in await pull_unconfirmed_incoming() if m["kind"] == "passive"]
+    incoming = [
+        m for m in await pull_unconfirmed_incoming()
+        if m["kind"] == "passive" or m["kind"] in _EZHEDNEVNIK_KINDS
+    ]
     if not incoming:
         return
 
@@ -275,23 +299,37 @@ async def ingest_incoming() -> None:
             tagged_text = _tag_message(
                 message["user_id"], message["text"], message["created_at"], message["reply_to_text"],
             )
-            system_prompt = _build_prompt(message["user_id"], "пассивное")
-            # Every passive message must end in a trilium_notes append per
-            # INGEST_PROMPT_TEMPLATE's passive branch — never optional here,
-            # unlike handle_active_message() below which covers general Q&A too.
-            result = await _chat_with_session(
-                message["user_id"], tagged_text, base_url, model, system_prompt,
-                require_tool=True, require_tool_type="trilium_notes",
-            )
-            # forced_fallback is only present when the model never called a
-            # tool even after correction; False means the deterministic
-            # fallback in Odysseus ALSO couldn't act (unexpected message
-            # shape) — nothing was actually logged despite the HTTP 200, so
-            # this must not be acked, or the message is lost for good.
-            if result.get("forced_fallback") is False:
-                print(f"ingest: nothing was logged for incoming id={message['id']} "
-                      f"(require_tool fallback failed) — will retry", flush=True)
-                continue
+            if message["kind"] in _EZHEDNEVNIK_KINDS:
+                slot = message["kind"].removeprefix("ezhednevnik_")
+                system_prompt = _build_ezhednevnik_prompt(message["user_id"], slot)
+                # No deterministic fallback exists for fill_ezhednevnik (same
+                # reasoning as save_flashcard/card generation — parsing a
+                # free-text reply into structured fields genuinely needs
+                # model judgment, there's no raw-text equivalent to persist
+                # as-is), so require_tool_type="none": one corrective retry,
+                # then accept whatever happened.
+                result = await _chat_with_session(
+                    message["user_id"], tagged_text, base_url, model, system_prompt,
+                    require_tool=True, require_tool_type="none",
+                )
+            else:
+                system_prompt = _build_prompt(message["user_id"], "пассивное")
+                # Every passive message must end in a trilium_notes append per
+                # INGEST_PROMPT_TEMPLATE's passive branch — never optional here,
+                # unlike handle_active_message() below which covers general Q&A too.
+                result = await _chat_with_session(
+                    message["user_id"], tagged_text, base_url, model, system_prompt,
+                    require_tool=True, require_tool_type="trilium_notes",
+                )
+                # forced_fallback is only present when the model never called a
+                # tool even after correction; False means the deterministic
+                # fallback in Odysseus ALSO couldn't act (unexpected message
+                # shape) — nothing was actually logged despite the HTTP 200, so
+                # this must not be acked, or the message is lost for good.
+                if result.get("forced_fallback") is False:
+                    print(f"ingest: nothing was logged for incoming id={message['id']} "
+                          f"(require_tool fallback failed) — will retry", flush=True)
+                    continue
         except Exception:
             print(f"ingest failed for incoming id={message['id']}:", flush=True)
             traceback.print_exc()

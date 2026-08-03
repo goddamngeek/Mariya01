@@ -51,3 +51,56 @@ INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло �
 ```log_sale
 {"person_name": "__NAME__", "item": "...", "status": "..."}
 ```"""
+
+# Replaces the old random-pool daily question (see scheduler.py). A
+# dedicated prompt, not a branch of INGEST_PROMPT_TEMPLATE, since the
+# instructions here are fundamentally different — not "log to journal" but
+# "parse into these specific fields and call fill_ezhednevnik". Separate
+# AM/PM instructions because each slot only covers its own subset of the
+# real ЕЖЕДНЕВНИК spreadsheet's columns (verified live against the actual
+# note — see fill_ezhednevnik's own docstring on the Odysseus side).
+EZHEDNEVNIK_PROMPT_TEMPLATE = """Ты — Odysseus. Человек по имени __NAME__ ответил в Telegram на плановый чек-ин ежедневника (__SLOT_LABEL__). Сообщение начинается с тега [__NAME__ ДД.ММ.ГГГГ ЧЧ:ММ МСК] — это метаданные, текст после тега — сам ответ.
+
+Твой ответ здесь никто не читает — разбери ответ и вызови тул fill_ezhednevnik с person_name="__NAME__", slot="__SLOT__" и полями ниже.
+
+__SLOT_INSTRUCTIONS__
+
+Правила разбора:
+— Заполняй ТОЛЬКО те поля, на которые человек реально ответил в этом сообщении. Если что-то не упомянул — просто не передавай это поле в вызове, не выдумывай значение и не пиши "не указано".
+— *_score — только если он явно назвал число или оценку ("70 баллов", "на 8 из 10" → переведи в шкалу 0-100, т.е. 80). Без явной оценки в тексте — не передавай.
+— Содержательные ответы (event, wdis_*, wdil, mistakes, hdif_*) передавай своими словами человека, не сокращая суть — можно только убрать словесный мусор вроде "ну как-то так".
+
+После вызова тула ответь одним коротким предложением, подтвердив, что записал — без пересказа содержимого.
+
+```fill_ezhednevnik
+{"person_name": "__NAME__", "slot": "__SLOT__", "поле": "..."}
+```"""
+
+EZHEDNEVNIK_SLOT_INSTRUCTIONS = {
+    "am": (
+        'Это утренний чек-ин (в полдень) — единственный вопрос был "Как ты себя чувствовал до обеда?" '
+        "(можно с оценкой в баллах). Заполни hdif_am, и hdif_am_score если названа оценка."
+    ),
+    "pm": (
+        "Это вечерний чек-ин — вопросы были: заметное событие дня; как себя чувствовал после обеда "
+        "(можно с оценкой); что заметил в себе; что заметил на рынке; что заметил в новостях; "
+        "чему научился; какие ошибки сделал. Заполни event, hdif_pm (и hdif_pm_score, если названа "
+        "оценка), wdis_self, wdis_market, wdis_news, wdil, mistakes — те из них, что человек затронул."
+    ),
+}
+
+EZHEDNEVNIK_SLOT_LABELS = {"am": "полуденный", "pm": "вечерний"}
+
+EZHEDNEVNIK_QUESTION_TEXT = {
+    "am": "Как ты себя чувствовал сегодня до обеда? Если хочешь — оцени в баллах (0-100).",
+    "pm": (
+        "Вечерний чек-ин:\n"
+        "1. Было сегодня что-то заметное?\n"
+        "2. Как себя чувствовал после обеда? (можно с оценкой в баллах)\n"
+        "3. Что заметил в себе?\n"
+        "4. Что заметил на рынке?\n"
+        "5. Что заметил в новостях?\n"
+        "6. Чему сегодня научился?\n"
+        "7. Какие ошибки сделал?"
+    ),
+}

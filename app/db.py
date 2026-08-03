@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS water_reminders (
     UNIQUE (user_id, window_index, for_date)
 );
 
+-- Replaces the old random-pool daily question (see scheduler.py) — two
+-- fixed check-ins per day (noon/evening) instead of one random question.
+-- No pool/deferral needed since the text is fixed per slot; is_open just
+-- gates "don't send a second one while the first is still unanswered".
+CREATE TABLE IF NOT EXISTS ezhednevnik_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    slot TEXT NOT NULL CHECK (slot IN ('am', 'pm')),
+    sent_at TIMESTAMPTZ NOT NULL,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE
+);
+
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
@@ -282,6 +294,40 @@ async def close_question(question_id: int) -> None:
     await pool.execute(
         "UPDATE outgoing_messages SET is_open = FALSE WHERE id = $1", question_id
     )
+
+
+# --- ежедневник check-ins (replaces the random-pool daily question) -------
+
+async def has_open_ezhednevnik(user_id: int) -> bool:
+    pool = await get_pool()
+    row = await pool.fetchval(
+        "SELECT 1 FROM ezhednevnik_prompts WHERE user_id = $1 AND is_open = TRUE LIMIT 1",
+        user_id,
+    )
+    return row is not None
+
+
+async def create_ezhednevnik_prompt(user_id: int, slot: str) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "INSERT INTO ezhednevnik_prompts (user_id, slot, sent_at, is_open) "
+        "VALUES ($1, $2, $3, TRUE) RETURNING id",
+        user_id, slot, utcnow(),
+    )
+
+
+async def get_open_ezhednevnik_prompt(user_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM ezhednevnik_prompts WHERE user_id = $1 AND is_open = TRUE "
+        "ORDER BY sent_at DESC LIMIT 1",
+        user_id,
+    )
+
+
+async def close_ezhednevnik_prompt(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE ezhednevnik_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
 
 
 async def apply_deferral(question_id: int, user_id: int, deferral_count: int) -> None:

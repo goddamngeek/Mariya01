@@ -27,7 +27,7 @@ from app.flashcard_session import start_review_session
 from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import deliver_reminder
-from app.scheduler import _send_question
+from app.scheduler import _send_question, send_ezhednevnik_prompts
 
 router = APIRouter(prefix="/sync")
 
@@ -243,6 +243,19 @@ async def water_reminders_today():
         ]
         for name, uid in NAME_TO_USER_ID.items()
     }
+
+
+class TriggerEzhednevnikRequest(BaseModel):
+    slot: Literal["am", "pm"]
+
+
+@router.post("/trigger_ezhednevnik", dependencies=[Depends(require_bearer)])
+async def trigger_ezhednevnik(body: TriggerEzhednevnikRequest):
+    """Manual on-demand trigger, reusing the exact same code path as the
+    12:00/18:00 cron ticks — for testing the check-in flow without waiting
+    for the scheduled time (same reasoning as /resend_question)."""
+    await send_ezhednevnik_prompts(body.slot)
+    return {"ok": True}
 
 
 class ReprocessActiveRequest(BaseModel):

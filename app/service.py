@@ -3,7 +3,9 @@ import traceback
 
 from app.config import OUTGOING_DEDUP_DAYS
 from app.db import (
+    close_ezhednevnik_prompt,
     close_question,
+    get_open_ezhednevnik_prompt,
     get_open_question,
     insert_incoming_message,
     mark_reply_sent,
@@ -20,17 +22,29 @@ _background_tasks: set[asyncio.Task] = set()
 
 
 async def process_incoming_message(user_id: int, text: str, reply_to_text: str | None = None) -> None:
-    # A pending question at arrival time means this message is the user's
-    # answer to it (passive) rather than a spontaneous question (active) —
-    # see app/ingest.py for how each kind is handled downstream.
+    # A pending question/check-in at arrival time means this message is the
+    # user's answer to it (passive-style) rather than a spontaneous message
+    # (active) — see app/ingest.py for how each kind is handled downstream.
+    # The old random daily question and the new ежедневник check-ins are
+    # mutually exclusive in practice (the former is being phased out), but
+    # checked in this order regardless — a question takes priority if both
+    # were somehow open at once.
     open_question = await get_open_question(user_id)
-    kind = "passive" if open_question is not None else "active"
+    open_ezhednevnik = None if open_question is not None else await get_open_ezhednevnik_prompt(user_id)
+    if open_question is not None:
+        kind = "passive"
+    elif open_ezhednevnik is not None:
+        kind = f"ezhednevnik_{open_ezhednevnik['slot']}"
+    else:
+        kind = "active"
     received_at = utcnow()
 
     message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
 
     if open_question is not None:
         await close_question(open_question["id"])
+    elif open_ezhednevnik is not None:
+        await close_ezhednevnik_prompt(open_ezhednevnik["id"])
 
     if kind == "active":
         # A real, formulated answer is coming from Odysseus shortly — the

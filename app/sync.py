@@ -25,7 +25,7 @@ from app.db import (
     utcnow,
 )
 from app.flashcard_session import start_review_session
-from app.ingest import handle_active_message, send_kanban_status
+from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import deliver_reminder
 from app.scheduler import _send_question, send_ezhednevnik_prompts
@@ -257,24 +257,6 @@ async def ezhednevnik_state():
             for r in await get_ezhednevnik_prompts_for_user(uid)
         ]
     return result
-
-
-class DebugKanbanRequest(BaseModel):
-    user_id: int
-
-
-@router.post("/debug_kanban", dependencies=[Depends(require_bearer)])
-async def debug_kanban(body: DebugKanbanRequest):
-    """Temporary: /kanban 500s in production with no visible traceback (no
-    direct log access to the Northflank deployment) — this surfaces the
-    real exception directly in the response so it can be diagnosed and
-    fixed, instead of guessing. Remove once the root cause is fixed."""
-    import traceback
-    try:
-        await send_kanban_status(body.user_id)
-        return {"ok": True}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc), "traceback": traceback.format_exc()}
 
 
 class TriggerEzhednevnikRequest(BaseModel):

@@ -129,6 +129,86 @@ def _looks_like_note_request(text: str) -> bool:
     return "добавь" in lowered and any(kw in lowered for kw in ("заметк", "журнал"))
 
 
+_MONEY_KEYWORDS = (
+    "потратил", "потратила", "заработал", "заработала", "купил", "купила",
+    "₽", "руб", "доллар", "евро", "€", "цена", "стоит", "стоимост",
+)
+
+
+def _looks_like_finance(text: str) -> bool:
+    """Whether a note request (see _looks_like_note_request above) is
+    money-related — decides target_note ("ФИНАНСЫ // FINANCE" vs the
+    person's own Журнал), per the new "Наша жизнь" Trilium architecture
+    where finances get their own branch. Only ever checked alongside an
+    explicit log-request verb, same as the plain journal path — a bare
+    mention of money in general chat doesn't get auto-logged, matching how
+    active messages have always required an explicit "запиши"/"зафиксируй"
+    to log anything at all (unlike passive replies to the daily question,
+    which log unconditionally)."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in _MONEY_KEYWORDS)
+
+
+_KANBAN_KEYWORDS = ("канбан", "бэклог", "в работе", "будущие задачи")
+
+
+def _looks_like_kanban_status(text: str) -> bool:
+    """"что в канбане?" / "что в работе?" / "покажи бэклог" — a pure,
+    judgment-free read (see kanban_status's own docstring on why board
+    membership can't be inferred from the note tree), so this gets a real
+    deterministic fallback in webhook_routes.py, same tier as
+    start_flashcard_session."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in _KANBAN_KEYWORDS)
+
+
+_CHINESE_WORD_VERBS = ("добавь", "запиши", "выучил", "выучила", "новое слово", "занеси")
+
+
+def _looks_like_chinese_word(text: str) -> bool:
+    """"добавь иероглиф ..." / "запиши новое китайское слово ..." — adding to
+    Ostap's Chinese-vocabulary board. Requires an explicit add-type verb
+    alongside the Chinese context, not just any mention of "иероглиф" — a
+    plain "покажи иероглифы" (unimplemented read path) falls through to
+    general Q&A instead of misfiring an add call."""
+    lowered = text.lower()
+    if "иероглиф" not in lowered and "китайск" not in lowered:
+        return False
+    return any(v in lowered for v in _CHINESE_WORD_VERBS)
+
+
+def _looks_like_book_review(text: str) -> bool:
+    """"отзыв на книгу ..." / "мне не понравилась книга ..." — checked
+    BEFORE _looks_like_book_add since both share the "книг" context word;
+    review-specific keywords win the ambiguity, same precedence pattern as
+    card generation vs. review-session start."""
+    lowered = text.lower()
+    return "книг" in lowered and any(
+        kw in lowered for kw in ("отзыв", "ревью", "понравилась", "не понравилась", "мнение")
+    )
+
+
+def _looks_like_book_add(text: str) -> bool:
+    """"добавь книгу ..." / "хочу почитать ..." / "начал читать ..." —
+    adding a new book note under КНИГИ. "добавь"/"добавить" need "книг"
+    alongside them (too generic alone — collides with note/card-generation
+    "добавь"), but "хочу почитать X"/"начал читать X" are distinctive enough
+    to stand alone — a real title usually won't itself contain "книг"."""
+    lowered = text.lower()
+    if "книг" in lowered and any(kw in lowered for kw in ("добавь", "добавить")):
+        return True
+    return any(kw in lowered for kw in ("хочу почитать", "буду читать", "начал читать", "начала читать"))
+
+
+_SALE_KEYWORDS = ("продал", "продала", "продажа", "выручил", "выручила")
+
+
+def _looks_like_sale(text: str) -> bool:
+    """"продал куртку за 3000" — logging a sale on the ПРОДАЖИ board."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in _SALE_KEYWORDS)
+
+
 _STOP_SESSION_KEYWORDS = ("стоп", "останов", "хватит", "отмен", "прекрати")
 _RESTART_SESSION_KEYWORDS = ("заново", "сначала")
 
@@ -252,29 +332,57 @@ async def handle_active_message(
         system_prompt = _build_prompt(user_id, "активное")
 
         relay_intent = _looks_like_relay_or_reminder(text)
-        # Order matters: card_gen must be checked before start_review, since
-        # "сделай карточки для повторения из заметки X" matches both.
-        card_gen_intent = _looks_like_card_generation(text)
-        start_review_intent = (not card_gen_intent) and _looks_like_start_review(text)
-        note_intent = (
-            not (card_gen_intent or start_review_intent) and _looks_like_note_request(text)
+        # Order matters throughout: each check below only fires if nothing
+        # higher up already claimed the message, most-specific first — same
+        # pattern as card_gen vs. start_review already established.
+        card_gen_intent = (not relay_intent) and _looks_like_card_generation(text)
+        start_review_intent = (
+            not (relay_intent or card_gen_intent) and _looks_like_start_review(text)
         )
+        claimed = relay_intent or card_gen_intent or start_review_intent
+        kanban_intent = (not claimed) and _looks_like_kanban_status(text)
+        claimed = claimed or kanban_intent
+        chinese_word_intent = (not claimed) and _looks_like_chinese_word(text)
+        claimed = claimed or chinese_word_intent
+        book_review_intent = (not claimed) and _looks_like_book_review(text)
+        claimed = claimed or book_review_intent
+        book_add_intent = (not claimed) and _looks_like_book_add(text)
+        claimed = claimed or book_add_intent
+        sale_intent = (not claimed) and _looks_like_sale(text)
+        claimed = claimed or sale_intent
+        note_intent = (not claimed) and _looks_like_note_request(text)
+        finance_intent = note_intent and _looks_like_finance(text)
+
         if relay_intent:
             require_tool_type = "schedule_send"
         elif start_review_intent:
             require_tool_type = "start_flashcard_session"
         elif card_gen_intent:
             require_tool_type = "none"
+        elif kanban_intent:
+            require_tool_type = "kanban_status"
+        elif chinese_word_intent or book_review_intent or book_add_intent or sale_intent:
+            require_tool_type = "none"
+        elif finance_intent:
+            require_tool_type = "trilium_notes_finance"
         elif note_intent:
             require_tool_type = "trilium_notes"
         else:
             require_tool_type = None
+
+        forced_fallback_types = (
+            relay_intent, start_review_intent, kanban_intent, note_intent, finance_intent,
+        )
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=relay_intent or start_review_intent or card_gen_intent or note_intent,
+            require_tool=(
+                relay_intent or start_review_intent or card_gen_intent or kanban_intent
+                or chinese_word_intent or book_review_intent or book_add_intent or sale_intent
+                or note_intent
+            ),
             require_tool_type=require_tool_type,
         )
-        if (relay_intent or start_review_intent or note_intent) and result.get("forced_fallback") is False:
+        if any(forced_fallback_types) and result.get("forced_fallback") is False:
             # Both the model and the deterministic fallback failed to act —
             # unlike passive messages there's no 60s retry poll for active
             # ones, so this is a real, visible loss, not just a delayed retry.

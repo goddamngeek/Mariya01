@@ -12,6 +12,7 @@ from app.db import (
     count_open_questions,
     dedupe_cards,
     get_due_cards,
+    get_ezhednevnik_prompts_for_user,
     get_odysseus_session_id,
     get_open_question,
     get_water_reminders_for_date,
@@ -243,6 +244,19 @@ async def water_reminders_today():
         ]
         for name, uid in NAME_TO_USER_ID.items()
     }
+
+
+@router.get("/ezhednevnik_state", dependencies=[Depends(require_bearer)])
+async def ezhednevnik_state():
+    """Diagnostic: last 5 ezhednevnik_prompts rows per known user, newest
+    first — for confirming whether/why a trigger actually sent a message."""
+    result = {}
+    for name, uid in NAME_TO_USER_ID.items():
+        result[name] = [
+            {"id": r["id"], "slot": r["slot"], "sent_at": r["sent_at"].isoformat(), "is_open": r["is_open"]}
+            for r in await get_ezhednevnik_prompts_for_user(uid)
+        ]
+    return result
 
 
 class TriggerEzhednevnikRequest(BaseModel):

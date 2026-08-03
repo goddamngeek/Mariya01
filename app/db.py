@@ -325,6 +325,18 @@ async def get_open_ezhednevnik_prompt(user_id: int) -> asyncpg.Record | None:
     )
 
 
+async def get_ezhednevnik_prompts_for_user(user_id: int) -> list[asyncpg.Record]:
+    """Diagnostic: every ezhednevnik_prompts row for a user, newest first —
+    for confirming why a trigger did or didn't actually send (has_open_
+    ezhednevnik gates on ANY open row regardless of slot, so an unanswered
+    PM prompt silently blocks a same-day AM trigger too)."""
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM ezhednevnik_prompts WHERE user_id = $1 ORDER BY sent_at DESC LIMIT 5",
+        user_id,
+    )
+
+
 async def close_ezhednevnik_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE ezhednevnik_prompts SET is_open = FALSE WHERE id = $1", prompt_id)

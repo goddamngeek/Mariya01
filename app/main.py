@@ -4,9 +4,19 @@ from fastapi import FastAPI, Request
 
 from app.callbacks import process_callback_query
 from app.config import MAX_REGISTERED_USERS
-from app.db import close_pool, count_registered, init_db, is_registered, register_user, seed_defaults
-from app.flashcard_session import start_review_session
+from app.db import (
+    close_pool,
+    count_registered,
+    get_open_ezhednevnik_prompt,
+    init_db,
+    is_registered,
+    register_user,
+    seed_defaults,
+)
+from app.flashcard_session import start_review_session, stop_review_session
+from app.ingest import send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
+from app.prompts import EZHEDNEVNIK_QUESTION_TEXT
 from app.scheduler import scheduler, start_scheduler
 from app.service import process_incoming_message
 from app.sync import router as sync_router
@@ -16,6 +26,20 @@ _REVIEW_STATUS_TEXT = {
     "already_open": "Сессия повторения уже идёт.",
     "no_cards": "Пока нет карточек для повторения.",
 }
+
+HELP_TEXT = (
+    "Команды:\n"
+    "/cards — начать повторение карточек\n"
+    "/kanban — показать канбан-доску задач\n"
+    "/stop — остановить текущую сессию повторения карточек\n"
+    "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
+    "\n"
+    "Просто напиши мне:\n"
+    "— напомнить о чём-то себе или передать другому человеку\n"
+    "— зафиксировать мысль или заметку (траты уходят в финансы отдельно)\n"
+    "— добавить книгу, отзыв на книгу, китайское слово или продажу\n"
+    "— сделать карточки из заметки в Trilium"
+)
 
 
 @asynccontextmanager
@@ -80,6 +104,32 @@ async def telegram_webhook(request: Request):
         reply = _REVIEW_STATUS_TEXT.get(status)
         if reply:
             await send_message(chat_id, reply)
+        return {"ok": True}
+
+    if text.strip() == "/kanban":
+        # Same reasoning as /cards — a guaranteed-reliable direct trigger.
+        # Still goes through Odysseus (only it holds the Trilium ETAPI
+        # credentials), but kanban_status's deterministic fallback there
+        # means the answer is always a real board read, never hallucinated.
+        await send_kanban_status(chat_id)
+        return {"ok": True}
+
+    if text.strip() == "/stop":
+        stopped = await stop_review_session(chat_id)
+        if not stopped:
+            await send_message(chat_id, "Сейчас нет активной сессии повторения.")
+        return {"ok": True}
+
+    if text.strip() == "/checkin":
+        open_prompt = await get_open_ezhednevnik_prompt(chat_id)
+        if open_prompt is None:
+            await send_message(chat_id, "Сейчас нет открытого чек-ина ежедневника.")
+        else:
+            await send_message(chat_id, EZHEDNEVNIK_QUESTION_TEXT[open_prompt["slot"]])
+        return {"ok": True}
+
+    if text.strip() == "/help":
+        await send_message(chat_id, HELP_TEXT)
         return {"ok": True}
 
     # Telegram's native "reply" feature attaches the full replied-to message

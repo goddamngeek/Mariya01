@@ -22,6 +22,7 @@ from app.db import (
     get_open_card_session,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
+    utcnow,
 )
 from app.flashcard_session import restart_review_session, stop_review_session
 from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint
@@ -271,6 +272,25 @@ async def _chat_with_session(
     if new_session_id and new_session_id != session_id:
         await set_odysseus_session_id(user_id, new_session_id)
     return result
+
+
+async def send_kanban_status(user_id: int) -> None:
+    """Direct trigger for the /kanban command — bypasses the active-message
+    keyword heuristics entirely (intent is already certain here) but still
+    goes through Odysseus, since only it holds the Trilium ETAPI
+    credentials. kanban_status has a real deterministic fallback on the
+    Odysseus side (see webhook_routes.py's _force_kanban_status), so this
+    always returns an accurate board read, never a hallucinated one."""
+    base_url, model = await get_active_endpoint()
+    tagged_text = _tag_message(user_id, "покажи канбан", utcnow())
+    system_prompt = _build_prompt(user_id, "активное")
+    result = await _chat_with_session(
+        user_id, tagged_text, base_url, model, system_prompt,
+        require_tool=True, require_tool_type="kanban_status",
+    )
+    answer = (result.get("response") or "").strip()
+    if answer:
+        await send_message(user_id, answer)
 
 
 _EZHEDNEVNIK_KINDS = ("ezhednevnik_am", "ezhednevnik_pm")

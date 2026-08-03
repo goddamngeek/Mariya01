@@ -45,6 +45,10 @@ async def set_bot_commands() -> None:
     commands = [
         {"command": "start", "description": "Активировать бота"},
         {"command": "cards", "description": "Начать повторение карточек"},
+        {"command": "kanban", "description": "Показать канбан-доску задач"},
+        {"command": "stop", "description": "Остановить сессию повторения карточек"},
+        {"command": "checkin", "description": "Повторить текущий вопрос ежедневника"},
+        {"command": "help", "description": "Что умеет бот"},
     ]
     try:
         resp = await get_client().post(url, json={"commands": commands})

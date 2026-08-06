@@ -345,6 +345,17 @@ async def get_open_ezhednevnik_prompt(user_id: int) -> asyncpg.Record | None:
     )
 
 
+async def get_recent_reminders(user_id: int, limit: int = 15) -> list[asyncpg.Record]:
+    """Diagnostic: most recent reminders/relays targeting a user, newest
+    first — for tracing an unexpected/duplicate delivery back to its
+    original created_at, run_at and sent_at."""
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM reminders WHERE target_chat_id = $1 ORDER BY created_at DESC LIMIT $2",
+        user_id, limit,
+    )
+
+
 async def get_ezhednevnik_prompts_for_user(user_id: int) -> list[asyncpg.Record]:
     """Diagnostic: every ezhednevnik_prompts row for a user, newest first —
     for confirming why a trigger did or didn't actually send (has_open_

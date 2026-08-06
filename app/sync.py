@@ -15,6 +15,7 @@ from app.db import (
     get_ezhednevnik_prompts_for_user,
     get_odysseus_session_id,
     get_open_question,
+    get_recent_reminders,
     get_water_reminders_for_date,
     insert_card,
     insert_outgoing_messages,
@@ -244,6 +245,26 @@ async def water_reminders_today():
         ]
         for name, uid in NAME_TO_USER_ID.items()
     }
+
+
+@router.get("/recent_reminders", dependencies=[Depends(require_bearer)])
+async def recent_reminders():
+    """Diagnostic: most recent reminders/relays per known user, newest
+    first — for tracing an unexpected/duplicate delivery back to its
+    real created_at/run_at/sent_at."""
+    result = {}
+    for name, uid in NAME_TO_USER_ID.items():
+        result[name] = [
+            {
+                "id": r["id"], "sender_chat_id": r["sender_chat_id"],
+                "message": r["message"], "run_at": r["run_at"].isoformat(),
+                "created_at": r["created_at"].isoformat(),
+                "sent_at": r["sent_at"].isoformat() if r["sent_at"] else None,
+                "anonymous": r["anonymous"],
+            }
+            for r in await get_recent_reminders(uid)
+        ]
+    return result
 
 
 @router.get("/ezhednevnik_state", dependencies=[Depends(require_bearer)])

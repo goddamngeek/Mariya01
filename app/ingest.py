@@ -411,22 +411,42 @@ async def handle_active_message(
         note_intent = (not claimed) and _looks_like_note_request(text)
         finance_intent = note_intent and _looks_like_finance(text)
 
+        # require_tool_type is now ALSO how Odysseus scopes which tools the
+        # model is even offered (see _TOOLS_BY_REQUIRE_TYPE in
+        # webhook_routes.py) — not just which fallback to run. Confirmed
+        # live: a message with NO matching intent ("это на какую дату ты
+        # спрашиваешь") still had schedule_send available (the old
+        # relevant_tools set was static, every tool offered on every single
+        # call regardless of relevance) and the model called it anyway,
+        # relaying a week-old test message to Masha completely unprompted.
+        # So every distinct intent now gets its own specific string (even
+        # ones with no deterministic fallback, previously lumped under the
+        # generic "none") purely so Odysseus can scope tightly — and the
+        # unclassified case sends an explicit "general" instead of omitting
+        # the field, so general chat never has schedule_send or any other
+        # write tool available at all.
         if relay_intent:
             require_tool_type = "schedule_send"
         elif start_review_intent:
             require_tool_type = "start_flashcard_session"
         elif card_gen_intent:
-            require_tool_type = "none"
+            require_tool_type = "card_gen"
         elif kanban_intent:
             require_tool_type = "kanban_status"
-        elif chinese_word_intent or book_review_intent or book_add_intent or sale_intent:
-            require_tool_type = "none"
+        elif chinese_word_intent:
+            require_tool_type = "add_chinese_word"
+        elif book_review_intent:
+            require_tool_type = "add_book_review"
+        elif book_add_intent:
+            require_tool_type = "add_book"
+        elif sale_intent:
+            require_tool_type = "log_sale"
         elif finance_intent:
             require_tool_type = "trilium_notes_finance"
         elif note_intent:
             require_tool_type = "trilium_notes"
         else:
-            require_tool_type = None
+            require_tool_type = "general"
 
         forced_fallback_types = (
             relay_intent, start_review_intent, kanban_intent, note_intent, finance_intent,

@@ -17,6 +17,7 @@ from app.config import (
 )
 from app.db import (
     claim_reminder,
+    close_stale_ezhednevnik_prompts,
     create_card_reminder,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
@@ -131,7 +132,11 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
     feeling), 'pm' in the evening (the rest of the ЕЖЕДНЕВНИК questions) —
     see prompts.py's EZHEDNEVNIK_QUESTION_TEXT for the exact wording."""
     text = EZHEDNEVNIK_QUESTION_TEXT[slot]
+    today_start = datetime.now(TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
     for user_id in await get_registered_user_ids():
+        closed = await close_stale_ezhednevnik_prompts(user_id, today_start)
+        if closed:
+            print(f"user={user_id}: auto-closed {closed} stale unanswered ezhednevnik prompt(s)", flush=True)
         if await has_open_ezhednevnik(user_id):
             print(f"user={user_id} already has an open ezhednevnik check-in, skipping {slot}", flush=True)
             continue

@@ -307,6 +307,26 @@ async def has_open_ezhednevnik(user_id: int) -> bool:
     return row is not None
 
 
+async def close_stale_ezhednevnik_prompts(user_id: int, before: datetime) -> int:
+    """Auto-recovery: an open prompt nobody ever answers must not block
+    every future check-in forever. Confirmed live: a PM prompt sent
+    2026-08-03 stayed open (unanswered) and silently blocked every single
+    AM/PM send for that user for the next two days, since has_open_
+    ezhednevnik only checks "is ANY row open", with no expiry at all —
+    unlike card sessions (10min idle timeout) or the old daily question
+    (deferral with eventual reset). Closes anything still open from before
+    `before` (start of today) — the person can still reply to it if they
+    want (it just won't be "the open one" get_open_ezhednevnik_prompt picks
+    up anymore), it just stops blocking new ones. Returns how many closed."""
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE ezhednevnik_prompts SET is_open = FALSE "
+        "WHERE user_id = $1 AND is_open = TRUE AND sent_at < $2",
+        user_id, before,
+    )
+    return int(result.split()[-1]) if result else 0
+
+
 async def create_ezhednevnik_prompt(user_id: int, slot: str) -> int:
     pool = await get_pool()
     return await pool.fetchval(

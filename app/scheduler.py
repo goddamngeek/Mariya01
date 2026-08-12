@@ -5,8 +5,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import (
-    CARD_REMINDER_WINDOW_END,
-    CARD_REMINDER_WINDOW_START,
     DEFERRAL_DELAY_HOURS,
     OUTGOING_DEDUP_DAYS,
     PROACTIVE_WINDOW_END,
@@ -18,25 +16,18 @@ from app.config import (
 from app.db import (
     claim_reminder,
     close_stale_ezhednevnik_prompts,
-    create_card_reminder,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
-    get_due_card_reminders,
-    get_due_cards,
     get_due_deferred_questions,
     get_due_reminders,
     get_due_water_reminders,
-    get_idle_card_sessions,
     get_registered_user_ids,
     has_open_ezhednevnik,
-    has_pending_card_reminder,
     has_pending_question,
     mark_question_sent,
     mark_water_reminder_sent,
     pick_outgoing_message,
-    release_card_reminder,
 )
-from app.flashcard_session import close_idle_session
 from app.ingest import ingest_incoming
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
@@ -45,11 +36,7 @@ from app.telegram import (
     send_message,
     send_message_get_id,
     send_message_with_button,
-    send_message_with_buttons,
 )
-
-CARD_SESSION_IDLE_MINUTES = 10
-CARD_REMINDER_TEXT = "Готовы карточки на повторение — сейчас или попозже?"
 
 DEFER_BUTTON_TEXT = "Спросить позже"
 
@@ -64,8 +51,8 @@ def _random_time_in_window(start: time, end: time) -> datetime:
     current time, a restart landing partway through an already-open window
     could roll a slot that's already in the past — and the caller's
     `run_date <= now: skip` then silently dropped that window's reminder for
-    the rest of the day, with no retry (water reminders have no due_at/
-    release-job safety net at all, unlike card reminders and questions).
+    the rest of the day, with no retry at the time (water reminders now
+    have their own due_at/release-job safety net — see below).
     Clamping the lower bound to `now` guarantees a fresh restart always rolls
     a still-future slot for any window that hasn't fully elapsed yet."""
     now = datetime.now(TIMEZONE)
@@ -167,59 +154,6 @@ async def release_due_reminders() -> None:
         )
 
 
-async def _send_card_reminder(user_id: int, reminder_id: int) -> None:
-    message_id = await send_message_with_buttons(
-        user_id, CARD_REMINDER_TEXT, [("Сейчас", f"cardrem:{reminder_id}:now"), ("Позже", f"cardrem:{reminder_id}:later")]
-    )
-    if message_id is None:
-        print(f"failed to send card reminder id={reminder_id} user={user_id}, will retry", flush=True)
-
-
-async def send_daily_card_reminder(user_id: int) -> None:
-    if await has_pending_card_reminder(user_id):
-        print(f"user={user_id} already has a card reminder in flight, skipping today", flush=True)
-        return
-    # Confirmed live: a user with zero flashcards still got prompted
-    # ("Готовы карточки на повторение?") and reasonably tried to engage with
-    # an offer that didn't actually apply to them. Mirrors send_daily_question
-    # skipping when pick_outgoing_message finds nothing to send.
-    if not await get_due_cards(user_id):
-        print(f"no due cards for user={user_id} today, skipping card reminder", flush=True)
-        return
-    reminder_id = await create_card_reminder(user_id)
-    await _send_card_reminder(user_id, reminder_id)
-
-
-async def schedule_today_card_reminder() -> None:
-    now = datetime.now(TIMEZONE)
-    for user_id in await get_registered_user_ids():
-        run_date = _random_time_in_window(CARD_REMINDER_WINDOW_START, CARD_REMINDER_WINDOW_END)
-        if run_date <= now:
-            continue
-        scheduler.add_job(
-            send_daily_card_reminder,
-            trigger="date",
-            run_date=run_date,
-            args=[user_id],
-            id=f"card_reminder_today_{user_id}",
-            replace_existing=True,
-        )
-        print(f"scheduled today's card reminder for user={user_id} at {run_date.isoformat()}", flush=True)
-
-
-async def release_due_card_reminders() -> None:
-    for row in await get_due_card_reminders():
-        if not await get_due_cards(row["user_id"]):
-            continue
-        await release_card_reminder(row["id"])
-        await _send_card_reminder(row["user_id"], row["id"])
-
-
-async def close_idle_card_sessions() -> None:
-    for session in await get_idle_card_sessions(CARD_SESSION_IDLE_MINUTES):
-        await close_idle_session(session)
-
-
 async def ensure_today_water_reminders() -> None:
     """DB-backed (water_reminders table), unlike the old in-memory
     APScheduler date-jobs this replaces — ensure_water_reminder() is an
@@ -298,21 +232,10 @@ async def start_scheduler() -> None:
         id="schedule_daily_water_reminders",
     )
     scheduler.add_job(
-        schedule_today_card_reminder,
-        trigger=CronTrigger(hour=0, minute=5, timezone=TIMEZONE),
-        id="schedule_daily_card_reminder",
-    )
-    scheduler.add_job(
         release_due_questions,
         trigger="interval",
         seconds=60,
         id="release_due_questions",
-    )
-    scheduler.add_job(
-        release_due_card_reminders,
-        trigger="interval",
-        seconds=60,
-        id="release_due_card_reminders",
     )
     scheduler.add_job(
         release_due_reminders,
@@ -332,12 +255,5 @@ async def start_scheduler() -> None:
         seconds=60,
         id="ingest_incoming_to_odysseus",
     )
-    scheduler.add_job(
-        close_idle_card_sessions,
-        trigger="interval",
-        seconds=60,
-        id="close_idle_card_sessions",
-    )
     scheduler.start()
     await ensure_today_water_reminders()
-    await schedule_today_card_reminder()

@@ -21,12 +21,10 @@ from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
     get_odysseus_session_id,
-    get_open_card_session,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
     utcnow,
 )
-from app.flashcard_session import restart_review_session, stop_review_session
 from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint
 from app.people import USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
@@ -69,50 +67,6 @@ def _looks_like_relay_or_reminder(text: str) -> bool:
     return any(kw in lowered for kw in _RELAY_OR_REMINDER_KEYWORDS)
 
 
-def _looks_like_card_generation(text: str) -> bool:
-    """Same reasoning as _looks_like_relay_or_reminder, but for save_flashcard
-    generation — confirmed live the model can skip the required trilium_notes
-    search step entirely and just claim "no access" to the note instead of
-    trying. There's no deterministic fallback for this (require_tool_type=
-    "none" — see webhook_routes.py), but the corrective retry alone still
-    gives it one more real chance to actually search. Checked BEFORE
-    _looks_like_start_review (below) since "сделай карточки для повторения
-    из заметки X" contains both "карточ" and "повтор" — generation-specific
-    words (сделай/создай/заметк) win the ambiguity."""
-    lowered = text.lower()
-    return "карточ" in lowered and any(
-        kw in lowered for kw in ("сделай", "создай", "заметк", "возьми", "добавь", "сгенерир")
-    )
-
-
-_START_REVIEW_VERBS = ("начать", "начни", "давай", "хочу", "пора", "запусти", "го", "продолжим", "погнали")
-
-
-def _looks_like_start_review(text: str) -> bool:
-    """"го повторим карточки" / "хочу повторить карточки" / "давай карточки"
-    — start a review session. Unlike card generation this IS fully
-    deterministic (start_review_session is a pure trigger, no content
-    judgment needed) and so CAN have a real fallback. Confirmed live: asked
-    to start review, the model just narrated a fake session ("Давай начнём
-    с первой карточки...") with zero tool calls — the user never got a real
-    card message with buttons, just a hallucinated conversation.
-
-    Also confirmed live: "начать повторение" (no "карточ" at all) fell
-    through this heuristic entirely and got an ungoverned, silently empty
-    reply — so a bare "повтор" paired with a start-type verb counts too, not
-    just "карточ"+"повтор" together. And "давай карточки" itself — cited
-    right in prompts.py as a supported trigger phrase — never matched
-    either, since it has no "повтор" at all; "карточ" paired with a
-    start-type verb now counts too (card generation is checked first by the
-    caller, so this can't steal a real generation request)."""
-    lowered = text.lower()
-    if "карточ" in lowered and "повтор" in lowered:
-        return True
-    if "карточ" in lowered and any(v in lowered for v in _START_REVIEW_VERBS):
-        return True
-    return "повтор" in lowered and any(v in lowered for v in _START_REVIEW_VERBS)
-
-
 _NOTE_REQUEST_KEYWORDS = ("запиши", "зафиксируй", "запомни", "занеси")
 
 
@@ -127,7 +81,7 @@ def _looks_like_note_request(text: str) -> bool:
     hallucinated confirmation, and since require_tool_type was never set for
     this message shape, there was no retry and no fallback to catch it. Kept
     narrow (explicit "добавь" needs "заметк"/"журнал" alongside it) so it
-    doesn't collide with card generation's "добавь карточки"."""
+    doesn't collide with other "добавь"-shaped intents (chinese word, book)."""
     lowered = text.lower()
     if any(kw in lowered for kw in _NOTE_REQUEST_KEYWORDS):
         return True
@@ -161,8 +115,7 @@ def _looks_like_kanban_status(text: str) -> bool:
     """"что в канбане?" / "что в работе?" / "покажи бэклог" — a pure,
     judgment-free read (see kanban_status's own docstring on why board
     membership can't be inferred from the note tree), so this gets a real
-    deterministic fallback in webhook_routes.py, same tier as
-    start_flashcard_session."""
+    deterministic fallback in webhook_routes.py (see _force_kanban_status)."""
     lowered = text.lower()
     return any(kw in lowered for kw in _KANBAN_KEYWORDS)
 
@@ -185,8 +138,7 @@ def _looks_like_chinese_word(text: str) -> bool:
 def _looks_like_book_review(text: str) -> bool:
     """"отзыв на книгу ..." / "мне не понравилась книга ..." — checked
     BEFORE _looks_like_book_add since both share the "книг" context word;
-    review-specific keywords win the ambiguity, same precedence pattern as
-    card generation vs. review-session start."""
+    review-specific keywords win the ambiguity."""
     lowered = text.lower()
     return "книг" in lowered and any(
         kw in lowered for kw in ("отзыв", "ревью", "понравилась", "не понравилась", "мнение")
@@ -196,7 +148,7 @@ def _looks_like_book_review(text: str) -> bool:
 def _looks_like_book_add(text: str) -> bool:
     """"добавь книгу ..." / "хочу почитать ..." / "начал читать ..." —
     adding a new book note under КНИГИ. "добавь"/"добавить" need "книг"
-    alongside them (too generic alone — collides with note/card-generation
+    alongside them (too generic alone — collides with the plain note-request
     "добавь"), but "хочу почитать X"/"начал читать X" are distinctive enough
     to stand alone — a real title usually won't itself contain "книг"."""
     lowered = text.lower()
@@ -212,28 +164,6 @@ def _looks_like_sale(text: str) -> bool:
     """"продал куртку за 3000" — logging a sale on the ПРОДАЖИ board."""
     lowered = text.lower()
     return any(kw in lowered for kw in _SALE_KEYWORDS)
-
-
-_STOP_SESSION_KEYWORDS = ("стоп", "останов", "хватит", "отмен", "прекрати")
-_RESTART_SESSION_KEYWORDS = ("заново", "сначала")
-
-
-def _looks_like_stop_session(text: str) -> bool:
-    """"стоп"/"хватит"/"отмена" mid-session. There is no tool for this at
-    all (only start_flashcard_session exists) — confirmed live, without
-    real handling the model just hallucinates a plausible "остановлено"
-    with nothing behind it. Only checked when a session IS actually open
-    (see handle_active_message), so these common words don't hijack
-    unrelated messages."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _STOP_SESSION_KEYWORDS)
-
-
-def _looks_like_restart_session(text: str) -> bool:
-    """"давай заново"/"начни сначала" mid-session — same reasoning as
-    _looks_like_stop_session."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _RESTART_SESSION_KEYWORDS)
 
 
 async def _chat_with_session(
@@ -350,36 +280,14 @@ async def handle_active_message(
     from app/service.py as soon as the webhook receives it, not from the 60s
     ingest_incoming() poll, since a real answer shouldn't wait up to a minute."""
     try:
-        # Session-control commands ("стоп"/"давай заново") are handled
-        # entirely in code, before ever reaching Odysseus — there's no tool
-        # for this at all, so the model would otherwise just hallucinate a
-        # plausible "остановлено"/"началось заново" with nothing real
-        # behind it (confirmed live). Only checked when a session is
-        # actually open, so these common words don't hijack unrelated
-        # messages the rest of the time.
-        if await get_open_card_session(user_id) is not None:
-            if _looks_like_restart_session(text):
-                await restart_review_session(user_id)
-                await ack_incoming_messages([message_id])
-                return
-            if _looks_like_stop_session(text):
-                await stop_review_session(user_id)
-                await ack_incoming_messages([message_id])
-                return
-
         base_url, model = await get_active_endpoint()
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")
 
         relay_intent = _looks_like_relay_or_reminder(text)
         # Order matters throughout: each check below only fires if nothing
-        # higher up already claimed the message, most-specific first — same
-        # pattern as card_gen vs. start_review already established.
-        card_gen_intent = (not relay_intent) and _looks_like_card_generation(text)
-        start_review_intent = (
-            not (relay_intent or card_gen_intent) and _looks_like_start_review(text)
-        )
-        claimed = relay_intent or card_gen_intent or start_review_intent
+        # higher up already claimed the message, most-specific first.
+        claimed = relay_intent
         kanban_intent = (not claimed) and _looks_like_kanban_status(text)
         claimed = claimed or kanban_intent
         chinese_word_intent = (not claimed) and _looks_like_chinese_word(text)
@@ -409,10 +317,6 @@ async def handle_active_message(
         # write tool available at all.
         if relay_intent:
             require_tool_type = "schedule_send"
-        elif start_review_intent:
-            require_tool_type = "start_flashcard_session"
-        elif card_gen_intent:
-            require_tool_type = "card_gen"
         elif kanban_intent:
             require_tool_type = "kanban_status"
         elif chinese_word_intent:
@@ -431,14 +335,13 @@ async def handle_active_message(
             require_tool_type = "general"
 
         forced_fallback_types = (
-            relay_intent, start_review_intent, kanban_intent, note_intent, finance_intent,
+            relay_intent, kanban_intent, note_intent, finance_intent,
         )
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
             require_tool=(
-                relay_intent or start_review_intent or card_gen_intent or kanban_intent
-                or chinese_word_intent or book_review_intent or book_add_intent or sale_intent
-                or note_intent
+                relay_intent or kanban_intent or chinese_word_intent or book_review_intent
+                or book_add_intent or sale_intent or note_intent
             ),
             require_tool_type=require_tool_type,
         )

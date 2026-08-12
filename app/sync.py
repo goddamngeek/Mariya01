@@ -10,14 +10,11 @@ from app.db import (
     claim_reminder,
     close_question,
     count_open_questions,
-    dedupe_cards,
-    get_due_cards,
     get_ezhednevnik_prompts_for_user,
     get_odysseus_session_id,
     get_open_question,
     get_recent_reminders,
     get_water_reminders_for_date,
-    insert_card,
     insert_outgoing_messages,
     insert_reminder,
     pick_outgoing_message,
@@ -25,7 +22,6 @@ from app.db import (
     set_odysseus_session_id,
     utcnow,
 )
-from app.flashcard_session import start_review_session
 from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import deliver_reminder
@@ -135,58 +131,6 @@ async def schedule_reminder(body: ScheduleReminderRequest):
     return {"ok": True, "id": reminder_id}
 
 
-class StartFlashcardSessionRequest(BaseModel):
-    person_name: str
-
-
-@router.post("/start_flashcard_session", dependencies=[Depends(require_bearer)])
-async def start_flashcard_session_endpoint(body: StartFlashcardSessionRequest):
-    """Called by Odysseus's start_flashcard_session tool when the user asks
-    (in a normal message) to review flashcards. No start_message_id — this
-    path has no bot-sent message to keep around, unlike the button-based
-    daily reminder in scheduler.py."""
-    user_id = _resolve_name(body.person_name)
-    if user_id is None:
-        raise HTTPException(400, f"Unknown person name: {body.person_name!r}")
-
-    status = await start_review_session(user_id, start_message_id=None)
-    return {"ok": True, "started": status == "started", "status": status}
-
-
-class SaveFlashcardRequest(BaseModel):
-    person_name: str
-    front: str
-    back: str
-
-
-@router.post("/save_flashcard", dependencies=[Depends(require_bearer)])
-async def save_flashcard_endpoint(body: SaveFlashcardRequest):
-    user_id = _resolve_name(body.person_name)
-    if user_id is None:
-        raise HTTPException(400, f"Unknown person name: {body.person_name!r}")
-    if not body.front.strip() or not body.back.strip():
-        raise HTTPException(400, "front and back must both be non-empty")
-
-    card_id = await insert_card(user_id, None, body.front.strip(), body.back.strip())
-    return {"ok": True, "card_id": card_id}
-
-
-class DedupeCardsRequest(BaseModel):
-    person_name: str
-
-
-@router.post("/dedupe_cards", dependencies=[Depends(require_bearer)])
-async def dedupe_cards_endpoint(body: DedupeCardsRequest):
-    """Remove duplicate flashcards (identical front+back) for a person,
-    keeping the earliest of each — for cleaning up after a repeated
-    save_flashcard batch (e.g. a retried card-generation request)."""
-    user_id = _resolve_name(body.person_name)
-    if user_id is None:
-        raise HTTPException(400, f"Unknown person name: {body.person_name!r}")
-    removed = await dedupe_cards(user_id)
-    return {"ok": True, "removed": removed}
-
-
 class ResendQuestionRequest(BaseModel):
     user_id: int
 
@@ -219,15 +163,6 @@ async def open_questions():
     silently block that user's daily question forever (see resend_question's
     docstring)."""
     return {name: await count_open_questions(uid) for name, uid in NAME_TO_USER_ID.items()}
-
-
-@router.get("/due_cards", dependencies=[Depends(require_bearer)])
-async def due_cards():
-    """Diagnostic: count of currently-due flashcards per known user — for
-    confirming whether a daily card reminder that was sent was actually
-    warranted (send_daily_card_reminder/release_due_card_reminders both gate
-    on this being non-empty before sending)."""
-    return {name: len(await get_due_cards(uid)) for name, uid in NAME_TO_USER_ID.items()}
 
 
 @router.get("/water_reminders_today", dependencies=[Depends(require_bearer)])

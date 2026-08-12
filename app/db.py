@@ -45,46 +45,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     anonymous BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-CREATE TABLE IF NOT EXISTS cards (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    trilium_note_id TEXT,
-    front TEXT NOT NULL,
-    back TEXT NOT NULL,
-    ease_factor REAL NOT NULL DEFAULT 2.5,
-    interval_days INTEGER NOT NULL DEFAULT 0,
-    repetitions INTEGER NOT NULL DEFAULT 0,
-    next_review_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS card_sessions (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL,
-    last_activity_at TIMESTAMPTZ NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
-    message_ids BIGINT[] NOT NULL DEFAULT '{}',
-    start_message_id BIGINT,
-    total_count INTEGER NOT NULL DEFAULT 0,
-    reviewed_count INTEGER NOT NULL DEFAULT 0
-);
-
--- A separate table (not a new outgoing_messages.category value) for the daily
--- "review your cards?" nudge — it needs the same open/defer shape as daily
--- questions but none of the "swap in a different question" logic that
--- exceeding MAX_DEFERRALS triggers there, since there's only one generic
--- prompt text here, not a pool of distinct questions to rotate through.
-CREATE TABLE IF NOT EXISTS card_reminders (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    is_open BOOLEAN NOT NULL DEFAULT FALSE,
-    due_at TIMESTAMPTZ,
-    deferral_count INTEGER NOT NULL DEFAULT 0,
-    sent_at TIMESTAMPTZ
-);
-
--- DB-backed like card_reminders/outgoing_messages, unlike the old purely
+-- DB-backed like outgoing_messages, unlike the old purely
 -- in-memory APScheduler date-jobs this replaces: a row's due_at survives
 -- any number of process restarts untouched, so a redeploy can never again
 -- silently reroll an already-past slot and drop the day's reminder (see
@@ -127,6 +88,12 @@ ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS stage;
 ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS pending_text;
 ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS step INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- Flashcard feature removed entirely (unused, per explicit confirmation
+-- there was nothing worth keeping in it) — drops the tables outright
+-- rather than leaving them as dead weight nothing references anymore.
+DROP TABLE IF EXISTS cards;
+DROP TABLE IF EXISTS card_sessions;
+DROP TABLE IF EXISTS card_reminders;
 """
 
 SEED_QUESTIONS = [
@@ -524,149 +491,6 @@ async def get_due_reminders() -> list[asyncpg.Record]:
     pool = await get_pool()
     return await pool.fetch(
         "SELECT * FROM reminders WHERE sent_at IS NULL AND run_at <= $1", utcnow()
-    )
-
-
-
-# --- flashcards (spaced-repetition review) ---------------------------------
-
-async def insert_card(user_id: int, trilium_note_id: str | None, front: str, back: str) -> int:
-    pool = await get_pool()
-    now = utcnow()
-    return await pool.fetchval(
-        "INSERT INTO cards (user_id, trilium_note_id, front, back, next_review_at, created_at) "
-        "VALUES ($1, $2, $3, $4, $5, $5) RETURNING id",
-        user_id, trilium_note_id, front, back, now,
-    )
-
-
-async def dedupe_cards(user_id: int) -> int:
-    """Delete duplicate cards (identical front+back) for a user, keeping the
-    lowest id per duplicate group. Returns how many rows were removed."""
-    pool = await get_pool()
-    result = await pool.execute(
-        "DELETE FROM cards a USING cards b "
-        "WHERE a.user_id = $1 AND b.user_id = $1 "
-        "AND a.front = b.front AND a.back = b.back AND a.id > b.id",
-        user_id,
-    )
-    return int(result.split()[-1]) if result else 0
-
-
-async def get_due_cards(user_id: int) -> list[asyncpg.Record]:
-    pool = await get_pool()
-    return await pool.fetch(
-        "SELECT * FROM cards WHERE user_id = $1 AND next_review_at <= $2 ORDER BY next_review_at",
-        user_id, utcnow(),
-    )
-
-
-async def update_card_schedule(
-    card_id: int, ease_factor: float, interval_days: int, repetitions: int, next_review_at: datetime,
-) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE cards SET ease_factor = $1, interval_days = $2, repetitions = $3, next_review_at = $4 "
-        "WHERE id = $5",
-        ease_factor, interval_days, repetitions, next_review_at, card_id,
-    )
-
-
-async def get_open_card_session(user_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow(
-        "SELECT * FROM card_sessions WHERE user_id = $1 AND status = 'open'", user_id
-    )
-
-
-async def create_card_session(user_id: int, start_message_id: int | None, total_count: int) -> int:
-    pool = await get_pool()
-    now = utcnow()
-    return await pool.fetchval(
-        "INSERT INTO card_sessions (user_id, started_at, last_activity_at, start_message_id, total_count) "
-        "VALUES ($1, $2, $2, $3, $4) RETURNING id",
-        user_id, now, start_message_id, total_count,
-    )
-
-
-async def add_session_message(session_id: int, message_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE card_sessions SET message_ids = array_append(message_ids, $1), "
-        "last_activity_at = $2 WHERE id = $3",
-        message_id, utcnow(), session_id,
-    )
-
-
-async def increment_session_reviewed(session_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE card_sessions SET reviewed_count = reviewed_count + 1, last_activity_at = $1 WHERE id = $2",
-        utcnow(), session_id,
-    )
-
-
-async def close_card_session(session_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute("UPDATE card_sessions SET status = 'closed' WHERE id = $1", session_id)
-
-
-async def get_idle_card_sessions(idle_minutes: int) -> list[asyncpg.Record]:
-    pool = await get_pool()
-    cutoff = utcnow() - timedelta(minutes=idle_minutes)
-    return await pool.fetch(
-        "SELECT * FROM card_sessions WHERE status = 'open' AND last_activity_at < $1", cutoff
-    )
-
-
-# --- flashcard daily reminder (mirrors the question open/defer shape) -----
-
-async def has_pending_card_reminder(user_id: int) -> bool:
-    pool = await get_pool()
-    row = await pool.fetchval(
-        "SELECT 1 FROM card_reminders WHERE user_id = $1 "
-        "AND (is_open = TRUE OR (due_at IS NOT NULL AND due_at > $2)) LIMIT 1",
-        user_id, utcnow(),
-    )
-    return row is not None
-
-
-async def create_card_reminder(user_id: int) -> int:
-    pool = await get_pool()
-    return await pool.fetchval(
-        "INSERT INTO card_reminders (user_id, is_open, sent_at) VALUES ($1, TRUE, $2) RETURNING id",
-        user_id, utcnow(),
-    )
-
-
-async def consume_card_reminder(reminder_id: int) -> None:
-    """'Сейчас' was pressed — the reminder's job is done, close it out."""
-    pool = await get_pool()
-    await pool.execute("UPDATE card_reminders SET is_open = FALSE WHERE id = $1", reminder_id)
-
-
-async def defer_card_reminder(reminder_id: int, delay_hours: int) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE card_reminders SET is_open = FALSE, due_at = $1, deferral_count = deferral_count + 1 "
-        "WHERE id = $2",
-        utcnow() + timedelta(hours=delay_hours), reminder_id,
-    )
-
-
-async def get_due_card_reminders() -> list[asyncpg.Record]:
-    pool = await get_pool()
-    return await pool.fetch(
-        "SELECT * FROM card_reminders WHERE is_open = FALSE AND due_at IS NOT NULL AND due_at <= $1",
-        utcnow(),
-    )
-
-
-async def release_card_reminder(reminder_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE card_reminders SET is_open = TRUE, due_at = NULL, sent_at = $1 WHERE id = $2",
-        utcnow(), reminder_id,
     )
 
 

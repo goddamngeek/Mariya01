@@ -13,7 +13,6 @@ from app.db import (
     register_user,
     seed_defaults,
 )
-from app.flashcard_session import start_review_session, stop_review_session
 from app.ingest import send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
 from app.prompts import ezhednevnik_step_text
@@ -22,23 +21,15 @@ from app.service import process_incoming_message
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
 
-_REVIEW_STATUS_TEXT = {
-    "already_open": "Сессия повторения уже идёт.",
-    "no_cards": "Пока нет карточек для повторения.",
-}
-
 HELP_TEXT = (
     "Команды:\n"
-    "/cards — начать повторение карточек\n"
     "/kanban — показать канбан-доску задач\n"
-    "/stop — остановить текущую сессию повторения карточек\n"
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
     "\n"
     "Просто напиши мне:\n"
     "— напомнить о чём-то себе или передать другому человеку\n"
     "— зафиксировать мысль или заметку (траты уходят в финансы отдельно)\n"
-    "— добавить книгу, отзыв на книгу, китайское слово или продажу\n"
-    "— сделать карточки из заметки в Trilium"
+    "— добавить книгу, отзыв на книгу, китайское слово или продажу"
 )
 
 
@@ -95,29 +86,12 @@ async def telegram_webhook(request: Request):
     if not await is_registered(chat_id):
         return {"ok": True}
 
-    if text.strip() == "/cards":
-        # Direct trigger, entirely bypassing Odysseus and its NL heuristics —
-        # requested as a simpler, guaranteed-reliable alternative after
-        # several rounds of hardening "хочу повторить карточки"-style intent
-        # detection. A pure DB lookup + button tap, nothing to misinterpret.
-        status = await start_review_session(chat_id, start_message_id=None)
-        reply = _REVIEW_STATUS_TEXT.get(status)
-        if reply:
-            await send_message(chat_id, reply)
-        return {"ok": True}
-
     if text.strip() == "/kanban":
         # Same reasoning as /cards — a guaranteed-reliable direct trigger.
         # Still goes through Odysseus (only it holds the Trilium ETAPI
         # credentials), but kanban_status's deterministic fallback there
         # means the answer is always a real board read, never hallucinated.
         await send_kanban_status(chat_id)
-        return {"ok": True}
-
-    if text.strip() == "/stop":
-        stopped = await stop_review_session(chat_id)
-        if not stopped:
-            await send_message(chat_id, "Сейчас нет активной сессии повторения.")
         return {"ok": True}
 
     if text.strip() == "/checkin":

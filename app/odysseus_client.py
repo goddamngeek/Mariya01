@@ -70,9 +70,9 @@ async def get_active_endpoint() -> tuple[str, str]:
     # Prefer yandexgpt/latest specifically over whatever happens to be first
     # in the list (currently aliceai-llm) — confirmed live 2026-07-29:
     # yandexgpt reliably makes real native tool calls (trilium_notes,
-    # schedule_send, save_flashcard incl. the search-then-generate flashcard
-    # flow) via this exact endpoint, while aliceai-llm produced zero native
-    # tool calls across an entire night of testing. Exact family match, not
+    # schedule_send, etc.) via this exact endpoint, while aliceai-llm
+    # produced zero native tool calls across an entire night of testing.
+    # Exact family match, not
     # substring — "yandexgpt-5-lite"/"yandexgpt-5-pro" also contain
     # "yandexgpt" but weren't the variant actually verified. Falls back to
     # models[0] if the exact yandexgpt/latest URI isn't in the list (e.g. a

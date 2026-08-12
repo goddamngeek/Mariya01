@@ -34,37 +34,6 @@ from app.scheduler import _send_question, send_ezhednevnik_prompts
 router = APIRouter(prefix="/sync")
 
 
-@router.get("/debug_odysseus_url")
-async def debug_odysseus_url():
-    """Temporary, no auth (deliberately — this is the ONLY thing broken
-    right now, don't add a dependency that could itself go wrong): confirms
-    the exact ODYSSEUS_URL value this running process actually has, since
-    fill_ezhednevnik_direct fails with a persistent (not transient — 3
-    retries all failed) DNS ConnectError while agent_chat, hitting the same
-    constant, keeps working. Remove once this is understood."""
-    from app.config import ODYSSEUS_URL
-    return {"ODYSSEUS_URL": ODYSSEUS_URL}
-
-
-@router.get("/debug_fill_ezhednevnik_raw")
-async def debug_fill_ezhednevnik_raw():
-    """Temporary, no auth: calls the bot's own fill_ezhednevnik_direct()
-    client function exactly as service.py does, catches whatever it raises,
-    and returns the full traceback — to see the exact failing line instead
-    of guessing further. Remove once this is understood."""
-    import traceback
-
-    import app.odysseus_client as oc
-
-    try:
-        result = await oc.fill_ezhednevnik_direct({
-            "person_name": "ТЕСТ_DEBUG", "slot": "am", "hdif_am": "debug probe",
-        })
-        return {"ok": True, "result": result}
-    except Exception as exc:
-        return {"ok": False, "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc()}
-
-
 def require_bearer(authorization: str = Header(default="")) -> None:
     if not SYNC_BEARER_TOKEN or authorization != f"Bearer {SYNC_BEARER_TOKEN}":
         raise HTTPException(status_code=401, detail="unauthorized")

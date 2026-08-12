@@ -112,18 +112,24 @@ async def _handle_ezhednevnik_reply(
     person_name = USER_NAMES.get(user_id, str(user_id))
     fields = {"person_name": person_name, "slot": slot, **collected}
 
-    await close_ezhednevnik_prompt(prompt["id"])
+    # Close only on SUCCESS — confirmed live (the odysseus.61d1.online DNS
+    # outage): closing unconditionally BEFORE attempting the write meant a
+    # failed write lost that day's entry outright, with no way to retry —
+    # the prompt was already gone. Leaving it open on failure means the
+    # person can just answer again (any message) once Odysseus is back;
+    # `collected` already has every earlier answer intact either way.
     try:
         await fill_ezhednevnik_direct(fields)
+        await close_ezhednevnik_prompt(prompt["id"])
         await send_message(user_id, "Записал, спасибо.")
     except Exception as exc:
         print(f"fill_ezhednevnik_direct failed for user={user_id}:", flush=True)
         traceback.print_exc()
-        # No server log access to the Northflank deployment — surface the
-        # real reason directly in chat (temporary, until this class of
-        # failure is understood) instead of a silent no-op the person has
-        # no way to notice, let alone diagnose.
-        await send_message(user_id, f"Не получилось записать: {type(exc).__name__}: {exc}"[:500])
+        await send_message(
+            user_id,
+            f"Не получилось записать (Odysseus недоступен): {type(exc).__name__}. "
+            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        )
     await ack_incoming_messages([message_id])
 
 

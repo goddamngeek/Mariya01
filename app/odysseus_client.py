@@ -131,3 +131,16 @@ async def agent_chat(
         print(f"AGENT_CHAT ERROR BODY: {resp.text}", flush=True)
     resp.raise_for_status()
     return resp.json()
+
+
+async def fill_ezhednevnik_direct(fields: dict) -> dict:
+    """Deterministic bypass of the whole agent loop for the ежедневник AM
+    check-in — by the time this is called, the bot already has both the
+    casual-question reply (verbatim) and a score it parsed itself, so
+    there's nothing left for a model to interpret. Same auth as agent_chat,
+    no session/LLM involved at all on the Odysseus side."""
+    resp = await get_client().post(
+        f"{ODYSSEUS_URL}/api/v1/fill_ezhednevnik_direct", headers=_AUTH_HEADERS, json=fields, timeout=30
+    )
+    resp.raise_for_status()
+    return resp.json()

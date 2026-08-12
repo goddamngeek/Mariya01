@@ -38,7 +38,7 @@ from app.db import (
 )
 from app.flashcard_session import close_idle_session
 from app.ingest import ingest_incoming
-from app.prompts import EZHEDNEVNIK_QUESTION_TEXT
+from app.prompts import EZHEDNEVNIK_AM_POOL, EZHEDNEVNIK_QUESTION_TEXT
 from app.reminders import deliver_reminder
 from app.telegram import send_message, send_message_with_button, send_message_with_buttons
 
@@ -127,11 +127,15 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
     """Fixed-time daily journal check-in — replaces the old random-pool
     daily question above (schedule_today_question/send_daily_question are
     no longer scheduled in start_scheduler(), left in place only in case
-    a question was already in flight at deploy time). Two fixed times
-    instead of one random window: 'am' at noon (just the before-lunch
-    feeling), 'pm' in the evening (the rest of the ЕЖЕДНЕВНИК questions) —
-    see prompts.py's EZHEDNEVNIK_QUESTION_TEXT for the exact wording."""
-    text = EZHEDNEVNIK_QUESTION_TEXT[slot]
+    a question was already in flight at deploy time). Three fixed times,
+    each matched to when the relevant period just ended so it's still
+    fresh: 'am' ~12:30 (before-lunch feeling — a random casual question
+    from EZHEDNEVNIK_AM_POOL; the score follow-up is asked separately by
+    app/service.py once this one's answered, not here), 'pm' ~18:00
+    (after-lunch feeling, right as the work day ends), 'evening' ~21:30
+    (the full-day retrospective — events/WDIS/WDIL/mistakes, needs the
+    whole day to have actually happened first)."""
+    text = random.choice(EZHEDNEVNIK_AM_POOL) if slot == "am" else EZHEDNEVNIK_QUESTION_TEXT[slot]
     today_start = datetime.now(TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
     for user_id in await get_registered_user_ids():
         closed = await close_stale_ezhednevnik_prompts(user_id, today_start)
@@ -248,7 +252,7 @@ async def start_scheduler() -> None:
     # shipped; nothing new will ever create one going forward.
     scheduler.add_job(
         send_ezhednevnik_prompts,
-        trigger=CronTrigger(hour=12, minute=0, timezone=TIMEZONE),
+        trigger=CronTrigger(hour=12, minute=30, timezone=TIMEZONE),
         args=["am"],
         id="ezhednevnik_am",
     )
@@ -257,6 +261,12 @@ async def start_scheduler() -> None:
         trigger=CronTrigger(hour=18, minute=0, timezone=TIMEZONE),
         args=["pm"],
         id="ezhednevnik_pm",
+    )
+    scheduler.add_job(
+        send_ezhednevnik_prompts,
+        trigger=CronTrigger(hour=21, minute=30, timezone=TIMEZONE),
+        args=["evening"],
+        id="ezhednevnik_evening",
     )
     scheduler.add_job(
         ensure_today_water_reminders,

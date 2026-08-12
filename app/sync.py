@@ -281,7 +281,7 @@ async def ezhednevnik_state():
 
 
 class TriggerEzhednevnikRequest(BaseModel):
-    slot: Literal["am", "pm"]
+    slot: Literal["am", "pm", "evening"]
 
 
 @router.post("/trigger_ezhednevnik", dependencies=[Depends(require_bearer)])

@@ -293,7 +293,7 @@ async def send_kanban_status(user_id: int) -> None:
         await send_message(user_id, answer)
 
 
-_EZHEDNEVNIK_KINDS = ("ezhednevnik_am", "ezhednevnik_pm")
+_EZHEDNEVNIK_KINDS = ("ezhednevnik_pm", "ezhednevnik_evening")
 
 
 async def ingest_incoming() -> None:
@@ -326,11 +326,15 @@ async def ingest_incoming() -> None:
                 # reasoning as save_flashcard/card generation — parsing a
                 # free-text reply into structured fields genuinely needs
                 # model judgment, there's no raw-text equivalent to persist
-                # as-is), so require_tool_type="none": one corrective retry,
-                # then accept whatever happened.
+                # as-is), so just one corrective retry, then accept whatever
+                # happened. require_tool_type="fill_ezhednevnik" (NOT "none")
+                # — this also scopes which tools the model is offered on the
+                # Odysseus side (see _TOOLS_BY_REQUIRE_TYPE there); "none"
+                # isn't a recognized type there and would've fallen back to
+                # trilium_notes-only, silently breaking this entirely.
                 result = await _chat_with_session(
                     message["user_id"], tagged_text, base_url, model, system_prompt,
-                    require_tool=True, require_tool_type="none",
+                    require_tool=True, require_tool_type="fill_ezhednevnik",
                 )
             else:
                 system_prompt = _build_prompt(message["user_id"], "пассивное")

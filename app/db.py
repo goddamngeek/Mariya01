@@ -99,22 +99,33 @@ CREATE TABLE IF NOT EXISTS water_reminders (
     UNIQUE (user_id, window_index, for_date)
 );
 
--- Replaces the old random-pool daily question (see scheduler.py) — two
--- fixed check-ins per day (noon/evening) instead of one random question.
--- No pool/deferral needed since the text is fixed per slot; is_open just
--- gates "don't send a second one while the first is still unanswered".
+-- Replaces the old random-pool daily question (see scheduler.py) — three
+-- fixed check-ins per day (am ~12:30 / pm ~18:00 / evening ~21:30) instead
+-- of one random question. No pool/deferral needed since the text is fixed
+-- per slot (am's pool is chosen in code, not stored); is_open just gates
+-- "don't send a second one while the first is still unanswered". stage/
+-- pending_text exist only for the 'am' slot's two-step flow: a casual pool
+-- question first (stage='answer'), then a plain follow-up asking to rate
+-- it (stage='score', with the first reply stashed in pending_text) — pm/
+-- evening never leave stage='answer'.
 CREATE TABLE IF NOT EXISTS ezhednevnik_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
-    slot TEXT NOT NULL CHECK (slot IN ('am', 'pm')),
+    slot TEXT NOT NULL CHECK (slot IN ('am', 'pm', 'evening')),
     sent_at TIMESTAMPTZ NOT NULL,
-    is_open BOOLEAN NOT NULL DEFAULT TRUE
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    stage TEXT NOT NULL DEFAULT 'answer' CHECK (stage IN ('answer', 'score')),
+    pending_text TEXT
 );
 
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS anonymous BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'answer';
+ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS pending_text TEXT;
+ALTER TABLE ezhednevnik_prompts DROP CONSTRAINT IF EXISTS ezhednevnik_prompts_slot_check;
+ALTER TABLE ezhednevnik_prompts ADD CONSTRAINT ezhednevnik_prompts_slot_check CHECK (slot IN ('am', 'pm', 'evening'));
 """
 
 SEED_QUESTIONS = [
@@ -342,6 +353,17 @@ async def get_open_ezhednevnik_prompt(user_id: int) -> asyncpg.Record | None:
         "SELECT * FROM ezhednevnik_prompts WHERE user_id = $1 AND is_open = TRUE "
         "ORDER BY sent_at DESC LIMIT 1",
         user_id,
+    )
+
+
+async def advance_ezhednevnik_to_score(prompt_id: int, pending_text: str) -> None:
+    """AM slot, step 1 -> 2: stash the casual-question reply verbatim and
+    move to the score stage — the prompt stays open, service.py sends the
+    follow-up itself without ever involving Odysseus for this step."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE ezhednevnik_prompts SET stage = 'score', pending_text = $1 WHERE id = $2",
+        pending_text, prompt_id,
     )
 
 

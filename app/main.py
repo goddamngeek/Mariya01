@@ -1,3 +1,4 @@
+import random
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -16,7 +17,7 @@ from app.db import (
 from app.flashcard_session import start_review_session, stop_review_session
 from app.ingest import send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
-from app.prompts import EZHEDNEVNIK_QUESTION_TEXT
+from app.prompts import EZHEDNEVNIK_AM_POOL, EZHEDNEVNIK_QUESTION_TEXT, EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT
 from app.scheduler import scheduler, start_scheduler
 from app.service import process_incoming_message
 from app.sync import router as sync_router
@@ -124,6 +125,16 @@ async def telegram_webhook(request: Request):
         open_prompt = await get_open_ezhednevnik_prompt(chat_id)
         if open_prompt is None:
             await send_message(chat_id, "Сейчас нет открытого чек-ина ежедневника.")
+        elif open_prompt["slot"] == "am":
+            # No fixed text to re-show for 'am' — the actual question sent
+            # is picked randomly from EZHEDNEVNIK_AM_POOL and not stored
+            # anywhere (see prompts.py); a fresh pick serves the same
+            # purpose. stage='score' has a real fixed follow-up though.
+            text_to_send = (
+                EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT if open_prompt["stage"] == "score"
+                else random.choice(EZHEDNEVNIK_AM_POOL)
+            )
+            await send_message(chat_id, text_to_send)
         else:
             await send_message(chat_id, EZHEDNEVNIK_QUESTION_TEXT[open_prompt["slot"]])
         return {"ok": True}

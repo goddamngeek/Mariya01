@@ -1,8 +1,11 @@
 import asyncio
+import re
 import traceback
 
 from app.config import OUTGOING_DEDUP_DAYS
 from app.db import (
+    ack_incoming_messages,
+    advance_ezhednevnik_to_score,
     close_ezhednevnik_prompt,
     close_question,
     get_open_ezhednevnik_prompt,
@@ -13,12 +16,17 @@ from app.db import (
     utcnow,
 )
 from app.ingest import handle_active_message
+from app.odysseus_client import fill_ezhednevnik_direct
+from app.people import USER_NAMES
+from app.prompts import EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT
 from app.telegram import send_message
 
 # asyncio only holds a weak reference to a task with no other referrer, so an
 # unreferenced fire-and-forget task is eligible for GC before it completes
 # (documented asyncio behavior) — keep a strong reference here until it's done.
 _background_tasks: set[asyncio.Task] = set()
+
+_SCORE_RE = re.compile(r"-?\d+")
 
 
 async def process_incoming_message(user_id: int, text: str, reply_to_text: str | None = None) -> None:
@@ -31,6 +39,15 @@ async def process_incoming_message(user_id: int, text: str, reply_to_text: str |
     # were somehow open at once.
     open_question = await get_open_question(user_id)
     open_ezhednevnik = None if open_question is not None else await get_open_ezhednevnik_prompt(user_id)
+
+    # The AM slot's two-step flow (casual question -> score follow-up) is
+    # entirely deterministic and never touches Odysseus/the LLM at all — see
+    # EZHEDNEVNIK_AM_POOL's docstring in prompts.py for why there's nothing
+    # left for a model to judge once both pieces are in hand.
+    if open_question is None and open_ezhednevnik is not None and open_ezhednevnik["slot"] == "am":
+        await _handle_ezhednevnik_am_reply(user_id, text, reply_to_text, open_ezhednevnik)
+        return
+
     if open_question is not None:
         kind = "passive"
     elif open_ezhednevnik is not None:
@@ -57,6 +74,42 @@ async def process_incoming_message(user_id: int, text: str, reply_to_text: str |
         task.add_done_callback(_background_tasks.discard)
     else:
         await _send_reply(user_id)
+
+
+async def _handle_ezhednevnik_am_reply(
+    user_id: int, text: str, reply_to_text: str | None, prompt,
+) -> None:
+    """stage='answer': this is the reply to the casual pool question — stash
+    it verbatim and ask a plain follow-up for a score, nothing more.
+    stage='score': this is the reply to THAT follow-up — parse a number out
+    of it (best-effort; no number found just means no score, never invent
+    one), write both pieces to Trilium via a direct non-LLM call, and close
+    the prompt out. Every message here still gets logged to incoming_
+    messages for the audit trail, then immediately acked — it never enters
+    the normal ingest_incoming()/handle_active_message() pipelines at all."""
+    kind = f"ezhednevnik_am_{prompt['stage']}"
+    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
+
+    if prompt["stage"] == "answer":
+        await advance_ezhednevnik_to_score(prompt["id"], text.strip())
+        await send_message(user_id, EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT)
+        await ack_incoming_messages([message_id])
+        return
+
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    fields = {"person_name": person_name, "slot": "am", "hdif_am": prompt["pending_text"]}
+    match = _SCORE_RE.search(text)
+    if match:
+        fields["hdif_am_score"] = max(0, min(100, int(match.group())))
+
+    await close_ezhednevnik_prompt(prompt["id"])
+    try:
+        await fill_ezhednevnik_direct(fields)
+        await send_message(user_id, "Записал, спасибо.")
+    except Exception:
+        print(f"fill_ezhednevnik_direct failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+    await ack_incoming_messages([message_id])
 
 
 async def _send_reply(user_id: int) -> None:

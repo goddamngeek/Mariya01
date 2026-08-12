@@ -34,6 +34,49 @@ from app.scheduler import _send_question, send_ezhednevnik_prompts
 router = APIRouter(prefix="/sync")
 
 
+@router.get("/debug_ezhednevnik_raw/{user_id}", dependencies=[Depends(require_bearer)])
+async def debug_ezhednevnik_raw(user_id: int):
+    """Temporary: the ежедневник write silently isn't landing in Trilium
+    despite prompts closing normally — no direct log access to the
+    Northflank deployment, so this surfaces the raw DB row (in particular
+    the real Python type of `collected`, since asyncpg's JSONB handling
+    without an explicit codec is the top suspect) to diagnose without
+    guessing. Remove once the root cause is fixed."""
+    from app.db import get_open_ezhednevnik_prompt, get_ezhednevnik_prompts_for_user as _hist
+
+    row = await get_open_ezhednevnik_prompt(user_id)
+    history = await _hist(user_id)
+    result = {
+        "open": row is not None,
+        "history": [{"id": r["id"], "slot": r["slot"], "is_open": r["is_open"]} for r in history],
+    }
+    if row is not None:
+        collected = row["collected"]
+        result.update({
+            "slot": row["slot"], "step": row["step"],
+            "collected_type": str(type(collected)),
+            "collected_repr": repr(collected)[:500],
+        })
+    return result
+
+
+@router.post("/debug_fill_ezhednevnik", dependencies=[Depends(require_bearer)])
+async def debug_fill_ezhednevnik(body: dict):
+    """Temporary: calls the bot's own fill_ezhednevnik_direct() client
+    function exactly as service.py does, to isolate whether the bot-side
+    HTTP call itself is the failure point (vs. the Odysseus endpoint,
+    already confirmed working when called directly). Remove once fixed."""
+    import traceback
+
+    from app.odysseus_client import fill_ezhednevnik_direct
+
+    try:
+        result = await fill_ezhednevnik_direct(body)
+        return {"ok": True, "result": result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "traceback": traceback.format_exc()}
+
+
 def require_bearer(authorization: str = Header(default="")) -> None:
     if not SYNC_BEARER_TOKEN or authorization != f"Bearer {SYNC_BEARER_TOKEN}":
         raise HTTPException(status_code=401, detail="unauthorized")

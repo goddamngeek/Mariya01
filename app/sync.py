@@ -34,6 +34,18 @@ from app.scheduler import _send_question, send_ezhednevnik_prompts
 router = APIRouter(prefix="/sync")
 
 
+@router.get("/debug_odysseus_url")
+async def debug_odysseus_url():
+    """Temporary, no auth (deliberately — this is the ONLY thing broken
+    right now, don't add a dependency that could itself go wrong): confirms
+    the exact ODYSSEUS_URL value this running process actually has, since
+    fill_ezhednevnik_direct fails with a persistent (not transient — 3
+    retries all failed) DNS ConnectError while agent_chat, hitting the same
+    constant, keeps working. Remove once this is understood."""
+    from app.config import ODYSSEUS_URL
+    return {"ODYSSEUS_URL": ODYSSEUS_URL}
+
+
 def require_bearer(authorization: str = Header(default="")) -> None:
     if not SYNC_BEARER_TOKEN or authorization != f"Bearer {SYNC_BEARER_TOKEN}":
         raise HTTPException(status_code=401, detail="unauthorized")

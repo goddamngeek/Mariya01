@@ -1,3 +1,5 @@
+import random
+
 INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло не напрямую, а через Telegram-бота от человека по имени __NAME__. Оно начинается с тега [__NAME__ ДД.ММ.ГГГГ ЧЧ:ММ МСК] — это метаданные (кто и когда написал), текст после тега — слова человека. Если сразу после тега есть "(в ответ на сообщение: "...")" — человек использовал функцию "ответить" в Telegram на конкретное более раннее сообщение (своё или бота), и его текущие слова нужно понимать В КОНТЕКСТЕ этой цитаты — например, "напомни об этом Маше" значит "напомни ей вот что: <текст из цитаты>", а не переспрашивай, что именно.
 
 Тип этого сообщения: __KIND__.
@@ -52,62 +54,18 @@ INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло �
 {"person_name": "__NAME__", "item": "...", "status": "..."}
 ```"""
 
-# Replaces the old random-pool daily question (see scheduler.py). A
-# dedicated prompt, not a branch of INGEST_PROMPT_TEMPLATE, since the
-# instructions here are fundamentally different — not "log to journal" but
-# "parse into these specific fields and call fill_ezhednevnik". Separate
-# AM/PM instructions because each slot only covers its own subset of the
-# real ЕЖЕДНЕВНИК spreadsheet's columns (verified live against the actual
-# note — see fill_ezhednevnik's own docstring on the Odysseus side).
-EZHEDNEVNIK_PROMPT_TEMPLATE = """Ты — Odysseus. Человек по имени __NAME__ ответил в Telegram на плановый чек-ин ежедневника (__SLOT_LABEL__). Сообщение начинается с тега [__NAME__ ДД.ММ.ГГГГ ЧЧ:ММ МСК] — это метаданные, текст после тега — сам ответ.
-
-Твой ответ здесь никто не читает — разбери ответ и вызови тул fill_ezhednevnik с person_name="__NAME__", slot="__SLOT__" и полями ниже.
-
-__SLOT_INSTRUCTIONS__
-
-Правила разбора:
-— Заполняй ТОЛЬКО те поля, на которые человек реально ответил в этом сообщении. Если что-то не упомянул — просто не передавай это поле в вызове, не выдумывай значение и не пиши "не указано".
-— *_score — только если он явно назвал число или оценку ("70 баллов", "на 8 из 10" → переведи в шкалу 0-100, т.е. 80). Без явной оценки в тексте — не передавай.
-— Содержательные ответы (event, wdis_*, wdil, mistakes, hdif_*) передавай своими словами человека, не сокращая суть — можно только убрать словесный мусор вроде "ну как-то так".
-
-После вызова тула ответь одним коротким предложением, подтвердив, что записал — без пересказа содержимого.
-
-```fill_ezhednevnik
-{"person_name": "__NAME__", "slot": "__SLOT__", "поле": "..."}
-```"""
-
-EZHEDNEVNIK_SLOT_INSTRUCTIONS = {
-    "pm": (
-        'Это дневной чек-ин — единственный вопрос был "Как себя чувствовал после обеда?" '
-        "(можно с оценкой в баллах). Заполни hdif_pm, и hdif_pm_score если названа оценка."
-    ),
-    "evening": (
-        "Это вечерний чек-ин — вопросы были: заметное событие дня; что заметил в себе; "
-        "что заметил на рынке; что заметил в новостях; чему научился; какие ошибки сделал. "
-        "Заполни event, wdis_self, wdis_market, wdis_news, wdil, mistakes — те из них, что человек затронул."
-    ),
-}
-
-EZHEDNEVNIK_SLOT_LABELS = {"pm": "дневной", "evening": "вечерний"}
-
-EZHEDNEVNIK_QUESTION_TEXT = {
-    "pm": "Как себя чувствовал сегодня после обеда? Если хочешь — оцени в баллах (0-100).",
-    "evening": (
-        "Вечерний чек-ин:\n"
-        "1. Было сегодня что-то заметное?\n"
-        "2. Что заметил в себе?\n"
-        "3. Что заметил на рынке?\n"
-        "4. Что заметил в новостях?\n"
-        "5. Чему сегодня научился?\n"
-        "6. Какие ошибки сделал?"
-    ),
-}
-
-# The AM slot (~12:30) is handled entirely deterministically, not through
-# this prompt at all — see app/service.py's two-step flow: a random casual
-# question from the pool, then a plain follow-up asking to rate it, then a
-# direct (non-LLM) call to Odysseus's /v1/fill_ezhednevnik_direct. Nothing
-# here needs model judgment once both pieces are in hand.
+# Replaces the old random-pool daily question (see scheduler.py). Entirely
+# deterministic, no LLM involved at all: each slot is a fixed sequence of
+# ONE QUESTION PER FIELD (see app/service.py's step-by-step flow) — once
+# every question maps 1:1 to exactly one Trilium column, there's nothing
+# left for a model to interpret, so this never goes through Odysseus's
+# agent loop; the bot calls Odysseus's plain /v1/fill_ezhednevnik_direct
+# once a slot's last step is answered. 'am' and 'pm' share the same casual
+# pool (por request — same phrasing works for a midday and an afternoon
+# check-in, just asked at different times), each followed by a fixed score
+# follow-up; 'evening' is the full-day retrospective, one question at a
+# time instead of one combined list (confirmed live: a single message with
+# 6 questions read as overwhelming/easy to only partially answer).
 EZHEDNEVNIK_AM_POOL = [
     "Как дела?",
     "Как жизнь?",
@@ -122,3 +80,35 @@ EZHEDNEVNIK_AM_POOL = [
 ]
 
 EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT = "Оцени это в баллах, от 0 до 100."
+
+# Each slot: ordered list of (kind, fixed_text_or_None, field_name).
+# kind="pool" picks randomly from EZHEDNEVNIK_AM_POOL at send time;
+# kind="fixed" always sends fixed_text as-is. field_name is exactly the
+# fill_ezhednevnik_direct parameter that step's reply fills — a name ending
+# in "_score" is parsed as a number (see service.py), everything else is
+# stored verbatim.
+EZHEDNEVNIK_STEPS = {
+    "am": [
+        ("pool", None, "hdif_am"),
+        ("fixed", EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT, "hdif_am_score"),
+    ],
+    "pm": [
+        ("pool", None, "hdif_pm"),
+        ("fixed", EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT, "hdif_pm_score"),
+    ],
+    "evening": [
+        ("fixed", "Было сегодня что-то заметное?", "event"),
+        ("fixed", "Что заметил в себе?", "wdis_self"),
+        ("fixed", "Что заметил на рынке?", "wdis_market"),
+        ("fixed", "Что заметил в новостях?", "wdis_news"),
+        ("fixed", "Чему сегодня научился?", "wdil"),
+        ("fixed", "Какие ошибки сделал?", "mistakes"),
+    ],
+}
+
+
+def ezhednevnik_step_text(slot: str, step: int) -> str:
+    kind, text, _field = EZHEDNEVNIK_STEPS[slot][step]
+    if kind == "pool":
+        return random.choice(EZHEDNEVNIK_AM_POOL)
+    return text

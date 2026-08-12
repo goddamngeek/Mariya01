@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -101,31 +102,31 @@ CREATE TABLE IF NOT EXISTS water_reminders (
 
 -- Replaces the old random-pool daily question (see scheduler.py) — three
 -- fixed check-ins per day (am ~12:30 / pm ~18:00 / evening ~21:30) instead
--- of one random question. No pool/deferral needed since the text is fixed
--- per slot (am's pool is chosen in code, not stored); is_open just gates
--- "don't send a second one while the first is still unanswered". stage/
--- pending_text exist only for the 'am' slot's two-step flow: a casual pool
--- question first (stage='answer'), then a plain follow-up asking to rate
--- it (stage='score', with the first reply stashed in pending_text) — pm/
--- evening never leave stage='answer'.
+-- of one random question, each a strict one-question-at-a-time sequence
+-- (see app/prompts.py's EZHEDNEVNIK_STEPS) — step is the 0-based index into
+-- that slot's step list, collected holds every answer gathered so far this
+-- round as {field_name: value}. is_open gates "don't send a second one
+-- while the first is still unanswered".
 CREATE TABLE IF NOT EXISTS ezhednevnik_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
     slot TEXT NOT NULL CHECK (slot IN ('am', 'pm', 'evening')),
     sent_at TIMESTAMPTZ NOT NULL,
     is_open BOOLEAN NOT NULL DEFAULT TRUE,
-    stage TEXT NOT NULL DEFAULT 'answer' CHECK (stage IN ('answer', 'score')),
-    pending_text TEXT
+    step INTEGER NOT NULL DEFAULT 0,
+    collected JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS anonymous BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'answer';
-ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS pending_text TEXT;
 ALTER TABLE ezhednevnik_prompts DROP CONSTRAINT IF EXISTS ezhednevnik_prompts_slot_check;
 ALTER TABLE ezhednevnik_prompts ADD CONSTRAINT ezhednevnik_prompts_slot_check CHECK (slot IN ('am', 'pm', 'evening'));
+ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS stage;
+ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS pending_text;
+ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS step INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NULL DEFAULT '{}'::jsonb;
 """
 
 SEED_QUESTIONS = [
@@ -356,14 +357,15 @@ async def get_open_ezhednevnik_prompt(user_id: int) -> asyncpg.Record | None:
     )
 
 
-async def advance_ezhednevnik_to_score(prompt_id: int, pending_text: str) -> None:
-    """AM slot, step 1 -> 2: stash the casual-question reply verbatim and
-    move to the score stage — the prompt stays open, service.py sends the
-    follow-up itself without ever involving Odysseus for this step."""
+async def advance_ezhednevnik_step(prompt_id: int, step: int, collected: dict) -> None:
+    """Move to the next question in the slot's step sequence (see
+    app/prompts.py's EZHEDNEVNIK_STEPS) — the prompt stays open, collected
+    accumulates every answer gathered so far this round. service.py sends
+    the next question itself without ever involving Odysseus for this."""
     pool = await get_pool()
     await pool.execute(
-        "UPDATE ezhednevnik_prompts SET stage = 'score', pending_text = $1 WHERE id = $2",
-        pending_text, prompt_id,
+        "UPDATE ezhednevnik_prompts SET step = $1, collected = $2::jsonb WHERE id = $3",
+        step, json.dumps(collected), prompt_id,
     )
 
 

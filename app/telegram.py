@@ -33,6 +33,20 @@ async def send_message(chat_id: int | str, text: str) -> bool:
         return False
 
 
+async def send_message_get_id(chat_id: int | str, text: str) -> int | None:
+    """Same as send_message, but returns the sent message_id (or None on
+    failure) — for callers that need to act on this specific message later,
+    e.g. scheduling its deletion (see scheduler.py's water reminders)."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        resp = await get_client().post(url, json={"chat_id": chat_id, "text": text})
+        resp.raise_for_status()
+        return resp.json()["result"]["message_id"]
+    except httpx.HTTPError as exc:
+        print(f"telegram sendMessage failed: {exc}", flush=True)
+        return None
+
+
 async def set_bot_commands() -> None:
     """Registers /cards in Telegram's own native bot command menu (the "/"
     menu button next to the message input, built into every Telegram chat

@@ -38,9 +38,15 @@ from app.db import (
 )
 from app.flashcard_session import close_idle_session
 from app.ingest import ingest_incoming
-from app.prompts import EZHEDNEVNIK_AM_POOL, EZHEDNEVNIK_QUESTION_TEXT
+from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
-from app.telegram import send_message, send_message_with_button, send_message_with_buttons
+from app.telegram import (
+    delete_message,
+    send_message,
+    send_message_get_id,
+    send_message_with_button,
+    send_message_with_buttons,
+)
 
 CARD_SESSION_IDLE_MINUTES = 10
 CARD_REMINDER_TEXT = "Готовы карточки на повторение — сейчас или попозже?"
@@ -129,13 +135,13 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
     no longer scheduled in start_scheduler(), left in place only in case
     a question was already in flight at deploy time). Three fixed times,
     each matched to when the relevant period just ended so it's still
-    fresh: 'am' ~12:30 (before-lunch feeling — a random casual question
-    from EZHEDNEVNIK_AM_POOL; the score follow-up is asked separately by
-    app/service.py once this one's answered, not here), 'pm' ~18:00
-    (after-lunch feeling, right as the work day ends), 'evening' ~21:30
-    (the full-day retrospective — events/WDIS/WDIL/mistakes, needs the
-    whole day to have actually happened first)."""
-    text = random.choice(EZHEDNEVNIK_AM_POOL) if slot == "am" else EZHEDNEVNIK_QUESTION_TEXT[slot]
+    fresh: 'am' ~12:30 (before-lunch feeling), 'pm' ~18:00 (after-lunch
+    feeling, right as the work day ends), 'evening' ~21:30 (the full-day
+    retrospective — needs the whole day to have actually happened first).
+    Each slot is a one-question-at-a-time sequence (EZHEDNEVNIK_STEPS in
+    prompts.py) — this only ever sends the FIRST question; every step after
+    that is driven entirely by app/service.py as replies come in."""
+    text = ezhednevnik_step_text(slot, 0)
     today_start = datetime.now(TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
     for user_id in await get_registered_user_ids():
         closed = await close_stale_ezhednevnik_prompts(user_id, today_start)
@@ -234,13 +240,31 @@ async def ensure_today_water_reminders() -> None:
             await ensure_water_reminder(user_id, i, today, due_at)
 
 
+WATER_REMINDER_DELETE_DELAY_MINUTES = 2
+
+
+async def _delete_water_reminder_message(chat_id: int, message_id: int) -> None:
+    await delete_message(chat_id, message_id)
+
+
 async def release_due_water_reminders() -> None:
     for row in await get_due_water_reminders():
         text = random.choice(WATER_REMINDER_TEXTS)
-        if await send_message(row["user_id"], text):
-            await mark_water_reminder_sent(row["id"])
-        else:
+        message_id = await send_message_get_id(row["user_id"], text)
+        if message_id is None:
             print(f"failed to send water reminder id={row['id']} user={row['user_id']}, will retry", flush=True)
+            continue
+        await mark_water_reminder_sent(row["id"])
+        # Self-cleaning nudge — not worth leaving in the chat forever and
+        # cluttering it, per request.
+        scheduler.add_job(
+            _delete_water_reminder_message,
+            trigger="date",
+            run_date=datetime.now(TIMEZONE) + timedelta(minutes=WATER_REMINDER_DELETE_DELAY_MINUTES),
+            args=[row["user_id"], message_id],
+            id=f"delete_water_msg_{message_id}",
+            replace_existing=True,
+        )
 
 
 async def start_scheduler() -> None:

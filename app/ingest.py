@@ -260,20 +260,36 @@ async def _chat_with_session(
     return result
 
 
+ODYSSEUS_UNAVAILABLE_TEXT = "Не могу сейчас связаться с Odysseus. Попробуй чуть позже."
+
+
 async def send_kanban_status(user_id: int) -> None:
     """Direct trigger for the /kanban command — bypasses the active-message
     keyword heuristics entirely (intent is already certain here) but still
     goes through Odysseus, since only it holds the Trilium ETAPI
     credentials. kanban_status has a real deterministic fallback on the
     Odysseus side (see webhook_routes.py's _force_kanban_status), so this
-    always returns an accurate board read, never a hallucinated one."""
-    base_url, model = await get_active_endpoint()
-    tagged_text = _tag_message(user_id, "покажи канбан", utcnow())
-    system_prompt = _build_prompt(user_id, "активное")
-    result = await _chat_with_session(
-        user_id, tagged_text, base_url, model, system_prompt,
-        require_tool=True, require_tool_type="kanban_status",
-    )
+    always returns an accurate board read, never a hallucinated one.
+
+    Unlike handle_active_message() below, this was called directly from
+    main.py's webhook handler with no try/except anywhere in between —
+    confirmed live: an Odysseus outage turned this into a bare unhandled
+    exception, a 500 back to Telegram and total silence to the user, no
+    indication anything went wrong at all."""
+    try:
+        base_url, model = await get_active_endpoint()
+        tagged_text = _tag_message(user_id, "покажи канбан", utcnow())
+        system_prompt = _build_prompt(user_id, "активное")
+        result = await _chat_with_session(
+            user_id, tagged_text, base_url, model, system_prompt,
+            require_tool=True, require_tool_type="kanban_status",
+        )
+    except Exception:
+        print(f"send_kanban_status failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, ODYSSEUS_UNAVAILABLE_TEXT)
+        return
+
     answer = (result.get("response") or "").strip()
     if answer:
         await send_message(user_id, answer)
@@ -441,3 +457,9 @@ async def handle_active_message(
     except Exception:
         print(f"handle_active_message failed for incoming id={message_id}:", flush=True)
         traceback.print_exc()
+        # Confirmed live: an Odysseus outage silently swallowed every active
+        # message here — this didn't crash the webhook (200 still went back
+        # to Telegram), but the person got total silence with no indication
+        # anything went wrong. Not acking on purpose: if this really was a
+        # transient failure, /sync/reprocess_active can still recover it.
+        await send_message(user_id, ODYSSEUS_UNAVAILABLE_TEXT)

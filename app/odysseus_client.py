@@ -6,6 +6,7 @@ by hand since the sync (mac_sync) and async (bot) versions can't share code
 without adding a shared package neither side otherwise needs.
 """
 
+import asyncio
 import time
 
 import httpx
@@ -138,16 +139,36 @@ async def fill_ezhednevnik_direct(fields: dict) -> dict:
     check-in — by the time this is called, the bot already has both the
     casual-question reply (verbatim) and a score it parsed itself, so
     there's nothing left for a model to interpret. Same auth as agent_chat,
-    no session/LLM involved at all on the Odysseus side."""
-    resp = await get_client().post(
-        f"{ODYSSEUS_URL}/api/v1/fill_ezhednevnik_direct", headers=_AUTH_HEADERS, json=fields, timeout=30
-    )
-    if resp.status_code >= 400:
-        # The bare httpx exception's str() doesn't include the response
-        # body — this is the only place that ever prints the real reason
-        # (a 4xx detail from Odysseus, e.g. auth/validation), so surface it
-        # explicitly rather than leaving a caller to guess from a bare
-        # "500 Internal Server Error" or similar.
-        print(f"FILL_EZHEDNEVNIK_DIRECT ERROR BODY: {resp.text}", flush=True)
-    resp.raise_for_status()
-    return resp.json()
+    no session/LLM involved at all on the Odysseus side.
+
+    Confirmed live: this specific call failed with httpx.ConnectError
+    ("Name or service not known") while agent_chat — same ODYSSEUS_URL,
+    same shared client — kept working fine throughout. agent_chat fires on
+    nearly every message, so its connection stays warm; this one is rare
+    enough that a transient DNS blip on Northflank's outbound resolver has
+    a real chance of landing exactly on it. A couple of short retries is
+    cheap insurance for something this infrequent — there's no reason to
+    let one flaky DNS lookup drop a whole day's ежедневник entry."""
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = await get_client().post(
+                f"{ODYSSEUS_URL}/api/v1/fill_ezhednevnik_direct", headers=_AUTH_HEADERS, json=fields, timeout=30
+            )
+        except httpx.TransportError as exc:
+            last_exc = exc
+            print(f"fill_ezhednevnik_direct attempt {attempt + 1} failed: {exc!r}, retrying", flush=True)
+            await asyncio.sleep(2)
+            continue
+
+        if resp.status_code >= 400:
+            # The bare httpx exception's str() doesn't include the response
+            # body — this is the only place that ever prints the real reason
+            # (a 4xx detail from Odysseus, e.g. auth/validation), so surface
+            # it explicitly rather than leaving a caller to guess from a bare
+            # "500 Internal Server Error" or similar.
+            print(f"FILL_EZHEDNEVNIK_DIRECT ERROR BODY: {resp.text}", flush=True)
+        resp.raise_for_status()
+        return resp.json()
+
+    raise last_exc

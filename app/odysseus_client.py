@@ -142,5 +142,12 @@ async def fill_ezhednevnik_direct(fields: dict) -> dict:
     resp = await get_client().post(
         f"{ODYSSEUS_URL}/api/v1/fill_ezhednevnik_direct", headers=_AUTH_HEADERS, json=fields, timeout=30
     )
+    if resp.status_code >= 400:
+        # The bare httpx exception's str() doesn't include the response
+        # body — this is the only place that ever prints the real reason
+        # (a 4xx detail from Odysseus, e.g. auth/validation), so surface it
+        # explicitly rather than leaving a caller to guess from a bare
+        # "500 Internal Server Error" or similar.
+        print(f"FILL_EZHEDNEVNIK_DIRECT ERROR BODY: {resp.text}", flush=True)
     resp.raise_for_status()
     return resp.json()

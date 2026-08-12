@@ -116,9 +116,14 @@ async def _handle_ezhednevnik_reply(
     try:
         await fill_ezhednevnik_direct(fields)
         await send_message(user_id, "Записал, спасибо.")
-    except Exception:
+    except Exception as exc:
         print(f"fill_ezhednevnik_direct failed for user={user_id}:", flush=True)
         traceback.print_exc()
+        # No server log access to the Northflank deployment — surface the
+        # real reason directly in chat (temporary, until this class of
+        # failure is understood) instead of a silent no-op the person has
+        # no way to notice, let alone diagnose.
+        await send_message(user_id, f"Не получилось записать: {type(exc).__name__}: {exc}"[:500])
     await ack_incoming_messages([message_id])
 
 

@@ -209,7 +209,10 @@ async def ezhednevnik_state():
     result = {}
     for name, uid in NAME_TO_USER_ID.items():
         result[name] = [
-            {"id": r["id"], "slot": r["slot"], "sent_at": r["sent_at"].isoformat(), "is_open": r["is_open"]}
+            {
+                "id": r["id"], "slot": r["slot"], "sent_at": r["sent_at"].isoformat(),
+                "is_open": r["is_open"], "step": r["step"], "collected": r["collected"],
+            }
             for r in await get_ezhednevnik_prompts_for_user(uid)
         ]
     return result

@@ -211,7 +211,7 @@ async def send_kanban_status(user_id: int) -> None:
         await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
         return
 
-    await send_message(user_id, answer)
+    await send_message(user_id, answer, parse_mode="HTML")
 
 
 async def ingest_incoming() -> None:
@@ -279,7 +279,7 @@ async def handle_active_message(
                 print(f"handle_active_message: kanban read failed for incoming id={message_id}:", flush=True)
                 traceback.print_exc()
                 answer = TRILIUM_UNAVAILABLE_TEXT
-            await send_message(user_id, answer)
+            await send_message(user_id, answer, parse_mode="HTML")
             await ack_incoming_messages([message_id])
             return
 

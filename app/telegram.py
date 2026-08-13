@@ -21,11 +21,14 @@ async def close_client() -> None:
         _client = None
 
 
-async def send_message(chat_id: int | str, text: str) -> bool:
+async def send_message(chat_id: int | str, text: str, parse_mode: str | None = None) -> bool:
     """One attempt, no retries here — callers decide what happens on failure."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
-        resp = await get_client().post(url, json={"chat_id": chat_id, "text": text})
+        resp = await get_client().post(url, json=payload)
         resp.raise_for_status()
         return True
     except httpx.HTTPError as exc:

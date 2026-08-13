@@ -13,6 +13,7 @@ Trilium tools that genuinely need an LLM (trilium_notes, add_chinese_word,
 etc.) — only the deterministic paths moved.
 """
 
+import html
 import json
 from datetime import date as _date, datetime
 from typing import Optional
@@ -204,7 +205,7 @@ async def read_kanban_status(board_name: str = "КАНБАН // KANBAN") -> str:
         board_resp.raise_for_status()
         child_ids = board_resp.json().get("childNoteIds") or []
         if not child_ids:
-            return f"'{board_name}' has no cards."
+            return f"'{html.escape(board_name)}' has no cards."
 
         columns: dict[str, list[str]] = {}
         for child_id in child_ids:
@@ -218,8 +219,12 @@ async def read_kanban_status(board_name: str = "КАНБАН // KANBAN") -> str:
             )
             columns.setdefault(status, []).append(child.get("title") or "(без названия)")
 
+        # Bold column headers via Telegram's HTML parse mode — caller must
+        # send this with parse_mode="HTML". Card titles/status names come
+        # straight from Trilium (user-editable), so escape them to keep
+        # any stray <, >, & from breaking Telegram's HTML parsing.
         sections = []
         for status, titles in columns.items():
-            numbered = "\n".join(f"{i}. {title}" for i, title in enumerate(titles, 1))
-            sections.append(f"{status}:\n\n{numbered}")
+            numbered = "\n".join(f"{i}. {html.escape(title)}" for i, title in enumerate(titles, 1))
+            sections.append(f"<b>{html.escape(status)}:</b>\n\n{numbered}")
         return "\n\n".join(sections)

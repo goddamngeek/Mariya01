@@ -1,15 +1,16 @@
-"""Direct Trilium ETAPI client for the fully-deterministic ежедневник write
-path — ported from Odysseus's src/tool_implementations.py (do_fill_ezhednevnik
-and its helpers). This never involves an LLM or Odysseus's session/auth
-stack at all: by the time app/service.py calls fill_ezhednevnik(), it
-already has every field it needs, parsed by plain regex/verbatim storage,
-so routing this through Odysseus was pure unnecessary surface area (and the
-source of most of the ежедневник bugs chased in practice — a slot enum that
-drifted out of sync between the two repos, entries dated by write-time
-instead of send-time, note-title resolution differing between copies of the
-same logic). Odysseus keeps the Trilium tools it actually needs an LLM for
-(trilium_notes, kanban_status, etc.) — only this one deterministic path
-moved.
+"""Direct Trilium ETAPI client for the fully-deterministic paths — ported
+from Odysseus's src/tool_implementations.py (do_fill_ezhednevnik,
+do_kanban_status and their helpers). These never involve an LLM or
+Odysseus's session/auth stack at all: by the time app/service.py calls
+fill_ezhednevnik(), it already has every field it needs, parsed by plain
+regex/verbatim storage, and read_kanban_status() is a pure read with no
+judgment involved either — routing either through Odysseus was pure
+unnecessary surface area (and the source of most of the ежедневник bugs
+chased in practice — a slot enum that drifted out of sync between the two
+repos, entries dated by write-time instead of send-time, note-title
+resolution differing between copies of the same logic). Odysseus keeps the
+Trilium tools that genuinely need an LLM (trilium_notes, add_chinese_word,
+etc.) — only the deterministic paths moved.
 """
 
 import json
@@ -58,6 +59,21 @@ async def _put_content(client: httpx.AsyncClient, note_id: str, content: str) ->
         headers={"Content-Type": "text/plain"},
     )
     resp.raise_for_status()
+
+
+async def _find_note_id(client: httpx.AsyncClient, title: str) -> Optional[str]:
+    """Exact-title lookup — Trilium's search is fuzzy/substring, so this
+    always filters down to an exact match rather than trusting the first
+    hit. Compares stripped titles: at least one real note in this vault
+    has a trailing space in its actual title, which a naive == would
+    silently fail to match."""
+    resp = await client.get(f"{TRILIUM_URL}/etapi/notes", params={"search": title})
+    resp.raise_for_status()
+    return next(
+        (n.get("noteId") for n in (resp.json().get("results") or [])
+         if (n.get("title") or "").strip() == title.strip()),
+        None,
+    )
 
 
 async def _find_ezhednevnik_note_id(client: httpx.AsyncClient, person_name: str) -> Optional[str]:
@@ -165,3 +181,42 @@ async def fill_ezhednevnik(fields: dict) -> None:
             header["15"] = {"s": "QF6GoM", "v": "Owner", "t": 1}
 
         await _put_content(client, note_id, json.dumps(data))
+
+
+async def read_kanban_status(board_name: str = "КАНБАН // KANBAN") -> str:
+    """Read-only. Board-view Collection notes (Kanban, Sales) do NOT create
+    a real parent-child link between a card and its column — every card is
+    physically a child of the board note itself regardless of column, and
+    column membership lives ONLY in each card's #status label (confirmed
+    live against the actual vault). So the only way to answer "what's in
+    progress" is to read every child's status label directly, not the tree.
+    Raises on failure; caller decides what to tell the person."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        board_id = await _find_note_id(client, board_name)
+        if board_id is None:
+            raise TriliumNoteNotFoundError(f"No board note titled '{board_name}' found.")
+
+        board_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{board_id}")
+        board_resp.raise_for_status()
+        child_ids = board_resp.json().get("childNoteIds") or []
+        if not child_ids:
+            return f"'{board_name}' has no cards."
+
+        columns: dict[str, list[str]] = {}
+        for child_id in child_ids:
+            child_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{child_id}")
+            child_resp.raise_for_status()
+            child = child_resp.json()
+            status = next(
+                (a["value"] for a in child.get("attributes", [])
+                 if a.get("type") == "label" and a.get("name") == "status"),
+                "(без статуса)",
+            )
+            columns.setdefault(status, []).append(child.get("title") or "(без названия)")
+
+        sections = [f"{status}: " + ", ".join(titles) for status, titles in columns.items()]
+        return "\n".join(sections)

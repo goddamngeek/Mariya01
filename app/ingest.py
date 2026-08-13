@@ -29,6 +29,7 @@ from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_end
 from app.people import USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.telegram import send_message
+from app.trilium_client import read_kanban_status
 
 
 def _tag_message(
@@ -113,9 +114,9 @@ _KANBAN_KEYWORDS = ("канбан", "бэклог", "в работе", "буду
 
 def _looks_like_kanban_status(text: str) -> bool:
     """"что в канбане?" / "что в работе?" / "покажи бэклог" — a pure,
-    judgment-free read (see kanban_status's own docstring on why board
-    membership can't be inferred from the note tree), so this gets a real
-    deterministic fallback in webhook_routes.py (see _force_kanban_status)."""
+    judgment-free read (see read_kanban_status's own docstring on why board
+    membership can't be inferred from the note tree), so this is answered
+    directly via app/trilium_client.py before ever reaching an LLM."""
     lowered = text.lower()
     return any(kw in lowered for kw in _KANBAN_KEYWORDS)
 
@@ -191,38 +192,26 @@ async def _chat_with_session(
 
 
 ODYSSEUS_UNAVAILABLE_TEXT = "Не могу сейчас связаться с Odysseus. Попробуй чуть позже."
+TRILIUM_UNAVAILABLE_TEXT = "Не могу сейчас связаться с Trilium. Попробуй чуть позже."
 
 
 async def send_kanban_status(user_id: int) -> None:
-    """Direct trigger for the /kanban command — bypasses the active-message
-    keyword heuristics entirely (intent is already certain here) but still
-    goes through Odysseus, since only it holds the Trilium ETAPI
-    credentials. kanban_status has a real deterministic fallback on the
-    Odysseus side (see webhook_routes.py's _force_kanban_status), so this
-    always returns an accurate board read, never a hallucinated one.
-
-    Unlike handle_active_message() below, this was called directly from
-    main.py's webhook handler with no try/except anywhere in between —
-    confirmed live: an Odysseus outage turned this into a bare unhandled
-    exception, a 500 back to Telegram and total silence to the user, no
-    indication anything went wrong at all."""
+    """Direct trigger for the /kanban command — a pure read with zero
+    content judgment, so it goes straight to Trilium (see
+    app/trilium_client.py), never through Odysseus/an LLM at all. Wrapped
+    in try/except since this is called directly from main.py's webhook
+    handler with nothing else in between — confirmed live (back when this
+    went through Odysseus): an outage turned an unhandled exception here
+    into a bare 500 to Telegram and total silence to the user."""
     try:
-        base_url, model = await get_active_endpoint()
-        tagged_text = _tag_message(user_id, "покажи канбан", utcnow())
-        system_prompt = _build_prompt(user_id, "активное")
-        result = await _chat_with_session(
-            user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=True, require_tool_type="kanban_status",
-        )
+        answer = await read_kanban_status()
     except Exception:
         print(f"send_kanban_status failed for user={user_id}:", flush=True)
         traceback.print_exc()
-        await send_message(user_id, ODYSSEUS_UNAVAILABLE_TEXT)
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
         return
 
-    answer = (result.get("response") or "").strip()
-    if answer:
-        await send_message(user_id, answer)
+    await send_message(user_id, answer)
 
 
 async def ingest_incoming() -> None:
@@ -280,6 +269,20 @@ async def handle_active_message(
     from app/service.py as soon as the webhook receives it, not from the 60s
     ingest_incoming() poll, since a real answer shouldn't wait up to a minute."""
     try:
+        # Kanban is a pure read with zero content judgment, so it's handled
+        # entirely before ever reaching Odysseus/an LLM — same reasoning as
+        # the ежедневник flow, see app/trilium_client.py.
+        if _looks_like_kanban_status(text):
+            try:
+                answer = await read_kanban_status()
+            except Exception:
+                print(f"handle_active_message: kanban read failed for incoming id={message_id}:", flush=True)
+                traceback.print_exc()
+                answer = TRILIUM_UNAVAILABLE_TEXT
+            await send_message(user_id, answer)
+            await ack_incoming_messages([message_id])
+            return
+
         base_url, model = await get_active_endpoint()
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")
@@ -288,8 +291,6 @@ async def handle_active_message(
         # Order matters throughout: each check below only fires if nothing
         # higher up already claimed the message, most-specific first.
         claimed = relay_intent
-        kanban_intent = (not claimed) and _looks_like_kanban_status(text)
-        claimed = claimed or kanban_intent
         chinese_word_intent = (not claimed) and _looks_like_chinese_word(text)
         claimed = claimed or chinese_word_intent
         book_review_intent = (not claimed) and _looks_like_book_review(text)
@@ -317,8 +318,6 @@ async def handle_active_message(
         # write tool available at all.
         if relay_intent:
             require_tool_type = "schedule_send"
-        elif kanban_intent:
-            require_tool_type = "kanban_status"
         elif chinese_word_intent:
             require_tool_type = "add_chinese_word"
         elif book_review_intent:
@@ -335,12 +334,12 @@ async def handle_active_message(
             require_tool_type = "general"
 
         forced_fallback_types = (
-            relay_intent, kanban_intent, note_intent, finance_intent,
+            relay_intent, note_intent, finance_intent,
         )
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
             require_tool=(
-                relay_intent or kanban_intent or chinese_word_intent or book_review_intent
+                relay_intent or chinese_word_intent or book_review_intent
                 or book_add_intent or sale_intent or note_intent
             ),
             require_tool_type=require_tool_type,

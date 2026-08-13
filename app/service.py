@@ -17,10 +17,10 @@ from app.db import (
     utcnow,
 )
 from app.ingest import handle_active_message
-from app.odysseus_client import fill_ezhednevnik_direct
 from app.people import USER_NAMES
 from app.prompts import EZHEDNEVNIK_STEPS, ezhednevnik_step_text
 from app.telegram import send_message
+from app.trilium_client import fill_ezhednevnik
 
 # asyncio only holds a weak reference to a task with no other referrer, so an
 # unreferenced fire-and-forget task is eligible for GC before it completes
@@ -119,21 +119,22 @@ async def _handle_ezhednevnik_reply(
     fields = {"person_name": person_name, "slot": slot, "date": entry_date, **collected}
 
     # Close only on SUCCESS — confirmed live (the odysseus.61d1.online DNS
-    # outage): closing unconditionally BEFORE attempting the write meant a
-    # failed write lost that day's entry outright, with no way to retry —
-    # the prompt was already gone. Leaving it open on failure means the
-    # person can just answer again (any message) once Odysseus is back;
-    # `collected` already has every earlier answer intact either way.
+    # outage, back when this went through Odysseus): closing unconditionally
+    # BEFORE attempting the write meant a failed write lost that day's entry
+    # outright, with no way to retry — the prompt was already gone. Leaving
+    # it open on failure means the person can just answer again (any
+    # message) once Trilium is reachable again; `collected` already has
+    # every earlier answer intact either way.
     try:
-        await fill_ezhednevnik_direct(fields)
+        await fill_ezhednevnik(fields)
         await close_ezhednevnik_prompt(prompt["id"])
         await send_message(user_id, "Записал, спасибо.")
     except Exception as exc:
-        print(f"fill_ezhednevnik_direct failed for user={user_id}:", flush=True)
+        print(f"fill_ezhednevnik failed for user={user_id}:", flush=True)
         traceback.print_exc()
         await send_message(
             user_id,
-            f"Не получилось записать (Odysseus недоступен): {type(exc).__name__}. "
+            f"Не получилось записать (Trilium недоступен): {type(exc).__name__}. "
             "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
         )
     await ack_incoming_messages([message_id])

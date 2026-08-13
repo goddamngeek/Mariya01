@@ -47,12 +47,12 @@ INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло �
 ```"""
 
 # Replaces the old random-pool daily question (see scheduler.py). Entirely
-# deterministic, no LLM involved at all: each slot is a fixed sequence of
-# ONE QUESTION PER FIELD (see app/service.py's step-by-step flow) — once
-# every question maps 1:1 to exactly one Trilium column, there's nothing
-# left for a model to interpret, so this never goes through Odysseus's
-# agent loop; the bot calls Odysseus's plain /v1/fill_ezhednevnik_direct
-# once a slot's last step is answered. 'am' and 'pm' share the same casual
+# deterministic, no LLM or Odysseus involved at all: each slot is a fixed
+# sequence of ONE QUESTION PER FIELD (see app/service.py's step-by-step
+# flow) — once every question maps 1:1 to exactly one Trilium column,
+# there's nothing left for a model to interpret, so the bot writes straight
+# to Trilium itself (see app/trilium_client.py) once a slot's last step is
+# answered. 'am' and 'pm' share the same casual
 # pool (por request — same phrasing works for a midday and an afternoon
 # check-in, just asked at different times), each followed by a fixed score
 # follow-up; 'evening' is the full-day retrospective, one question at a
@@ -76,9 +76,9 @@ EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT = "Оцени это в баллах, от 0 д�
 # Each slot: ordered list of (kind, fixed_text_or_None, field_name).
 # kind="pool" picks randomly from EZHEDNEVNIK_AM_POOL at send time;
 # kind="fixed" always sends fixed_text as-is. field_name is exactly the
-# fill_ezhednevnik_direct parameter that step's reply fills — a name ending
-# in "_score" is parsed as a number (see service.py), everything else is
-# stored verbatim.
+# app.trilium_client.fill_ezhednevnik field that step's reply fills — a
+# name ending in "_score" is parsed as a number (see service.py), everything
+# else is stored verbatim.
 EZHEDNEVNIK_STEPS = {
     "am": [
         ("pool", None, "hdif_am"),

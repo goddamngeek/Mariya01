@@ -48,3 +48,11 @@ SYNC_BEARER_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
 ODYSSEUS_URL = os.environ.get("ODYSSEUS_URL", "")
 ODYSSEUS_TOKEN = os.environ.get("ODYSSEUS_TOKEN", "")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+
+# Direct Trilium ETAPI access — used for the fully-deterministic writes
+# (ежедневник) that don't need Odysseus/an LLM at all, so they don't have
+# to pay for Odysseus's whole session/auth stack just to reach Trilium.
+# Same instance and token Odysseus itself uses, reached over its own public
+# Caddy-proxied subdomain rather than the internal-only docker network.
+TRILIUM_URL = os.environ.get("TRILIUM_URL", "").rstrip("/")
+TRILIUM_ETAPI_TOKEN = os.environ.get("TRILIUM_ETAPI_TOKEN", "")

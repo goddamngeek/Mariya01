@@ -457,18 +457,20 @@ async def get_week_summary(person_name: str) -> str:
     if not (am_scores or pm_scores or events or wdils or mistakes):
         return "За последнюю неделю записей в ежедневнике нет."
 
-    lines = [f"Сводка за неделю ({start_date.strftime('%d.%m')}–{today.strftime('%d.%m')}):"]
+    # Bold via Telegram's HTML parse mode — caller must send this with
+    # parse_mode="HTML", same as read_kanban_status.
+    lines = [f"<b>Сводка за неделю ({start_date.strftime('%d.%m')}–{today.strftime('%d.%m')}):</b>"]
     if am_scores:
         lines.append(f"\nСредний балл до обеда: {round(sum(am_scores) / len(am_scores))}")
     if pm_scores:
         lines.append(f"Средний балл после обеда: {round(sum(pm_scores) / len(pm_scores))}")
     if events:
         lines.append("\nЗаметные события:")
-        lines.extend(f"— {e}" for e in events)
+        lines.extend(f"— {html.escape(e)}" for e in events)
     if wdils:
         lines.append("\nЧему научился(лась):")
-        lines.extend(f"— {w}" for w in wdils)
+        lines.extend(f"— {html.escape(w)}" for w in wdils)
     if mistakes:
         lines.append("\nОшибки:")
-        lines.extend(f"— {m}" for m in mistakes)
+        lines.extend(f"— {html.escape(m)}" for m in mistakes)
     return "\n".join(lines)

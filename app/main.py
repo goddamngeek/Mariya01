@@ -99,7 +99,7 @@ async def telegram_webhook(request: Request):
             summary = await get_week_summary(person_name)
         except Exception:
             summary = TRILIUM_UNAVAILABLE_TEXT
-        await send_message(chat_id, summary)
+        await send_message(chat_id, summary, parse_mode="HTML")
         return {"ok": True}
 
     if text.strip() == "/checkin":

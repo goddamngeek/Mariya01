@@ -1,17 +1,16 @@
-"""Periodic job (see scheduler.py): forward each unconfirmed PASSIVE incoming
-message to Odysseus so it can analyze/log it. Ported from mac_sync/sync.py's
-ingest mechanism — this version calls the bot's own db.py directly instead of
-going over HTTP to its own /sync/* endpoints, since it now runs inside the
-same process. The /sync/* endpoints stay for external/manual use (see
-app/sync.py), just no longer self-called from here.
+"""Handles every real (ACTIVE) message the bot receives — see
+handle_active_message(), called straight from app/service.py as soon as the
+webhook receives it. Kanban reads, relay/reminders, Chinese words, book
+add/review, and sales are all fully deterministic (or a single narrow LLM
+extraction at most — see app/odysseus_client.extract_fields_via_llm) and
+answered directly, never through Odysseus's agent loop. Only general
+journal notes/finance logging and open-ended Q&A still go through Odysseus,
+since those genuinely need search + reasoning over existing entries.
 
-ACTIVE messages (real questions) are handled separately and immediately —
-see handle_active_message(), called straight from app/service.py rather than
-waiting for this poll — so this module's ingest_incoming() only ever
-processes kind='passive'. Ежедневник (daily journal check-in) replies are
-handled entirely in app/service.py instead — deterministically, no LLM
-involved at all — since EZHEDNEVNIK_STEPS in app/prompts.py asks one
-question at a time, so every reply maps to exactly one known field.
+Ежедневник (daily journal check-in) replies are handled entirely in
+app/service.py instead — deterministically, no LLM involved at all — since
+EZHEDNEVNIK_STEPS in app/prompts.py asks one question at a time, so every
+reply maps to exactly one known field.
 """
 
 import re
@@ -22,7 +21,6 @@ from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
     get_odysseus_session_id,
-    pull_unconfirmed_incoming,
     set_odysseus_session_id,
     utcnow,
 )
@@ -267,9 +265,8 @@ _NOTE_REQUEST_KEYWORDS = ("запиши", "зафиксируй", "запомн�
 def _looks_like_note_request(text: str) -> bool:
     """"запиши в заметку...", "зафиксируй что...", "запомни это" — an ACTIVE
     request to log something to Trilium (see prompts.py's "зафиксировать/
-    записать/запомнить" instruction). Unlike passive messages (ALWAYS forced
-    to trilium_notes — see ingest_incoming), active messages had NO
-    require_tool coverage for this at all until now: confirmed live, asked
+    записать/запомнить" instruction). Active messages had NO require_tool
+    coverage for this at all until now: confirmed live, asked
     to log credit-card principles to his journal, the model replied "Готово,
     заметка... добавлена" with 0 native calls / 0 tool blocks — a pure
     hallucinated confirmation, and since require_tool_type was never set for
@@ -407,60 +404,12 @@ async def send_kanban_status(user_id: int) -> None:
     await send_message(user_id, answer, parse_mode="HTML")
 
 
-async def ingest_incoming() -> None:
-    incoming = [m for m in await pull_unconfirmed_incoming() if m["kind"] == "passive"]
-    if not incoming:
-        return
-
-    try:
-        base_url, model = await get_active_endpoint()
-    except Exception:
-        # Must not crash the 60s scheduler job — e.g. get_active_endpoint()
-        # raises RuntimeError if Odysseus has no enabled model configured.
-        print("ingest_incoming: could not resolve active endpoint:", flush=True)
-        traceback.print_exc()
-        return
-
-    confirmed_ids = []
-    for message in incoming:
-        try:
-            tagged_text = _tag_message(
-                message["user_id"], message["text"], message["created_at"], message["reply_to_text"],
-            )
-            system_prompt = _build_prompt(message["user_id"], "пассивное")
-            # Every passive message must end in a trilium_notes append per
-            # INGEST_PROMPT_TEMPLATE's passive branch — never optional here,
-            # unlike handle_active_message() below which covers general Q&A too.
-            result = await _chat_with_session(
-                message["user_id"], tagged_text, base_url, model, system_prompt,
-                require_tool=True, require_tool_type="trilium_notes",
-            )
-            # forced_fallback is only present when the model never called a
-            # tool even after correction; False means the deterministic
-            # fallback in Odysseus ALSO couldn't act (unexpected message
-            # shape) — nothing was actually logged despite the HTTP 200, so
-            # this must not be acked, or the message is lost for good.
-            if result.get("forced_fallback") is False:
-                print(f"ingest: nothing was logged for incoming id={message['id']} "
-                      f"(require_tool fallback failed) — will retry", flush=True)
-                continue
-        except Exception:
-            print(f"ingest failed for incoming id={message['id']}:", flush=True)
-            traceback.print_exc()
-            continue
-
-        confirmed_ids.append(message["id"])
-
-    await ack_incoming_messages(confirmed_ids)
-
-
 async def handle_active_message(
     message_id: int, user_id: int, text: str, received_at: datetime,
     reply_to_text: str | None = None,
 ) -> None:
     """Answer a real question right away — called as a fire-and-forget task
-    from app/service.py as soon as the webhook receives it, not from the 60s
-    ingest_incoming() poll, since a real answer shouldn't wait up to a minute."""
+    from app/service.py as soon as the webhook receives it."""
     try:
         # Kanban is a pure read with zero content judgment, so it's handled
         # entirely before ever reaching Odysseus/an LLM — same reasoning as

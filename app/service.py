@@ -3,17 +3,13 @@ import json
 import re
 import traceback
 
-from app.config import OUTGOING_DEDUP_DAYS, TIMEZONE
+from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
     advance_ezhednevnik_step,
     close_ezhednevnik_prompt,
-    close_question,
     get_open_ezhednevnik_prompt,
-    get_open_question,
     insert_incoming_message,
-    mark_reply_sent,
-    pick_outgoing_message,
     utcnow,
 )
 from app.ingest import handle_active_message
@@ -31,46 +27,26 @@ _SCORE_RE = re.compile(r"-?\d+")
 
 
 async def process_incoming_message(user_id: int, text: str, reply_to_text: str | None = None) -> None:
-    # A pending question/check-in at arrival time means this message is the
-    # user's answer to it (passive-style) rather than a spontaneous message
-    # (active) — see app/ingest.py for how each kind is handled downstream.
-    # The old random daily question and the new ежедневник check-ins are
-    # mutually exclusive in practice (the former is being phased out), but
-    # checked in this order regardless — a question takes priority if both
-    # were somehow open at once.
-    open_question = await get_open_question(user_id)
-    open_ezhednevnik = None if open_question is not None else await get_open_ezhednevnik_prompt(user_id)
-
-    # Every ежедневник slot is now a strict one-question-at-a-time sequence
-    # (see EZHEDNEVNIK_STEPS in prompts.py) — entirely deterministic, never
+    # A pending ежедневник check-in at arrival time means this message is
+    # the answer to it, not a spontaneous message — see app/ingest.py for
+    # how a spontaneous ("active") message is handled downstream. Every
+    # ежедневник slot is a strict one-question-at-a-time sequence (see
+    # EZHEDNEVNIK_STEPS in prompts.py) — entirely deterministic, never
     # touches Odysseus/the LLM at all, since each reply maps to exactly one
     # known field with nothing left to interpret.
-    if open_question is None and open_ezhednevnik is not None:
+    open_ezhednevnik = await get_open_ezhednevnik_prompt(user_id)
+    if open_ezhednevnik is not None:
         await _handle_ezhednevnik_reply(user_id, text, reply_to_text, open_ezhednevnik)
         return
 
-    if open_question is not None:
-        kind = "passive"
-    else:
-        kind = "active"
     received_at = utcnow()
+    message_id = await insert_incoming_message(user_id, text, "active", reply_to_text)
 
-    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
-
-    if open_question is not None:
-        await close_question(open_question["id"])
-
-    if kind == "active":
-        # A real, formulated answer is coming from Odysseus shortly — the
-        # generic pool "reply" (принял / понял, разберусь) would just be
-        # redundant noise ahead of it.
-        task = asyncio.create_task(
-            handle_active_message(message_id, user_id, text, received_at, reply_to_text)
-        )
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
-    else:
-        await _send_reply(user_id)
+    task = asyncio.create_task(
+        handle_active_message(message_id, user_id, text, received_at, reply_to_text)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def _handle_ezhednevnik_reply(
@@ -83,8 +59,8 @@ async def _handle_ezhednevnik_reply(
     the next one. If that was the last step, write everything gathered to
     Trilium via a direct non-LLM call and close the prompt out. Every
     message here still gets logged to incoming_messages for the audit
-    trail, then immediately acked — this never enters the normal
-    ingest_incoming()/handle_active_message() pipelines at all."""
+    trail, then immediately acked — this never enters handle_active_message()
+    at all."""
     slot = prompt["slot"]
     step = prompt["step"]
     steps = EZHEDNEVNIK_STEPS[slot]
@@ -140,19 +116,3 @@ async def _handle_ezhednevnik_reply(
     await ack_incoming_messages([message_id])
 
 
-async def _send_reply(user_id: int) -> None:
-    try:
-        reply = await pick_outgoing_message("reply", OUTGOING_DEDUP_DAYS, user_id)
-        if reply is None:
-            return
-
-        if await send_message(user_id, reply["text"]):
-            await mark_reply_sent(reply["id"])
-        else:
-            print(f"failed to send reply id={reply['id']} user={user_id}", flush=True)
-    except Exception:
-        # A bug here must not turn into a webhook 500 — Telegram retries
-        # failed webhook deliveries, which would re-run process_incoming_message
-        # and re-insert the same incoming message. Print the full traceback
-        # (not just the exception) so a real bug is still diagnosable.
-        traceback.print_exc()

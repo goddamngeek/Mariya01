@@ -11,7 +11,6 @@ from app.db import (
     init_db,
     is_registered,
     register_user,
-    seed_defaults,
 )
 from app.ingest import send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
@@ -59,7 +58,6 @@ async def handle_start(chat_id: int) -> None:
         return
 
     await register_user(chat_id)
-    await seed_defaults({chat_id})
     await send_message(chat_id, "бот активен, ты зарегистрирован")
 
 

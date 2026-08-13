@@ -72,25 +72,6 @@ async def set_bot_commands() -> None:
         print(f"telegram setMyCommands failed: {exc}", flush=True)
 
 
-async def send_message_with_button(
-    chat_id: int | str, text: str, button_text: str, callback_data: str
-) -> bool:
-    """One attempt, no retries here — callers decide what happens on failure."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "reply_markup": {
-            "inline_keyboard": [[{"text": button_text, "callback_data": callback_data}]]
-        },
-    }
-    try:
-        resp = await get_client().post(url, json=payload)
-        resp.raise_for_status()
-        return True
-    except httpx.HTTPError as exc:
-        print(f"telegram sendMessage (with button) failed: {exc}", flush=True)
-        return False
 
 
 async def delete_message(chat_id: int | str, message_id: int) -> bool:

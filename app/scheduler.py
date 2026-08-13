@@ -4,50 +4,30 @@ from datetime import datetime, time, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.config import (
-    DEFERRAL_DELAY_HOURS,
-    OUTGOING_DEDUP_DAYS,
-    PROACTIVE_WINDOW_END,
-    PROACTIVE_WINDOW_START,
-    TIMEZONE,
-    WATER_REMINDER_TEXTS,
-    WATER_REMINDER_WINDOWS,
-)
+from app.config import TIMEZONE, WATER_REMINDER_TEXTS, WATER_REMINDER_WINDOWS
 from app.db import (
     claim_reminder,
     close_stale_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
-    get_due_deferred_questions,
     get_due_reminders,
     get_due_water_reminders,
     get_registered_user_ids,
     has_open_ezhednevnik,
-    has_pending_question,
-    mark_question_sent,
     mark_water_reminder_sent,
-    pick_outgoing_message,
 )
-from app.ingest import ingest_incoming
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
-from app.telegram import (
-    delete_message,
-    send_message,
-    send_message_get_id,
-    send_message_with_button,
-)
-
-DEFER_BUTTON_TEXT = "Спросить позже"
+from app.telegram import delete_message, send_message, send_message_get_id
 
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 
 def _random_time_in_window(start: time, end: time) -> datetime:
-    """Every schedule_today_*() call re-picks today's random slot from
-    scratch — not just at the 00:05 cron tick, but on EVERY process restart
-    too (schedule_today_* runs from lifespan() on every deploy). Confirmed
-    live: with the window's lower bound fixed at `start` regardless of the
+    """Used by ensure_today_water_reminders() to re-pick today's random
+    slot from scratch — not just at the 00:05 cron tick, but on EVERY
+    process restart too (it also runs from lifespan() on every deploy).
+    Confirmed live: with the window's lower bound fixed at `start` regardless of the
     current time, a restart landing partway through an already-open window
     could roll a slot that's already in the past — and the caller's
     `run_date <= now: skip` then silently dropped that window's reminder for
@@ -65,62 +45,9 @@ def _random_time_in_window(start: time, end: time) -> datetime:
     return lower + timedelta(seconds=random.randint(0, window_seconds))
 
 
-def _random_time_today() -> datetime:
-    return _random_time_in_window(PROACTIVE_WINDOW_START, PROACTIVE_WINDOW_END)
-
-
-async def _send_question(user_id: int, question) -> None:
-    if await send_message_with_button(
-        user_id, question["text"], DEFER_BUTTON_TEXT, str(question["id"])
-    ):
-        await mark_question_sent(question["id"])
-    else:
-        print(f"failed to send question id={question['id']} user={user_id}, will retry", flush=True)
-
-
-async def send_daily_question(user_id: int) -> None:
-    if await has_pending_question(user_id):
-        print(
-            f"user={user_id} already has a question in flight (open or deferred), skipping today",
-            flush=True,
-        )
-        return
-
-    question = await pick_outgoing_message("question", OUTGOING_DEDUP_DAYS, user_id)
-    if question is None:
-        print(f"no question available for user={user_id} today", flush=True)
-        return
-
-    await _send_question(user_id, question)
-
-
-async def schedule_today_question() -> None:
-    now = datetime.now(TIMEZONE)
-    for user_id in await get_registered_user_ids():
-        run_date = _random_time_today()
-        if run_date <= now:
-            continue
-        scheduler.add_job(
-            send_daily_question,
-            trigger="date",
-            run_date=run_date,
-            args=[user_id],
-            id=f"daily_question_today_{user_id}",
-            replace_existing=True,
-        )
-        print(f"scheduled today's question for user={user_id} at {run_date.isoformat()}", flush=True)
-
-
-async def release_due_questions() -> None:
-    for row in await get_due_deferred_questions():
-        await _send_question(row["user_id"], row)
-
-
 async def send_ezhednevnik_prompts(slot: str) -> None:
     """Fixed-time daily journal check-in — replaces the old random-pool
-    daily question above (schedule_today_question/send_daily_question are
-    no longer scheduled in start_scheduler(), left in place only in case
-    a question was already in flight at deploy time). Three fixed times,
+    daily question system entirely (removed). Three fixed times,
     each matched to when the relevant period just ended so it's still
     fresh: 'am' ~12:30 (before-lunch feeling), 'pm' ~18:00 (after-lunch
     feeling, right as the work day ends), 'evening' ~21:30 (the full-day
@@ -202,12 +129,6 @@ async def release_due_water_reminders() -> None:
 
 
 async def start_scheduler() -> None:
-    # schedule_today_question / send_daily_question above are no longer
-    # scheduled here — replaced by the fixed-time ezhednevnik check-ins
-    # below, per explicit choice over keeping the old random daily question.
-    # release_due_questions stays registered (harmless) purely to still
-    # release any question that was already deferred at the moment this
-    # shipped; nothing new will ever create one going forward.
     scheduler.add_job(
         send_ezhednevnik_prompts,
         trigger=CronTrigger(hour=12, minute=30, timezone=TIMEZONE),
@@ -232,12 +153,6 @@ async def start_scheduler() -> None:
         id="schedule_daily_water_reminders",
     )
     scheduler.add_job(
-        release_due_questions,
-        trigger="interval",
-        seconds=60,
-        id="release_due_questions",
-    )
-    scheduler.add_job(
         release_due_reminders,
         trigger="interval",
         seconds=60,
@@ -248,12 +163,6 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_due_water_reminders",
-    )
-    scheduler.add_job(
-        ingest_incoming,
-        trigger="interval",
-        seconds=60,
-        id="ingest_incoming_to_odysseus",
     )
     scheduler.start()
     await ensure_today_water_reminders()

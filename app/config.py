@@ -4,12 +4,6 @@ from zoneinfo import ZoneInfo
 
 TIMEZONE = ZoneInfo("Europe/Moscow")
 
-PROACTIVE_WINDOW_START = time(17, 0)
-PROACTIVE_WINDOW_END = time(19, 0)
-
-CARD_REMINDER_WINDOW_START = time(18, 0)
-CARD_REMINDER_WINDOW_END = time(21, 0)
-
 WATER_REMINDER_WINDOWS = [
     (time(10, 0), time(12, 0)),
     (time(13, 0), time(15, 0)),
@@ -34,9 +28,6 @@ WATER_REMINDER_TEXTS = [
     "Вода рядом? Тогда самое время.",
 ]
 
-DEFERRAL_DELAY_HOURS = 1
-MAX_DEFERRALS = 2
-OUTGOING_DEDUP_DAYS = 3
 MAX_REGISTERED_USERS = 2
 
 DATABASE_URL = os.environ.get(

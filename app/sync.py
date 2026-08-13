@@ -4,18 +4,13 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from app.config import OUTGOING_DEDUP_DAYS, SYNC_BEARER_TOKEN, TIMEZONE
+from app.config import SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
-    close_question,
-    count_open_questions,
     get_ezhednevnik_prompts_for_user,
     get_odysseus_session_id,
-    get_open_question,
     get_recent_reminders,
     get_water_reminders_for_date,
-    insert_outgoing_messages,
-    pick_outgoing_message,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
     utcnow,
@@ -23,7 +18,7 @@ from app.db import (
 from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
-from app.scheduler import _send_question, send_ezhednevnik_prompts
+from app.scheduler import send_ezhednevnik_prompts
 
 router = APIRouter(prefix="/sync")
 
@@ -35,16 +30,6 @@ def require_bearer(authorization: str = Header(default="")) -> None:
 
 class AckRequest(BaseModel):
     ids: list[int]
-
-
-class PushItem(BaseModel):
-    user_id: int
-    category: Literal["question", "reply"]
-    text: str
-
-
-class PushRequest(BaseModel):
-    items: list[PushItem]
 
 
 class SetSessionRequest(BaseModel):
@@ -75,14 +60,6 @@ async def get_session(user_id: int):
 @router.post("/session", dependencies=[Depends(require_bearer)])
 async def set_session(body: SetSessionRequest):
     await set_odysseus_session_id(body.user_id, body.session_id)
-    return {"ok": True}
-
-
-@router.post("/push", dependencies=[Depends(require_bearer)])
-async def push(body: PushRequest):
-    await insert_outgoing_messages(
-        [(item.user_id, item.category, item.text) for item in body.items]
-    )
     return {"ok": True}
 
 
@@ -119,40 +96,6 @@ async def schedule_reminder(body: ScheduleReminderRequest):
 
     reminder_id = await schedule_reminder_now(sender_id, target_id, body.message, run_at, body.anonymous)
     return {"ok": True, "id": reminder_id}
-
-
-class ResendQuestionRequest(BaseModel):
-    user_id: int
-
-
-@router.post("/resend_question", dependencies=[Depends(require_bearer)])
-async def resend_question(body: ResendQuestionRequest):
-    """Manual on-demand trigger, reusing the exact same code path as the
-    00:05 MSK daily job — for testing the passive-message flow without
-    waiting for the scheduled time. Unlike send_daily_question(), this isn't
-    gated by has_pending_question() (the whole point is to bypass the
-    schedule) — so it must close any question already open for this user
-    itself, or that older row would never get closed by anything and
-    has_pending_question() would silently block every future daily question
-    for them forever."""
-    existing = await get_open_question(body.user_id)
-    if existing is not None:
-        await close_question(existing["id"])
-
-    question = await pick_outgoing_message("question", OUTGOING_DEDUP_DAYS, body.user_id)
-    if question is None:
-        raise HTTPException(404, "no question available for this user right now")
-    await _send_question(body.user_id, question)
-    return {"ok": True, "question_id": question["id"]}
-
-
-@router.get("/open_questions", dependencies=[Depends(require_bearer)])
-async def open_questions():
-    """Diagnostic: count of currently-open questions per known user. Should
-    always be 0 or 1 — anything higher means has_pending_question() will
-    silently block that user's daily question forever (see resend_question's
-    docstring)."""
-    return {name: await count_open_questions(uid) for name, uid in NAME_TO_USER_ID.items()}
 
 
 @router.get("/water_reminders_today", dependencies=[Depends(require_bearer)])

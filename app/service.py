@@ -3,7 +3,7 @@ import json
 import re
 import traceback
 
-from app.config import OUTGOING_DEDUP_DAYS
+from app.config import OUTGOING_DEDUP_DAYS, TIMEZONE
 from app.db import (
     ack_incoming_messages,
     advance_ezhednevnik_step,
@@ -110,7 +110,13 @@ async def _handle_ezhednevnik_reply(
         return
 
     person_name = USER_NAMES.get(user_id, str(user_id))
-    fields = {"person_name": person_name, "slot": slot, **collected}
+    # Dated to when the question was actually SENT (its calendar day in
+    # Moscow time), not whenever the reply happens to land — confirmed
+    # live: a prompt left open overnight and answered the next morning was
+    # otherwise stamped with that morning's date, landing the previous
+    # day's retrospective in the wrong row entirely.
+    entry_date = prompt["sent_at"].astimezone(TIMEZONE).date().isoformat()
+    fields = {"person_name": person_name, "slot": slot, "date": entry_date, **collected}
 
     # Close only on SUCCESS — confirmed live (the odysseus.61d1.online DNS
     # outage): closing unconditionally BEFORE attempting the write meant a

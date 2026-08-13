@@ -218,5 +218,8 @@ async def read_kanban_status(board_name: str = "КАНБАН // KANBAN") -> str:
             )
             columns.setdefault(status, []).append(child.get("title") or "(без названия)")
 
-        sections = [f"{status}: " + ", ".join(titles) for status, titles in columns.items()]
-        return "\n".join(sections)
+        sections = []
+        for status, titles in columns.items():
+            numbered = "\n".join(f"{i}. {title}" for i, title in enumerate(titles, 1))
+            sections.append(f"{status}:\n\n{numbered}")
+        return "\n\n".join(sections)

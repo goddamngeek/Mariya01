@@ -15,7 +15,7 @@ etc.) — only the deterministic paths moved.
 
 import html
 import json
-from datetime import date as _date, datetime
+from datetime import date as _date, datetime, timedelta
 from typing import Optional
 
 import httpx
@@ -238,6 +238,41 @@ async def read_kanban_status(board_name: str = "КАНБАН // KANBAN") -> str:
         return "\n\n".join(sections)
 
 
+KANBAN_COLUMNS = (
+    "БЭКЛОГ // BACKLOG",
+    "БУДУЩИЕ ЗАДАЧИ // FUTURE TASKS",
+    "В РАБОТЕ // IN PROGRESS",
+    "СДЕЛАНО // DONE",
+)
+
+
+async def add_kanban_card(
+    person_name: str, title: str, column: str = "БЭКЛОГ // BACKLOG",
+    board_name: str = "КАНБАН // KANBAN",
+) -> None:
+    """Add one card (a child text note of the board) to the Kanban board —
+    same board-view mechanism as read_kanban_status: column membership is
+    just a #status label on the card, not a real tree position."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        board_id = await _find_note_id(client, board_name)
+        if board_id is None:
+            raise TriliumNoteNotFoundError(f"No board note titled '{board_name}' found.")
+
+        create_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/create-note",
+            json={"parentNoteId": board_id, "title": title, "type": "text", "content": ""},
+        )
+        create_resp.raise_for_status()
+        note_id = create_resp.json()["note"]["noteId"]
+
+        await _create_attribute(client, note_id, "label", "status", column)
+        await _create_attribute(client, note_id, "label", "owner", person_name)
+
+
 async def log_reminder_to_calendar(sender_name: str, target_name: str, message: str, when: datetime) -> None:
     """Best-effort log of a scheduled reminder/relay into that day's
     Trilium calendar note, purely for visibility — never raises, since
@@ -364,3 +399,76 @@ async def add_book_review(book_title: str, review_text: str) -> None:
         stamp = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
         review_html = f"<h2>Ревью ({stamp})</h2><p>{review_text}</p>"
         await _put_content(client, note_id, existing + review_html)
+
+
+async def get_week_summary(person_name: str) -> str:
+    """Aggregate the last 7 calendar days (today inclusive) from a person's
+    own ЕЖЕДНЕВНИК note: average AM/PM scores, and every notable event /
+    thing learned / mistake logged. Pure aggregation of what's actually
+    there — never invents or paraphrases, same "list it literally" ethos
+    as read_kanban_status."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_id = await _find_ezhednevnik_note_id(client, person_name)
+        if note_id is None:
+            raise TriliumNoteNotFoundError(f"Could not find the ЕЖЕДНЕВНИК note for {person_name}.")
+        raw = await _get_content(client, note_id)
+
+    data = json.loads(raw)
+    sheet = next(iter(data["workbook"]["sheets"].values()))
+    cell_data = sheet["cellData"]
+
+    today = datetime.now(TIMEZONE).date()
+    start_date = today - timedelta(days=6)
+    start_serial = (start_date - _date(1899, 12, 30)).days
+    end_serial = (today - _date(1899, 12, 30)).days
+
+    am_scores: list[int] = []
+    pm_scores: list[int] = []
+    events: list[str] = []
+    wdils: list[str] = []
+    mistakes: list[str] = []
+
+    for row_key, row in cell_data.items():
+        if row_key == "0" or not row:
+            continue
+        date_v = _cell_value(row, "0")
+        if not isinstance(date_v, (int, float)) or not (start_serial <= date_v <= end_serial):
+            continue
+        am_score = _cell_value(row, "4")
+        if isinstance(am_score, (int, float)):
+            am_scores.append(am_score)
+        pm_score = _cell_value(row, "6")
+        if isinstance(pm_score, (int, float)):
+            pm_scores.append(pm_score)
+        event = _cell_value(row, "2")
+        if event:
+            events.append(str(event))
+        wdil = _cell_value(row, "12")
+        if wdil:
+            wdils.append(str(wdil))
+        mistake = _cell_value(row, "14")
+        if mistake:
+            mistakes.append(str(mistake))
+
+    if not (am_scores or pm_scores or events or wdils or mistakes):
+        return "За последнюю неделю записей в ежедневнике нет."
+
+    lines = [f"Сводка за неделю ({start_date.strftime('%d.%m')}–{today.strftime('%d.%m')}):"]
+    if am_scores:
+        lines.append(f"\nСредний балл до обеда: {round(sum(am_scores) / len(am_scores))}")
+    if pm_scores:
+        lines.append(f"Средний балл после обеда: {round(sum(pm_scores) / len(pm_scores))}")
+    if events:
+        lines.append("\nЗаметные события:")
+        lines.extend(f"— {e}" for e in events)
+    if wdils:
+        lines.append("\nЧему научился(лась):")
+        lines.extend(f"— {w}" for w in wdils)
+    if mistakes:
+        lines.append("\nОшибки:")
+        lines.extend(f"— {m}" for m in mistakes)
+    return "\n".join(lines)

@@ -12,23 +12,26 @@ from app.db import (
     is_registered,
     register_user,
 )
-from app.ingest import send_kanban_status
+from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
+from app.people import USER_NAMES
 from app.prompts import ezhednevnik_step_text
 from app.scheduler import scheduler, start_scheduler
 from app.service import process_incoming_message
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
+from app.trilium_client import get_week_summary
 
 HELP_TEXT = (
     "Команды:\n"
     "/kanban — показать канбан-доску задач\n"
+    "/week — сводка по ежедневнику за последние 7 дней\n"
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
     "\n"
     "Просто напиши мне:\n"
     "— напомнить о чём-то себе или передать другому человеку\n"
     "— зафиксировать мысль или заметку (траты уходят в финансы отдельно)\n"
-    "— добавить книгу, отзыв на книгу, китайское слово или продажу"
+    "— добавить книгу, отзыв на книгу, китайское слово, продажу или задачу в канбан"
 )
 
 
@@ -85,11 +88,18 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/kanban":
-        # Same reasoning as /cards — a guaranteed-reliable direct trigger.
-        # Still goes through Odysseus (only it holds the Trilium ETAPI
-        # credentials), but kanban_status's deterministic fallback there
-        # means the answer is always a real board read, never hallucinated.
+        # A guaranteed-reliable direct trigger — reads straight from
+        # Trilium (see app/trilium_client.py), no LLM involved at all.
         await send_kanban_status(chat_id)
+        return {"ok": True}
+
+    if text.strip() == "/week":
+        person_name = USER_NAMES.get(chat_id, str(chat_id))
+        try:
+            summary = await get_week_summary(person_name)
+        except Exception:
+            summary = TRILIUM_UNAVAILABLE_TEXT
+        await send_message(chat_id, summary)
         return {"ok": True}
 
     if text.strip() == "/checkin":

@@ -37,10 +37,12 @@ from app.reminder_time import parse_reminder_time
 from app.reminders import schedule_reminder
 from app.telegram import send_message
 from app.trilium_client import (
+    KANBAN_COLUMNS,
     TriliumNoteNotFoundError,
     add_book,
     add_book_review,
     add_chinese_word,
+    add_kanban_card,
     log_reminder_to_calendar,
     log_sale,
     read_kanban_status,
@@ -259,6 +261,36 @@ async def _handle_sale(message_id: int, user_id: int, text: str) -> None:
     await ack_incoming_messages([message_id])
 
 
+async def _handle_kanban_add(message_id: int, user_id: int, text: str) -> None:
+    """"добавь в канбан купить молоко" / "закинь задачу в работу"."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    fields = await extract_fields_via_llm(
+        text,
+        "Пользователь добавляет задачу на канбан-доску. Извлеки из его "
+        "сообщения поля JSON: title (короткое название задачи) и column "
+        "(ровно одно из: 'БЭКЛОГ // BACKLOG', 'БУДУЩИЕ ЗАДАЧИ // FUTURE "
+        "TASKS', 'В РАБОТЕ // IN PROGRESS', 'СДЕЛАНО // DONE' — если явно "
+        "не указано, в какую колонку класть, оставь пустым). title обязателен.",
+    )
+    if not fields or not fields.get("title"):
+        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
+        await ack_incoming_messages([message_id])
+        return
+
+    column = fields.get("column") or "БЭКЛОГ // BACKLOG"
+    if column not in KANBAN_COLUMNS:
+        column = "БЭКЛОГ // BACKLOG"
+
+    try:
+        await add_kanban_card(person_name, fields["title"], column)
+        await send_message(user_id, f"Добавил «{fields['title']}» в {column}.")
+    except Exception:
+        print(f"_handle_kanban_add failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+    await ack_incoming_messages([message_id])
+
+
 _NOTE_REQUEST_KEYWORDS = ("запиши", "зафиксируй", "запомни", "занеси")
 
 
@@ -309,6 +341,22 @@ def _looks_like_kanban_status(text: str) -> bool:
     directly via app/trilium_client.py before ever reaching an LLM."""
     lowered = text.lower()
     return any(kw in lowered for kw in _KANBAN_KEYWORDS)
+
+
+_KANBAN_ADD_VERBS = ("добавь", "добавить", "закинь", "закинуть", "создай", "создать", "занеси")
+
+
+def _looks_like_kanban_add(text: str) -> bool:
+    """"добавь в канбан купить молоко" / "закинь задачу..." — checked
+    BEFORE _looks_like_kanban_status (both share "канбан"/"бэклог" as
+    context words), same precedence pattern as book review vs. book add.
+    "задач" alone (without "канбан" itself) also counts, since "добавь
+    задачу X" is a very natural phrasing that never says the board's name."""
+    lowered = text.lower()
+    has_kanban_context = any(kw in lowered for kw in _KANBAN_KEYWORDS) or "задач" in lowered
+    if not has_kanban_context:
+        return False
+    return any(v in lowered for v in _KANBAN_ADD_VERBS)
 
 
 _CHINESE_WORD_VERBS = ("добавь", "запиши", "выучил", "выучила", "новое слово", "занеси")
@@ -411,6 +459,12 @@ async def handle_active_message(
     """Answer a real question right away — called as a fire-and-forget task
     from app/service.py as soon as the webhook receives it."""
     try:
+        # Checked before the read, since both share "канбан"/"бэклог" as
+        # context words — an explicit add verb wins the ambiguity.
+        if _looks_like_kanban_add(text):
+            await _handle_kanban_add(message_id, user_id, text)
+            return
+
         # Kanban is a pure read with zero content judgment, so it's handled
         # entirely before ever reaching Odysseus/an LLM — same reasoning as
         # the ежедневник flow, see app/trilium_client.py.

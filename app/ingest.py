@@ -26,13 +26,27 @@ from app.db import (
     set_odysseus_session_id,
     utcnow,
 )
-from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint, parse_time_via_llm
+from app.odysseus_client import (
+    SessionNotFoundError,
+    agent_chat,
+    extract_fields_via_llm,
+    get_active_endpoint,
+    parse_time_via_llm,
+)
 from app.people import NAME_TO_USER_ID, USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.reminder_time import parse_reminder_time
 from app.reminders import schedule_reminder
 from app.telegram import send_message
-from app.trilium_client import log_reminder_to_calendar, read_kanban_status
+from app.trilium_client import (
+    TriliumNoteNotFoundError,
+    add_book,
+    add_book_review,
+    add_chinese_word,
+    log_reminder_to_calendar,
+    log_sale,
+    read_kanban_status,
+)
 
 
 def _tag_message(
@@ -136,6 +150,114 @@ async def _handle_relay_or_reminder(message_id: int, user_id: int, text: str) ->
 
     await schedule_reminder(sender_id, target_id, text, run_at, anonymous)
     await log_reminder_to_calendar(sender_name, target_name, text, run_at.astimezone(TIMEZONE))
+    await ack_incoming_messages([message_id])
+
+
+NOT_UNDERSTOOD_TEXT = "Не понял детали — напиши ещё раз, что именно записать."
+
+
+async def _handle_chinese_word(message_id: int, user_id: int, text: str) -> None:
+    """"добавь иероглиф 你好, пиньинь ni hao, тон 3, значение привет" — the
+    person_name is already known (user_id); everything else needs reading
+    free text, so a narrow LLM extraction call replaces the full agent loop."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    fields = await extract_fields_via_llm(
+        text,
+        "Пользователь добавляет китайское слово в словарь. Извлеки из его "
+        "сообщения поля JSON: hieroglyph (иероглиф), pinyin (транскрипция "
+        "пиньинь), tone (тон, число), translation (перевод на русский). "
+        "translation и hieroglyph обязательны.",
+    )
+    if not fields or not fields.get("hieroglyph") or not fields.get("translation"):
+        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
+        await ack_incoming_messages([message_id])
+        return
+
+    try:
+        await add_chinese_word(
+            person_name, fields["hieroglyph"], fields.get("pinyin", ""),
+            str(fields.get("tone") or ""), fields["translation"],
+        )
+        await send_message(user_id, f"Добавил «{fields['hieroglyph']}» в словарь.")
+    except Exception:
+        print(f"_handle_chinese_word failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+    await ack_incoming_messages([message_id])
+
+
+async def _handle_book_add(message_id: int, user_id: int, text: str) -> None:
+    """"добавь книгу X" / "хочу почитать X"."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    fields = await extract_fields_via_llm(
+        text,
+        "Пользователь добавляет книгу, которую собирается читать. Извлеки "
+        "из его сообщения поля JSON: title (название книги), author (автор, "
+        "если назван). title обязателен.",
+    )
+    if not fields or not fields.get("title"):
+        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
+        await ack_incoming_messages([message_id])
+        return
+
+    try:
+        await add_book(person_name, fields["title"], fields.get("author", ""))
+        await send_message(user_id, f"Добавил книгу «{fields['title']}».")
+    except Exception:
+        print(f"_handle_book_add failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+    await ack_incoming_messages([message_id])
+
+
+async def _handle_book_review(message_id: int, user_id: int, text: str) -> None:
+    """"не понравилась книга X, потому что..." — needs an EXACT existing
+    note title match (see app/trilium_client.add_book_review); no search
+    fallback here, matching what the Odysseus tool already required."""
+    fields = await extract_fields_via_llm(
+        text,
+        "Пользователь делится отзывом на книгу. Извлеки из его сообщения "
+        "поля JSON: book_title (точное название книги) и review_text "
+        "(мнение своими словами, без искажения сути). Оба обязательны.",
+    )
+    if not fields or not fields.get("book_title") or not fields.get("review_text"):
+        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
+        await ack_incoming_messages([message_id])
+        return
+
+    try:
+        await add_book_review(fields["book_title"], fields["review_text"])
+        await send_message(user_id, f"Записал отзыв на «{fields['book_title']}».")
+    except TriliumNoteNotFoundError:
+        await send_message(user_id, f"Не нашёл книгу «{fields['book_title']}» — проверь название.")
+    except Exception:
+        print(f"_handle_book_review failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+    await ack_incoming_messages([message_id])
+
+
+async def _handle_sale(message_id: int, user_id: int, text: str) -> None:
+    """"продал куртку за 3000"."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    fields = await extract_fields_via_llm(
+        text,
+        "Пользователь сообщает о продаже. Извлеки из его сообщения поля "
+        "JSON: item (что продано) и status (цена и/или дата, как есть в "
+        "сообщении, произвольный текст, можно пусто). item обязателен.",
+    )
+    if not fields or not fields.get("item"):
+        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
+        await ack_incoming_messages([message_id])
+        return
+
+    try:
+        await log_sale(person_name, fields["item"], fields.get("status", ""))
+        await send_message(user_id, f"Записал продажу «{fields['item']}».")
+    except Exception:
+        print(f"_handle_sale failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
     await ack_incoming_messages([message_id])
 
 
@@ -362,22 +484,29 @@ async def handle_active_message(
             await _handle_relay_or_reminder(message_id, user_id, text)
             return
 
+        # Chinese word / book add / book review / sale all need a model to
+        # read free text, but only ever a single narrow extraction — never
+        # the full agent loop, sessions, or Odysseus's require_tool retry
+        # dance (see extract_fields_via_llm). Order matters: most-specific
+        # first, since e.g. "книг" appears in both review and add phrasing.
+        if _looks_like_chinese_word(text):
+            await _handle_chinese_word(message_id, user_id, text)
+            return
+        if _looks_like_book_review(text):
+            await _handle_book_review(message_id, user_id, text)
+            return
+        if _looks_like_book_add(text):
+            await _handle_book_add(message_id, user_id, text)
+            return
+        if _looks_like_sale(text):
+            await _handle_sale(message_id, user_id, text)
+            return
+
         base_url, model = await get_active_endpoint()
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")
 
-        # Order matters throughout: each check below only fires if nothing
-        # higher up already claimed the message, most-specific first.
-        claimed = False
-        chinese_word_intent = (not claimed) and _looks_like_chinese_word(text)
-        claimed = claimed or chinese_word_intent
-        book_review_intent = (not claimed) and _looks_like_book_review(text)
-        claimed = claimed or book_review_intent
-        book_add_intent = (not claimed) and _looks_like_book_add(text)
-        claimed = claimed or book_add_intent
-        sale_intent = (not claimed) and _looks_like_sale(text)
-        claimed = claimed or sale_intent
-        note_intent = (not claimed) and _looks_like_note_request(text)
+        note_intent = _looks_like_note_request(text)
         finance_intent = note_intent and _looks_like_finance(text)
 
         # require_tool_type is now ALSO how Odysseus scopes which tools the
@@ -388,21 +517,11 @@ async def handle_active_message(
         # relevant_tools set was static, every tool offered on every single
         # call regardless of relevance) and the model called it anyway,
         # relaying a week-old test message to Masha completely unprompted.
-        # So every distinct intent now gets its own specific string (even
-        # ones with no deterministic fallback, previously lumped under the
-        # generic "none") purely so Odysseus can scope tightly — and the
-        # unclassified case sends an explicit "general" instead of omitting
-        # the field, so general chat never has schedule_send or any other
-        # write tool available at all.
-        if chinese_word_intent:
-            require_tool_type = "add_chinese_word"
-        elif book_review_intent:
-            require_tool_type = "add_book_review"
-        elif book_add_intent:
-            require_tool_type = "add_book"
-        elif sale_intent:
-            require_tool_type = "log_sale"
-        elif finance_intent:
+        # So every distinct intent still routed through Odysseus gets its
+        # own specific string, and the unclassified case sends an explicit
+        # "general" instead of omitting the field, so general chat never
+        # has schedule_send or any other write tool available at all.
+        if finance_intent:
             require_tool_type = "trilium_notes_finance"
         elif note_intent:
             require_tool_type = "trilium_notes"
@@ -414,10 +533,7 @@ async def handle_active_message(
         )
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=(
-                chinese_word_intent or book_review_intent
-                or book_add_intent or sale_intent or note_intent
-            ),
+            require_tool=note_intent,
             require_tool_type=require_tool_type,
         )
         if any(forced_fallback_types) and result.get("forced_fallback") is False:

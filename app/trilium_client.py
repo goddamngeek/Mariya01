@@ -62,6 +62,14 @@ async def _put_content(client: httpx.AsyncClient, note_id: str, content: str) ->
     resp.raise_for_status()
 
 
+async def _create_attribute(client: httpx.AsyncClient, note_id: str, attr_type: str, name: str, value: str) -> None:
+    resp = await client.post(
+        f"{TRILIUM_URL}/etapi/attributes",
+        json={"noteId": note_id, "type": attr_type, "name": name, "value": value},
+    )
+    resp.raise_for_status()
+
+
 async def _find_note_id(client: httpx.AsyncClient, title: str) -> Optional[str]:
     """Exact-title lookup — Trilium's search is fuzzy/substring, so this
     always filters down to an exact match rather than trusting the first
@@ -250,3 +258,109 @@ async def log_reminder_to_calendar(sender_name: str, target_name: str, message: 
             await _put_content(client, note_id, existing + entry_html)
     except Exception as exc:
         print(f"log_reminder_to_calendar failed (non-fatal): {exc!r}", flush=True)
+
+
+async def log_sale(person_name: str, item: str, status: str = "") -> None:
+    """Log one sale as a new card on the ПРОДАЖИ board — same board-view
+    mechanism as the Kanban task board, just a different domain (each
+    card's #status here holds a price/date, not a workflow stage)."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        board_id = await _find_note_id(client, "ПРОДАЖИ // SALES")
+        if board_id is None:
+            raise TriliumNoteNotFoundError("Could not find the ПРОДАЖИ // SALES board.")
+
+        create_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/create-note",
+            json={"parentNoteId": board_id, "title": item, "type": "text", "content": ""},
+        )
+        create_resp.raise_for_status()
+        note_id = create_resp.json()["note"]["noteId"]
+
+        if status:
+            await _create_attribute(client, note_id, "label", "status", status)
+        await _create_attribute(client, note_id, "label", "owner", person_name)
+
+
+async def add_chinese_word(
+    person_name: str, hieroglyph: str, pinyin: str = "", tone: str = "",
+    translation: str = "", status: str = "новое",
+) -> None:
+    """Add one hieroglyph to Ostap's Chinese-vocabulary board (ЖИЗНЬ >
+    РУТИНА > КИТАЙСКИЙ > ОСТАП > ИЕРОГЛИФЫ) — a board-view Collection
+    note; each word becomes its own child note, with pinyin/tone/status as
+    labels and the translation as the note's own content."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        board_id = await _find_note_id(client, "ИЕРОГЛИФЫ")
+        if board_id is None:
+            raise TriliumNoteNotFoundError("Could not find the ИЕРОГЛИФЫ board.")
+
+        create_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/create-note",
+            json={"parentNoteId": board_id, "title": hieroglyph, "type": "text",
+                  "content": f"<p>{translation}</p>"},
+        )
+        create_resp.raise_for_status()
+        note_id = create_resp.json()["note"]["noteId"]
+
+        for name, value in [("pinyin", pinyin), ("tone", tone), ("status", status), ("owner", person_name)]:
+            if value:
+                await _create_attribute(client, note_id, "label", name, value)
+
+
+async def add_book(person_name: str, title: str, author: str = "") -> None:
+    """Add a new book note under КНИГИ, templated from _ШАБЛОН_КНИГА via a
+    ~template RELATION (not a #template label — a relation's value is a
+    real noteId, a label's is plain text; confirmed live which one the
+    actual template uses)."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        knigi_id = await _find_note_id(client, "КНИГИ")
+        template_id = await _find_note_id(client, "_ШАБЛОН_КНИГА")
+        if knigi_id is None or template_id is None:
+            raise TriliumNoteNotFoundError("Could not find КНИГИ or _ШАБЛОН_КНИГА.")
+
+        create_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/create-note",
+            json={"parentNoteId": knigi_id, "title": title, "type": "text", "content": ""},
+        )
+        create_resp.raise_for_status()
+        note_id = create_resp.json()["note"]["noteId"]
+
+        await _create_attribute(client, note_id, "relation", "template", template_id)
+        if author:
+            await _create_attribute(client, note_id, "label", "author", author)
+        await _create_attribute(
+            client, note_id, "label", "readingStart", datetime.now(TIMEZONE).strftime("%Y-%m-%d"),
+        )
+        await _create_attribute(client, note_id, "label", "owner", person_name)
+
+
+async def add_book_review(book_title: str, review_text: str) -> None:
+    """Append a review to a specific book's own note, under a new 'Ревью'
+    heading — NOT also to a separate summary note, to avoid the same
+    review existing in two places. Requires an exact note-title match;
+    raises TriliumNoteNotFoundError if the title isn't found verbatim."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_id = await _find_note_id(client, book_title)
+        if note_id is None:
+            raise TriliumNoteNotFoundError(f"No book note titled '{book_title}' found.")
+
+        existing = await _get_content(client, note_id)
+        stamp = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
+        review_html = f"<h2>Ревью ({stamp})</h2><p>{review_text}</p>"
+        await _put_content(client, note_id, existing + review_html)

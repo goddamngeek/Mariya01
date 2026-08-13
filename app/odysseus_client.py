@@ -172,3 +172,46 @@ async def parse_time_via_llm(text: str, now_iso: str) -> str | None:
     return reply
 
 
+async def extract_fields_via_llm(text: str, instructions: str) -> dict | None:
+    """Narrow, single-shot structured extraction — same reasoning as
+    parse_time_via_llm: hits /v1/chat (a bare completion, no tools, no
+    sessions to maintain, no agent loop), asks for a single JSON object
+    matching `instructions`, and parses it. Used by the intents that
+    genuinely need a model to read free text (Chinese words, book
+    add/review, sales) but not the full agent/tool-calling machinery.
+    Returns None on any failure (unreachable, malformed JSON, etc.) — the
+    caller decides whether that means "tell the person it failed" or
+    "silently skip", never guesses at missing fields itself."""
+    prompt = (
+        f"{instructions}\n\nСообщение пользователя: {text!r}\n\n"
+        "Ответь СТРОГО одним JSON-объектом и ничем больше — без пояснений, "
+        "без markdown-разметки, без ```. Если чего-то в сообщении нет, "
+        "не выдумывай — оставь поле пустой строкой."
+    )
+    try:
+        resp = await get_client().post(
+            f"{ODYSSEUS_URL}/api/v1/chat", headers=_AUTH_HEADERS,
+            json={"message": prompt}, timeout=30,
+        )
+        resp.raise_for_status()
+        reply = (resp.json().get("response") or "").strip()
+    except httpx.HTTPError as exc:
+        print(f"extract_fields_via_llm failed: {exc!r}", flush=True)
+        return None
+
+    import json
+    import re
+
+    # Models sometimes wrap the JSON in a ```json ... ``` fence despite
+    # being told not to — strip that before parsing rather than failing on it.
+    match = re.search(r"\{.*\}", reply, re.DOTALL)
+    if not match:
+        print(f"extract_fields_via_llm: no JSON object in reply: {reply!r}", flush=True)
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        print(f"extract_fields_via_llm: malformed JSON: {reply!r}", flush=True)
+        return None
+
+

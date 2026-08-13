@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from app.config import OUTGOING_DEDUP_DAYS, SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
-    claim_reminder,
     close_question,
     count_open_questions,
     get_ezhednevnik_prompts_for_user,
@@ -16,7 +15,6 @@ from app.db import (
     get_recent_reminders,
     get_water_reminders_for_date,
     insert_outgoing_messages,
-    insert_reminder,
     pick_outgoing_message,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
@@ -24,7 +22,7 @@ from app.db import (
 )
 from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
-from app.reminders import deliver_reminder
+from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import _send_question, send_ezhednevnik_prompts
 
 router = APIRouter(prefix="/sync")
@@ -119,15 +117,7 @@ async def schedule_reminder(body: ScheduleReminderRequest):
             parsed = parsed.replace(tzinfo=TIMEZONE)
         run_at = parsed.astimezone(timezone.utc)
 
-    reminder_id = await insert_reminder(target_id, sender_id, body.message, run_at, body.anonymous)
-
-    # Due right now (or already past) — don't make the user wait for the next
-    # 60s poll tick. claim_reminder() is the atomic gate: if release_due_
-    # reminders() happens to tick at the same moment and wins the claim first,
-    # we just skip — it's already being sent, no double delivery.
-    if run_at <= utcnow() + timedelta(seconds=30) and await claim_reminder(reminder_id):
-        await deliver_reminder(reminder_id, sender_id, target_id, body.message, body.anonymous)
-
+    reminder_id = await schedule_reminder_now(sender_id, target_id, body.message, run_at, body.anonymous)
     return {"ok": True, "id": reminder_id}
 
 

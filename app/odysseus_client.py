@@ -134,3 +134,41 @@ async def agent_chat(
     return resp.json()
 
 
+async def parse_time_via_llm(text: str, now_iso: str) -> str | None:
+    """Narrow, single-shot fallback for reminder times the regex parser
+    (app/reminder_time.py) couldn't handle — deliberately hits /v1/chat
+    (a bare completion, no tools/sessions/require_tool retry dance), since
+    this only ever needs one plain answer, not the whole agent loop.
+    Returns an ISO 8601 Moscow-local datetime string, or None if the model
+    says there's no specific time (or the call fails — caller falls back
+    to "now" either way, same as if this returned None)."""
+    prompt = (
+        f"Текущее время в Москве: {now_iso}. Пользователь написал: {text!r}\n"
+        "Если в тексте названо конкретное время или дата напоминания — "
+        "ответь ТОЛЬКО датой-временем в формате 2026-08-13T15:00:00 "
+        "(московское время, без смещения часового пояса), без ничего "
+        "больше. Если конкретное время не названо — ответь ровно словом none."
+    )
+    try:
+        resp = await get_client().post(
+            f"{ODYSSEUS_URL}/api/v1/chat", headers=_AUTH_HEADERS,
+            json={"message": prompt}, timeout=30,
+        )
+        resp.raise_for_status()
+        reply = (resp.json().get("response") or "").strip()
+    except httpx.HTTPError as exc:
+        print(f"parse_time_via_llm failed: {exc!r}", flush=True)
+        return None
+
+    if not reply or reply.lower().startswith("none"):
+        return None
+
+    from datetime import datetime as _dt
+    try:
+        _dt.fromisoformat(reply)
+    except ValueError:
+        print(f"parse_time_via_llm: unparseable reply {reply!r}", flush=True)
+        return None
+    return reply
+
+

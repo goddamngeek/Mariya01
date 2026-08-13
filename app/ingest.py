@@ -14,8 +14,9 @@ involved at all — since EZHEDNEVNIK_STEPS in app/prompts.py asks one
 question at a time, so every reply maps to exactly one known field.
 """
 
+import re
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.config import TIMEZONE
 from app.db import (
@@ -25,11 +26,13 @@ from app.db import (
     set_odysseus_session_id,
     utcnow,
 )
-from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint
-from app.people import USER_NAMES
+from app.odysseus_client import SessionNotFoundError, agent_chat, get_active_endpoint, parse_time_via_llm
+from app.people import NAME_TO_USER_ID, USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
+from app.reminder_time import parse_reminder_time
+from app.reminders import schedule_reminder
 from app.telegram import send_message
-from app.trilium_client import read_kanban_status
+from app.trilium_client import log_reminder_to_calendar, read_kanban_status
 
 
 def _tag_message(
@@ -66,6 +69,74 @@ def _looks_like_relay_or_reminder(text: str) -> bool:
     the keyword check is intentionally loose in the risk-accepting direction."""
     lowered = text.lower()
     return any(kw in lowered for kw in _RELAY_OR_REMINDER_KEYWORDS)
+
+
+# Same stem prefixes as the person-name canonicalization this used to rely
+# on in Odysseus: "ОСТАП" covers all its declensions (Остапа/Остапу/...),
+# while МАША needs both "МАШ" (Маша/Маши/Маше...) and the formal "МАРИ"
+# (Мария/Марии...), since case endings differ between the two.
+_OTHER_PERSON_PREFIXES = {
+    "МАША": ("ОСТАП",),
+    "ОСТАП": ("МАШ", "МАРИ"),
+}
+_ANONYMOUS_RE = re.compile(
+    r"не говори.{0,20}(от меня|кто|что это я)|анонимн|без подписи|не подписыва",
+    re.IGNORECASE,
+)
+
+
+def _detect_relay_target(sender_name: str, text: str) -> str:
+    """The OTHER registered person if their name is mentioned anywhere in
+    the text (a relay), otherwise the sender themself (a self-reminder)."""
+    other_name, other_prefixes = next(
+        (name, prefixes) for name, prefixes in _OTHER_PERSON_PREFIXES.items() if name != sender_name
+    )
+    mentions_other = any(re.search(p, text, re.IGNORECASE) for p in other_prefixes)
+    return other_name if mentions_other else sender_name
+
+
+def _detect_anonymous(text: str) -> bool:
+    """"не говори что от меня" / "анонимно" / "не подписывай" etc — loose,
+    risk-accepting keyword approach: a false positive just drops
+    attribution unnecessarily, a false negative reveals a sender who asked
+    not to be revealed — only worth catching the explicit, unambiguous
+    phrasing."""
+    return bool(_ANONYMOUS_RE.search(text))
+
+
+async def _handle_relay_or_reminder(message_id: int, user_id: int, text: str) -> None:
+    """A self-reminder or a message relayed to the other registered
+    person — fully handled here, never through Odysseus/an LLM: the bot
+    already knows the sender (user_id) and the target/anonymity are
+    decided by the same lightweight keyword rules Odysseus's deterministic
+    fallback used to apply after the model failed to call schedule_send
+    (which it did most of the time — see git history). The one thing that
+    genuinely benefited from a model was recovering a specific requested
+    time from free text, so that's the only piece still allowed to ask an
+    LLM — and only a narrow single-shot one (see app/reminder_time.py /
+    parse_time_via_llm), never the full agent loop."""
+    sender_name = USER_NAMES.get(user_id, str(user_id))
+    sender_id = user_id
+    target_name = _detect_relay_target(sender_name, text)
+    target_id = NAME_TO_USER_ID.get(target_name, user_id)
+    anonymous = _detect_anonymous(text)
+
+    run_at, needs_llm = parse_reminder_time(text)  # already UTC-aware, or None for "now"
+    if run_at is None and needs_llm:
+        now_iso = datetime.now(TIMEZONE).replace(microsecond=0).isoformat()
+        llm_result = await parse_time_via_llm(text, now_iso)
+        if llm_result:
+            try:
+                naive = datetime.fromisoformat(llm_result)
+                run_at = naive.replace(tzinfo=TIMEZONE).astimezone(timezone.utc)
+            except ValueError:
+                run_at = None
+    if run_at is None:
+        run_at = utcnow()
+
+    await schedule_reminder(sender_id, target_id, text, run_at, anonymous)
+    await log_reminder_to_calendar(sender_name, target_name, text, run_at.astimezone(TIMEZONE))
+    await ack_incoming_messages([message_id])
 
 
 _NOTE_REQUEST_KEYWORDS = ("запиши", "зафиксируй", "запомни", "занеси")
@@ -283,14 +354,21 @@ async def handle_active_message(
             await ack_incoming_messages([message_id])
             return
 
+        # Same reasoning as kanban above — sender, target and anonymity are
+        # all decided by lightweight keyword rules with no real judgment
+        # needed, so this never reaches Odysseus except for a narrow,
+        # single-shot time-parsing fallback (see _handle_relay_or_reminder).
+        if _looks_like_relay_or_reminder(text):
+            await _handle_relay_or_reminder(message_id, user_id, text)
+            return
+
         base_url, model = await get_active_endpoint()
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")
 
-        relay_intent = _looks_like_relay_or_reminder(text)
         # Order matters throughout: each check below only fires if nothing
         # higher up already claimed the message, most-specific first.
-        claimed = relay_intent
+        claimed = False
         chinese_word_intent = (not claimed) and _looks_like_chinese_word(text)
         claimed = claimed or chinese_word_intent
         book_review_intent = (not claimed) and _looks_like_book_review(text)
@@ -316,9 +394,7 @@ async def handle_active_message(
         # unclassified case sends an explicit "general" instead of omitting
         # the field, so general chat never has schedule_send or any other
         # write tool available at all.
-        if relay_intent:
-            require_tool_type = "schedule_send"
-        elif chinese_word_intent:
+        if chinese_word_intent:
             require_tool_type = "add_chinese_word"
         elif book_review_intent:
             require_tool_type = "add_book_review"
@@ -334,12 +410,12 @@ async def handle_active_message(
             require_tool_type = "general"
 
         forced_fallback_types = (
-            relay_intent, note_intent, finance_intent,
+            note_intent, finance_intent,
         )
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
             require_tool=(
-                relay_intent or chinese_word_intent or book_review_intent
+                chinese_word_intent or book_review_intent
                 or book_add_intent or sale_intent or note_intent
             ),
             require_tool_type=require_tool_type,

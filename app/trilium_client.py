@@ -228,3 +228,25 @@ async def read_kanban_status(board_name: str = "КАНБАН // KANBAN") -> str:
             numbered = "\n".join(f"{i}. {html.escape(title)}" for i, title in enumerate(titles, 1))
             sections.append(f"<b>{html.escape(status)}:</b>\n\n{numbered}")
         return "\n\n".join(sections)
+
+
+async def log_reminder_to_calendar(sender_name: str, target_name: str, message: str, when: datetime) -> None:
+    """Best-effort log of a scheduled reminder/relay into that day's
+    Trilium calendar note, purely for visibility — never raises, since
+    delivery itself does not depend on this succeeding."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        return
+    try:
+        date_str = when.strftime("%Y-%m-%d")
+        time_str = when.strftime("%H:%M")
+        headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+        async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+            day_resp = await client.get(f"{TRILIUM_URL}/etapi/calendar/days/{date_str}")
+            day_resp.raise_for_status()
+            note_id = day_resp.json()["noteId"]
+
+            entry_html = f"<p><b>{time_str}</b> — напоминание для {target_name} (от {sender_name}): {message}</p>"
+            existing = await _get_content(client, note_id)
+            await _put_content(client, note_id, existing + entry_html)
+    except Exception as exc:
+        print(f"log_reminder_to_calendar failed (non-fatal): {exc!r}", flush=True)

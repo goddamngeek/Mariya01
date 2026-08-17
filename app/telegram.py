@@ -64,6 +64,7 @@ async def set_bot_commands() -> None:
         {"command": "kanban", "description": "Показать канбан-доску задач"},
         {"command": "week", "description": "Сводка по ежедневнику за неделю"},
         {"command": "checkin", "description": "Повторить текущий вопрос ежедневника"},
+        {"command": "links", "description": "Ссылки на Odysseus и Trilium"},
         {"command": "help", "description": "Что умеет бот"},
     ]
     try:

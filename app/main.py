@@ -22,11 +22,17 @@ from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
 from app.trilium_client import get_week_summary
 
+LINKS_TEXT = (
+    "Odysseus: https://odysseus.61d1.online\n"
+    "Trilium: https://trilium.61d1.online"
+)
+
 HELP_TEXT = (
     "Команды:\n"
     "/kanban — показать канбан-доску задач\n"
     "/week — сводка по ежедневнику за последние 7 дней\n"
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
+    "/links — ссылки на Odysseus и Trilium\n"
     "\n"
     "Просто напиши мне:\n"
     "— напомнить о чём-то себе или передать другому человеку\n"
@@ -115,6 +121,10 @@ async def telegram_webhook(request: Request):
 
     if text.strip() == "/help":
         await send_message(chat_id, HELP_TEXT)
+        return {"ok": True}
+
+    if text.strip() == "/links":
+        await send_message(chat_id, LINKS_TEXT)
         return {"ok": True}
 
     # Telegram's native "reply" feature attaches the full replied-to message

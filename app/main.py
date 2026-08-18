@@ -7,6 +7,7 @@ from app.config import MAX_REGISTERED_USERS
 from app.db import (
     close_pool,
     count_registered,
+    get_open_activity_prompt,
     get_open_ezhednevnik_prompt,
     init_db,
     is_registered,
@@ -17,7 +18,13 @@ from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
 from app.people import USER_NAMES
 from app.prompts import ezhednevnik_step_text
-from app.scheduler import scheduler, schedule_message_deletion, send_temporary_message, start_scheduler
+from app.scheduler import (
+    clear_chat_history,
+    scheduler,
+    schedule_message_deletion,
+    send_temporary_message,
+    start_scheduler,
+)
 from app.service import process_incoming_message
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
@@ -34,6 +41,7 @@ HELP_TEXT = (
     "/week — сводка по ежедневнику за последние 7 дней\n"
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
     "/links — ссылки на Odysseus и Trilium\n"
+    "/clear — очистить историю чата\n"
     "\n"
     "Просто напиши мне:\n"
     "— напомнить о чём-то себе или передать другому человеку\n"
@@ -135,6 +143,18 @@ async def telegram_webhook(request: Request):
             # call rather than re-showing the exact original wording, which
             # isn't stored anywhere — functionally equivalent either way.
             await send_message(chat_id, ezhednevnik_step_text(open_prompt["slot"], open_prompt["step"]))
+        return {"ok": True}
+
+    if text.strip() == "/clear":
+        has_open = (
+            await get_open_ezhednevnik_prompt(chat_id) is not None
+            or await get_open_activity_prompt(chat_id) is not None
+        )
+        await clear_chat_history(only_chat_id=chat_id)
+        if has_open:
+            await send_temporary_message(chat_id, "Есть открытый вопрос — почищу чат, когда ответишь на него.")
+        else:
+            await send_temporary_message(chat_id, "Чат очищен.")
         return {"ok": True}
 
     if text.strip() == "/help":

@@ -83,6 +83,7 @@ async def set_bot_commands() -> None:
         {"command": "week", "description": "Сводка по ежедневнику за неделю"},
         {"command": "checkin", "description": "Повторить текущий вопрос ежедневника"},
         {"command": "links", "description": "Ссылки на Odysseus и Trilium"},
+        {"command": "clear", "description": "Очистить историю чата"},
         {"command": "help", "description": "Что умеет бот"},
     ]
     try:

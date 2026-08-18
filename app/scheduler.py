@@ -69,6 +69,21 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
             print(f"failed to send ezhednevnik {slot} prompt to user={user_id}", flush=True)
 
 
+MARKET_REVIEW_TEXT = (
+    "Привет, тебе необходимо проанализировать рынок и подготовиться к "
+    "неделе, заполнив план-таблицу."
+)
+
+
+async def send_market_review_reminder() -> None:
+    """Fixed weekly nudge — Saturday 10:00 MSK, both registered users, no
+    reply expected (a plain heads-up, not a check-in flow like
+    ежедневник)."""
+    for user_id in await get_registered_user_ids():
+        if not await send_message(user_id, MARKET_REVIEW_TEXT):
+            print(f"failed to send market review reminder to user={user_id}", flush=True)
+
+
 async def release_due_reminders() -> None:
     for row in await get_due_reminders():
         # claim_reminder() is the atomic gate — if an immediate ("now")
@@ -151,6 +166,11 @@ async def start_scheduler() -> None:
         ensure_today_water_reminders,
         trigger=CronTrigger(hour=0, minute=5, timezone=TIMEZONE),
         id="schedule_daily_water_reminders",
+    )
+    scheduler.add_job(
+        send_market_review_reminder,
+        trigger=CronTrigger(day_of_week="sat", hour=10, minute=0, timezone=TIMEZONE),
+        id="market_review_reminder",
     )
     scheduler.add_job(
         release_due_reminders,

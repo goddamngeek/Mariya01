@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS ezhednevnik_prompts (
     collected JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- User-initiated activity logging (yoga / китайский / трейдинг) — same
+-- one-question-at-a-time shape as ezhednevnik_prompts (feedback, then
+-- score), but started by the person's own message ("позанималась йогой")
+-- rather than a scheduled slot, and written to that person's own ТРЕКЕР
+-- РУТИНЫ {ИМЯ} note instead of ЕЖЕДНЕВНИК.
+CREATE TABLE IF NOT EXISTS activity_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    activity TEXT NOT NULL CHECK (activity IN ('yoga', 'chinese', 'trading')),
+    sent_at TIMESTAMPTZ NOT NULL,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    step INTEGER NOT NULL DEFAULT 0,
+    collected JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
@@ -274,6 +289,39 @@ async def get_ezhednevnik_prompts_for_user(user_id: int) -> list[asyncpg.Record]
 async def close_ezhednevnik_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE ezhednevnik_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+# --- activity logging (yoga / chinese / trading) ----------------------------
+
+async def get_open_activity_prompt(user_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM activity_prompts WHERE user_id = $1 AND is_open = TRUE "
+        "ORDER BY sent_at DESC LIMIT 1",
+        user_id,
+    )
+
+
+async def create_activity_prompt(user_id: int, activity: str) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "INSERT INTO activity_prompts (user_id, activity, sent_at, is_open) "
+        "VALUES ($1, $2, $3, TRUE) RETURNING id",
+        user_id, activity, utcnow(),
+    )
+
+
+async def advance_activity_prompt_step(prompt_id: int, step: int, collected: dict) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE activity_prompts SET step = $1, collected = $2::jsonb WHERE id = $3",
+        step, json.dumps(collected), prompt_id,
+    )
+
+
+async def close_activity_prompt(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE activity_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
 
 
 # --- reminders (schedule_send tool) -----------------------------------------

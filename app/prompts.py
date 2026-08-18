@@ -104,3 +104,30 @@ def ezhednevnik_step_text(slot: str, step: int) -> str:
     if kind == "pool":
         return random.choice(EZHEDNEVNIK_AM_POOL)
     return text
+
+
+# User-initiated activity logging (yoga / китайский / трейдинг) — same
+# one-question-at-a-time shape as EZHEDNEVNIK_STEPS, but started by the
+# person's own message ("позанималась йогой") rather than a scheduled
+# slot. Two steps per activity: a feedback question, then a score. No
+# duration question by explicit choice — see app/trilium_client.py's
+# log_activity for how a mentioned duration still gets captured.
+ACTIVITY_STEPS = {
+    "yoga": [
+        ("fixed", "Как тебе?", "feedback"),
+        ("fixed", EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT, "score"),
+    ],
+    "chinese": [
+        ("fixed", "Чему научился?", "feedback"),
+        ("fixed", EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT, "score"),
+    ],
+    "trading": [
+        ("fixed", "Чему научился?", "feedback"),
+        ("fixed", EZHEDNEVNIK_SCORE_FOLLOWUP_TEXT, "score"),
+    ],
+}
+
+
+def activity_step_text(activity: str, step: int) -> str:
+    _kind, text, _field = ACTIVITY_STEPS[activity][step]
+    return text

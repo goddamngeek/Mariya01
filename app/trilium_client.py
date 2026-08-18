@@ -15,6 +15,7 @@ etc.) — only the deterministic paths moved.
 
 import html
 import json
+import re
 from datetime import date as _date, datetime, timedelta
 from typing import Optional
 
@@ -474,3 +475,89 @@ async def get_week_summary(person_name: str) -> str:
         lines.append("\nОшибки:")
         lines.extend(f"— {html.escape(m)}" for m in mistakes)
     return "\n".join(lines)
+
+
+# Column layout of the real ТРЕКЕР РУТИНЫ {ИМЯ} spreadsheets (verified live
+# against both real notes — row 0 holds these exact headers, identical in
+# both). One note per person — no Owner-column disambiguation needed, unlike
+# the old shared ЕЖЕДНЕВНИК note.
+_ACTIVITY_COLS = {
+    "yoga": ("2", "3", "4"),
+    "chinese": ("6", "7", "8"),
+    "trading": ("10", "11", "12"),
+}
+
+_DURATION_DIGIT_RE = re.compile(
+    r"\d+\s*(?:минут\w*|мин\b|час(?:а|ов)?\b|ч\b)", re.IGNORECASE,
+)
+_DURATION_HALF_HOUR_RE = re.compile(r"\bполчаса\b", re.IGNORECASE)
+_DURATION_BARE_HOUR_RE = re.compile(r"\bчас\b", re.IGNORECASE)
+
+
+def extract_duration(text: str) -> Optional[str]:
+    """Pulled opportunistically from the feedback answer if the person
+    happened to mention how long it was ("позанималась 20 минут, было
+    классно" / "занимался час") — never asked as its own question, per
+    explicit choice (an extra forced question added friction to what's
+    meant to be a quick, low-friction log). Called by app/service.py
+    while processing the feedback step's reply, so `duration` can be
+    passed into log_activity() alongside the score once that step
+    completes."""
+    m = _DURATION_DIGIT_RE.search(text)
+    if m:
+        return m.group(0)
+    if _DURATION_HALF_HOUR_RE.search(text):
+        return "полчаса"
+    if _DURATION_BARE_HOUR_RE.search(text):
+        return "час"
+    return None
+
+
+async def log_activity(person_name: str, activity: str, feedback: str, score, duration: Optional[str] = None) -> None:
+    """Write one yoga/chinese/trading session into that person's own
+    ТРЕКЕР РУТИНЫ {ИМЯ} note — one row per day, activity/feedback/score in
+    three adjacent columns per activity (see _ACTIVITY_COLS). Reuses
+    today's row if one already exists (e.g. a second activity logged the
+    same day) — a second SAME-activity log the same day just overwrites
+    that activity's own three cells; multiple sessions of one activity in
+    one day aren't tracked separately, by explicit choice."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    activity_col, feedback_col, score_col = _ACTIVITY_COLS[activity]
+    note_title = f"ТРЕКЕР РУТИНЫ {person_name}"
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_id = await _find_note_id(client, note_title)
+        if note_id is None:
+            raise TriliumNoteNotFoundError(f"Could not find the '{note_title}' note.")
+
+        raw = await _get_content(client, note_id)
+        data = json.loads(raw)
+        sheet = next(iter(data["workbook"]["sheets"].values()))
+        cell_data = sheet["cellData"]
+
+        today = datetime.now(TIMEZONE).date()
+        today_serial = (today - _date(1899, 12, 30)).days
+        day_abbrev = _EZHEDNEVNIK_WEEKDAYS[today.weekday()]
+
+        target_row = None
+        for row_key, row in cell_data.items():
+            if row_key == "0" or not row:
+                continue
+            if _cell_value(row, "0") == today_serial:
+                target_row = row_key
+                break
+        if target_row is None:
+            max_row = max((int(r) for r in cell_data.keys()), default=0)
+            target_row = str(max_row + 1)
+
+        row = cell_data.setdefault(target_row, {})
+        row["0"] = {"s": "MVgMFY", "v": today_serial, "t": 2}
+        row["1"] = {"v": day_abbrev, "t": 1}
+        row[activity_col] = {"v": duration or "✅", "t": 1}
+        row[feedback_col] = {"v": feedback, "t": 1}
+        row[score_col] = {"v": int(score), "t": 2}
+
+        await _put_content(client, note_id, json.dumps(data))

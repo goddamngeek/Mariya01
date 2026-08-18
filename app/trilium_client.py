@@ -169,8 +169,17 @@ async def fill_ezhednevnik(fields: dict) -> None:
                     cell_data[str(rn + 1)] = cell_data.pop(key)
             target_row = str(insert_after + 1)
         if target_row is None:
-            max_row = max((int(r) for r in cell_data.keys()), default=0)
-            target_row = str(max_row + 1)
+            # No scaffold row for this date at all (beyond the pre-filled
+            # range) — same "first row with no real value" scan as the
+            # insert-shift branch above needs, since rows beyond the real
+            # scaffold are pre-formatted (style only) all the way to
+            # rowCount, and "highest key present at all" would land past
+            # rowCount entirely, invisible in Trilium's own UI (confirmed
+            # live for the activity tracker — see log_activity).
+            row_num = 1
+            while _cell_value(cell_data.get(str(row_num), {}), "0") is not None:
+                row_num += 1
+            target_row = str(row_num)
 
         row = cell_data.setdefault(target_row, {})
         row["0"] = {"s": "tbiu37", "v": entry_serial, "t": 2}
@@ -550,8 +559,17 @@ async def log_activity(person_name: str, activity: str, feedback: str, score, du
                 target_row = row_key
                 break
         if target_row is None:
-            max_row = max((int(r) for r in cell_data.keys()), default=0)
-            target_row = str(max_row + 1)
+            # This sheet's rows are pre-formatted (border/style) all the way
+            # to rowCount with no real data in them — confirmed live: using
+            # "one past the highest key present in cellData at all" treated
+            # those style-only rows as "used", landing the new row AT
+            # rowCount itself (row 1000 in a 1000-row sheet), invisible in
+            # Trilium's own UI since it's past the rendered grid entirely.
+            # Scan for the first row with no real date value instead.
+            row_num = 1
+            while _cell_value(cell_data.get(str(row_num), {}), "0") is not None:
+                row_num += 1
+            target_row = str(row_num)
 
         row = cell_data.setdefault(target_row, {})
         row["0"] = {"s": "MVgMFY", "v": today_serial, "t": 2}

@@ -495,6 +495,7 @@ _ACTIVITY_COLS = {
     "chinese": ("6", "7", "8"),
     "trading": ("10", "11", "12"),
 }
+_ACTIVITY_DATE_STYLE_ID = "actDateFmt"
 
 _DURATION_DIGIT_RE = re.compile(
     r"\d+\s*(?:минут\w*|мин\b|час(?:а|ов)?\b|ч\b)", re.IGNORECASE,
@@ -571,8 +572,18 @@ async def log_activity(person_name: str, activity: str, feedback: str, score, du
                 row_num += 1
             target_row = str(row_num)
 
+        # This sheet was created fresh (no real rows yet) with no
+        # date-formatted style defined at all — its header cell's own style
+        # (MVgMFY) has no number-format pattern, so a serial like 46252
+        # rendered as a raw integer instead of a date. Ensure a dedicated
+        # date-format style exists (matching ЕЖЕДНЕВНИК's own "n": pattern
+        # convention) rather than reusing the header's style.
+        styles = data["workbook"].setdefault("styles", {})
+        if _ACTIVITY_DATE_STYLE_ID not in styles:
+            styles[_ACTIVITY_DATE_STYLE_ID] = {"n": {"pattern": "dd.mm.yyyy"}}
+
         row = cell_data.setdefault(target_row, {})
-        row["0"] = {"s": "MVgMFY", "v": today_serial, "t": 2}
+        row["0"] = {"s": _ACTIVITY_DATE_STYLE_ID, "v": today_serial, "t": 2}
         row["1"] = {"v": day_abbrev, "t": 1}
         row[activity_col] = {"v": duration or "✅", "t": 1}
         row[feedback_col] = {"v": feedback, "t": 1}

@@ -178,19 +178,20 @@ async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None
 
 
 async def clear_chat_history(only_chat_id: int | None = None) -> None:
-    """Wipe the whole day's conversation every night — every message
-    logged since the last run (both the bot's own and the person's own;
-    see app/telegram.py's _log_sent and app/main.py's webhook handler) gets
-    deleted from Telegram. Skips a person's chat entirely while they have
-    an open ежедневник or activity (yoga/chinese/trading) question — wiping
-    mid check-in would delete the bot's own pending question along with
-    everything else, losing where things left off; that chat's messages
-    just stay logged for a future night's attempt instead.
+    """Wipe a chat's logged conversation — every message logged since the
+    last run (both the bot's own and the person's own; see
+    app/telegram.py's _log_sent and app/main.py's webhook handler) gets
+    deleted from Telegram. No longer runs on its own schedule (the nightly
+    4am cron job was removed per request) — triggered on-demand instead,
+    either by the person themselves via /clear (see app/main.py) or for
+    testing via app/sync.py's /trigger_chat_clear. Skips a person's chat
+    entirely while they have an open ежедневник or activity (yoga/chinese/
+    trading) question — wiping mid check-in would delete the bot's own
+    pending question along with everything else, losing where things left
+    off; that chat's messages just stay logged for a future attempt instead.
 
     only_chat_id restricts this run to a single chat (everyone else's
-    messages stay untouched in the log) — for manual/test triggers, see
-    app/sync.py's /trigger_chat_clear; the real nightly cron call always
-    omits it."""
+    messages stay untouched in the log)."""
     skip_chat_ids = set()
     for user_id in await get_registered_user_ids():
         if only_chat_id is not None and user_id != only_chat_id:
@@ -233,11 +234,6 @@ async def start_scheduler() -> None:
         send_market_review_reminder,
         trigger=CronTrigger(day_of_week="sat", hour=10, minute=0, timezone=TIMEZONE),
         id="market_review_reminder",
-    )
-    scheduler.add_job(
-        clear_chat_history,
-        trigger=CronTrigger(hour=4, minute=0, timezone=TIMEZONE),
-        id="clear_chat_history",
     )
     scheduler.add_job(
         release_due_reminders,

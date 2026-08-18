@@ -9,6 +9,7 @@ from app.db import (
     ack_incoming_messages,
     get_ezhednevnik_prompts_for_user,
     get_odysseus_session_id,
+    get_open_activity_prompt,
     get_recent_reminders,
     get_water_reminders_for_date,
     peek_logged_messages,
@@ -183,6 +184,24 @@ async def reprocess_active(body: ReprocessActiveRequest):
         raise HTTPException(404, "no such unconfirmed message")
     await handle_active_message(row["id"], row["user_id"], row["text"], row["created_at"], row["reply_to_text"])
     return {"ok": True}
+
+
+@router.get("/activity_state", dependencies=[Depends(require_bearer)])
+async def activity_state():
+    """Diagnostic: currently open activity_prompts (yoga/chinese/trading)
+    per known user, if any."""
+    result = {}
+    for name, uid in NAME_TO_USER_ID.items():
+        prompt = await get_open_activity_prompt(uid)
+        result[name] = (
+            {
+                "id": prompt["id"], "activity": prompt["activity"],
+                "sent_at": prompt["sent_at"].isoformat(), "step": prompt["step"],
+                "collected": prompt["collected"],
+            }
+            if prompt is not None else None
+        )
+    return result
 
 
 @router.get("/chat_log", dependencies=[Depends(require_bearer)])

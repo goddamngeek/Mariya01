@@ -409,6 +409,16 @@ async def pop_due_message_deletions() -> list[asyncpg.Record]:
             return rows
 
 
+async def peek_pending_message_deletions(limit: int = 20) -> list[asyncpg.Record]:
+    """Diagnostic: everything currently queued for deletion, without
+    popping it — for confirming scheduling is actually happening ahead of
+    the next 60s release_due_message_deletions tick."""
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM pending_message_deletions ORDER BY id DESC LIMIT $1", limit,
+    )
+
+
 # --- reminders (schedule_send tool) -----------------------------------------
 
 async def insert_reminder(

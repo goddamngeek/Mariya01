@@ -1,5 +1,5 @@
 import random
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -16,6 +16,8 @@ from app.db import (
     has_open_ezhednevnik,
     mark_water_reminder_sent,
     pop_all_logged_messages,
+    pop_due_message_deletions,
+    schedule_pending_message_deletion,
 )
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
@@ -118,10 +120,35 @@ async def ensure_today_water_reminders() -> None:
 
 
 WATER_REMINDER_DELETE_DELAY_MINUTES = 2
+TEMP_MESSAGE_DELETE_DELAY_MINUTES = 3
 
 
-async def _delete_scheduled_message(chat_id: int, message_id: int) -> None:
-    await delete_message(chat_id, message_id)
+async def schedule_message_deletion(
+    chat_id: int, message_id: int, delay_minutes: float = TEMP_MESSAGE_DELETE_DELAY_MINUTES,
+) -> None:
+    """Delete an already-sent (or already-received) message after a delay.
+    Bots can delete their own outgoing messages in any chat, and — in a
+    private chat specifically — the other person's incoming messages too
+    (Telegram Bot API's own documented behavior, no special rights needed
+    there, unlike groups/channels which need admin/can_delete_messages).
+
+    DB-backed (pending_message_deletions table), unlike the in-memory
+    APScheduler trigger="date" jobs this replaces — confirmed live: a
+    delayed delete scheduled purely in process memory silently vanished
+    when a redeploy landed inside the delay window, leaving the message
+    stuck in the chat forever with no trace it was ever meant to be
+    cleaned up. Actual deletion happens from release_due_message_deletions
+    below, polled every 60s regardless of how many times the process has
+    restarted since this was scheduled. Used both by send_temporary_message
+    below (its own reply), main.py (the person's own triggering message),
+    and release_due_water_reminders (its own reminder text)."""
+    due_at = datetime.now(TIMEZONE) + timedelta(minutes=delay_minutes)
+    await schedule_pending_message_deletion(chat_id, message_id, due_at.astimezone(timezone.utc))
+
+
+async def release_due_message_deletions() -> None:
+    for row in await pop_due_message_deletions():
+        await delete_message(row["chat_id"], row["message_id"])
 
 
 async def release_due_water_reminders() -> None:
@@ -134,49 +161,19 @@ async def release_due_water_reminders() -> None:
         await mark_water_reminder_sent(row["id"])
         # Self-cleaning nudge — not worth leaving in the chat forever and
         # cluttering it, per request.
-        scheduler.add_job(
-            _delete_scheduled_message,
-            trigger="date",
-            run_date=datetime.now(TIMEZONE) + timedelta(minutes=WATER_REMINDER_DELETE_DELAY_MINUTES),
-            args=[row["user_id"], message_id],
-            id=f"delete_water_msg_{message_id}",
-            replace_existing=True,
-        )
-
-
-TEMP_MESSAGE_DELETE_DELAY_MINUTES = 3
-
-
-def schedule_message_deletion(
-    chat_id: int, message_id: int, delay_minutes: float = TEMP_MESSAGE_DELETE_DELAY_MINUTES,
-) -> None:
-    """Delete an already-sent (or already-received) message after a delay.
-    Bots can delete their own outgoing messages in any chat, and — in a
-    private chat specifically — the other person's incoming messages too
-    (Telegram Bot API's own documented behavior, no special rights needed
-    there, unlike groups/channels which need admin/can_delete_messages).
-    Used both by send_temporary_message below (its own reply) and by
-    main.py (the person's own triggering command/message)."""
-    scheduler.add_job(
-        _delete_scheduled_message,
-        trigger="date",
-        run_date=datetime.now(TIMEZONE) + timedelta(minutes=delay_minutes),
-        args=[chat_id, message_id],
-        id=f"delete_temp_msg_{chat_id}_{message_id}",
-        replace_existing=True,
-    )
+        await schedule_message_deletion(row["user_id"], message_id, WATER_REMINDER_DELETE_DELAY_MINUTES)
 
 
 async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None = None) -> None:
     """Send-and-forget message that deletes itself after a few minutes —
     for on-demand dumps (kanban board, /week summary, /links) that would
     otherwise sit in the chat forever cluttering it, same self-cleaning
-    idea as water reminders (see _delete_scheduled_message above). Silently
-    does nothing if the send itself fails — the caller already logs that."""
+    idea as water reminders. Silently does nothing if the send itself
+    fails — the caller already logs that."""
     message_id = await send_message_get_id(chat_id, text, parse_mode=parse_mode)
     if message_id is None:
         return
-    schedule_message_deletion(chat_id, message_id)
+    await schedule_message_deletion(chat_id, message_id)
 
 
 async def clear_chat_history() -> None:
@@ -237,6 +234,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_due_water_reminders",
+    )
+    scheduler.add_job(
+        release_due_message_deletions,
+        trigger="interval",
+        seconds=60,
+        id="release_due_message_deletions",
     )
     scheduler.start()
     await ensure_today_water_reminders()

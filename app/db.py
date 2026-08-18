@@ -94,6 +94,19 @@ CREATE TABLE IF NOT EXISTS chat_messages_log (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+-- DB-backed like water_reminders, unlike the in-memory APScheduler
+-- trigger="date" jobs this replaces: confirmed live, a 3-minute delayed
+-- delete job scheduled purely in process memory silently vanished when a
+-- redeploy landed inside that window, leaving the message stuck forever
+-- with no trace it was ever supposed to be cleaned up. A row here survives
+-- any number of restarts untouched.
+CREATE TABLE IF NOT EXISTS pending_message_deletions (
+    id SERIAL PRIMARY KEY,
+    chat_id BIGINT NOT NULL,
+    message_id BIGINT NOT NULL,
+    due_at TIMESTAMPTZ NOT NULL
+);
+
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
@@ -368,6 +381,32 @@ async def peek_logged_messages(limit: int = 20) -> list[asyncpg.Record]:
     tonight's real clear_chat_history run."""
     pool = await get_pool()
     return await pool.fetch("SELECT * FROM chat_messages_log ORDER BY id DESC LIMIT $1", limit)
+
+
+async def schedule_pending_message_deletion(chat_id: int, message_id: int, due_at: datetime) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO pending_message_deletions (chat_id, message_id, due_at) VALUES ($1, $2, $3)",
+        chat_id, message_id, due_at,
+    )
+
+
+async def pop_due_message_deletions() -> list[asyncpg.Record]:
+    """Same atomic fetch-and-clear shape as pop_all_logged_messages — a
+    failed deleteMessage call (already gone, too old, etc.) must not retry
+    forever, just be dropped either way."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch(
+                "SELECT * FROM pending_message_deletions WHERE due_at <= $1", utcnow(),
+            )
+            if rows:
+                await conn.execute(
+                    "DELETE FROM pending_message_deletions WHERE id = ANY($1::int[])",
+                    [r["id"] for r in rows],
+                )
+            return rows
 
 
 # --- reminders (schedule_send tool) -----------------------------------------

@@ -112,7 +112,7 @@ async def telegram_webhook(request: Request):
         # Trilium (see app/trilium_client.py), no LLM involved at all.
         await send_kanban_status(chat_id)
         if message_id is not None:
-            schedule_message_deletion(chat_id, message_id)
+            await schedule_message_deletion(chat_id, message_id)
         return {"ok": True}
 
     if text.strip() == "/week":
@@ -123,7 +123,7 @@ async def telegram_webhook(request: Request):
             summary = TRILIUM_UNAVAILABLE_TEXT
         await send_temporary_message(chat_id, summary, parse_mode="HTML")
         if message_id is not None:
-            schedule_message_deletion(chat_id, message_id)
+            await schedule_message_deletion(chat_id, message_id)
         return {"ok": True}
 
     if text.strip() == "/checkin":
@@ -144,7 +144,7 @@ async def telegram_webhook(request: Request):
     if text.strip() == "/links":
         await send_temporary_message(chat_id, LINKS_TEXT)
         if message_id is not None:
-            schedule_message_deletion(chat_id, message_id)
+            await schedule_message_deletion(chat_id, message_id)
         return {"ok": True}
 
     # Telegram's native "reply" feature attaches the full replied-to message

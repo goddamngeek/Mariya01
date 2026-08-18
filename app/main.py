@@ -16,7 +16,7 @@ from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
 from app.people import USER_NAMES
 from app.prompts import ezhednevnik_step_text
-from app.scheduler import scheduler, start_scheduler
+from app.scheduler import scheduler, send_temporary_message, start_scheduler
 from app.service import process_incoming_message
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
@@ -106,7 +106,7 @@ async def telegram_webhook(request: Request):
             summary = await get_week_summary(person_name)
         except Exception:
             summary = TRILIUM_UNAVAILABLE_TEXT
-        await send_message(chat_id, summary, parse_mode="HTML")
+        await send_temporary_message(chat_id, summary, parse_mode="HTML")
         return {"ok": True}
 
     if text.strip() == "/checkin":
@@ -125,7 +125,7 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/links":
-        await send_message(chat_id, LINKS_TEXT)
+        await send_temporary_message(chat_id, LINKS_TEXT)
         return {"ok": True}
 
     # Telegram's native "reply" feature attaches the full replied-to message

@@ -119,7 +119,7 @@ async def ensure_today_water_reminders() -> None:
 WATER_REMINDER_DELETE_DELAY_MINUTES = 2
 
 
-async def _delete_water_reminder_message(chat_id: int, message_id: int) -> None:
+async def _delete_scheduled_message(chat_id: int, message_id: int) -> None:
     await delete_message(chat_id, message_id)
 
 
@@ -134,13 +134,35 @@ async def release_due_water_reminders() -> None:
         # Self-cleaning nudge — not worth leaving in the chat forever and
         # cluttering it, per request.
         scheduler.add_job(
-            _delete_water_reminder_message,
+            _delete_scheduled_message,
             trigger="date",
             run_date=datetime.now(TIMEZONE) + timedelta(minutes=WATER_REMINDER_DELETE_DELAY_MINUTES),
             args=[row["user_id"], message_id],
             id=f"delete_water_msg_{message_id}",
             replace_existing=True,
         )
+
+
+TEMP_MESSAGE_DELETE_DELAY_MINUTES = 3
+
+
+async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None = None) -> None:
+    """Send-and-forget message that deletes itself after a few minutes —
+    for on-demand dumps (kanban board, /week summary, /links) that would
+    otherwise sit in the chat forever cluttering it, same self-cleaning
+    idea as water reminders (see _delete_scheduled_message above). Silently
+    does nothing if the send itself fails — the caller already logs that."""
+    message_id = await send_message_get_id(chat_id, text, parse_mode=parse_mode)
+    if message_id is None:
+        return
+    scheduler.add_job(
+        _delete_scheduled_message,
+        trigger="date",
+        run_date=datetime.now(TIMEZONE) + timedelta(minutes=TEMP_MESSAGE_DELETE_DELAY_MINUTES),
+        args=[chat_id, message_id],
+        id=f"delete_temp_msg_{message_id}",
+        replace_existing=True,
+    )
 
 
 async def start_scheduler() -> None:

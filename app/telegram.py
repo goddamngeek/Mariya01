@@ -36,13 +36,17 @@ async def send_message(chat_id: int | str, text: str, parse_mode: str | None = N
         return False
 
 
-async def send_message_get_id(chat_id: int | str, text: str) -> int | None:
+async def send_message_get_id(chat_id: int | str, text: str, parse_mode: str | None = None) -> int | None:
     """Same as send_message, but returns the sent message_id (or None on
     failure) — for callers that need to act on this specific message later,
-    e.g. scheduling its deletion (see scheduler.py's water reminders)."""
+    e.g. scheduling its deletion (see scheduler.py's water reminders and
+    send_temporary_message)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
-        resp = await get_client().post(url, json={"chat_id": chat_id, "text": text})
+        resp = await get_client().post(url, json=payload)
         resp.raise_for_status()
         return resp.json()["result"]["message_id"]
     except httpx.HTTPError as exc:

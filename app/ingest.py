@@ -35,6 +35,7 @@ from app.people import NAME_TO_USER_ID, USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.reminder_time import parse_reminder_time
 from app.reminders import schedule_reminder
+from app.scheduler import send_temporary_message
 from app.telegram import send_message
 from app.trilium_client import (
     KANBAN_COLUMNS,
@@ -449,7 +450,7 @@ async def send_kanban_status(user_id: int) -> None:
         await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
         return
 
-    await send_message(user_id, answer, parse_mode="HTML")
+    await send_temporary_message(user_id, answer, parse_mode="HTML")
 
 
 async def handle_active_message(
@@ -475,7 +476,7 @@ async def handle_active_message(
                 print(f"handle_active_message: kanban read failed for incoming id={message_id}:", flush=True)
                 traceback.print_exc()
                 answer = TRILIUM_UNAVAILABLE_TEXT
-            await send_message(user_id, answer, parse_mode="HTML")
+            await send_temporary_message(user_id, answer, parse_mode="HTML")
             await ack_incoming_messages([message_id])
             return
 

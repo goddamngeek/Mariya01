@@ -362,6 +362,14 @@ async def pop_all_logged_messages() -> list[asyncpg.Record]:
             return rows
 
 
+async def peek_logged_messages(limit: int = 20) -> list[asyncpg.Record]:
+    """Diagnostic: newest logged (not-yet-cleared) messages, without
+    popping them — for confirming logging is actually happening ahead of
+    tonight's real clear_chat_history run."""
+    pool = await get_pool()
+    return await pool.fetch("SELECT * FROM chat_messages_log ORDER BY id DESC LIMIT $1", limit)
+
+
 # --- reminders (schedule_send tool) -----------------------------------------
 
 async def insert_reminder(

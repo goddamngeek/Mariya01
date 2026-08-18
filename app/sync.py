@@ -11,6 +11,7 @@ from app.db import (
     get_odysseus_session_id,
     get_recent_reminders,
     get_water_reminders_for_date,
+    peek_logged_messages,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
     utcnow,
@@ -182,3 +183,14 @@ async def reprocess_active(body: ReprocessActiveRequest):
         raise HTTPException(404, "no such unconfirmed message")
     await handle_active_message(row["id"], row["user_id"], row["text"], row["created_at"], row["reply_to_text"])
     return {"ok": True}
+
+
+@router.get("/chat_log", dependencies=[Depends(require_bearer)])
+async def chat_log():
+    """Diagnostic: newest logged (not-yet-cleared) messages — for
+    confirming the nightly clear_chat_history job has something real to
+    work with, without waiting for 04:00 MSK."""
+    return [
+        {"id": r["id"], "chat_id": r["chat_id"], "message_id": r["message_id"], "created_at": r["created_at"]}
+        for r in await peek_logged_messages()
+    ]

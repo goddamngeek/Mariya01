@@ -177,7 +177,7 @@ async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None
     await schedule_message_deletion(chat_id, message_id)
 
 
-async def clear_chat_history() -> None:
+async def clear_chat_history(only_chat_id: int | None = None) -> None:
     """Wipe the whole day's conversation every night — every message
     logged since the last run (both the bot's own and the person's own;
     see app/telegram.py's _log_sent and app/main.py's webhook handler) gets
@@ -185,9 +185,17 @@ async def clear_chat_history() -> None:
     an open ежедневник or activity (yoga/chinese/trading) question — wiping
     mid check-in would delete the bot's own pending question along with
     everything else, losing where things left off; that chat's messages
-    just stay logged for a future night's attempt instead."""
+    just stay logged for a future night's attempt instead.
+
+    only_chat_id restricts this run to a single chat (everyone else's
+    messages stay untouched in the log) — for manual/test triggers, see
+    app/sync.py's /trigger_chat_clear; the real nightly cron call always
+    omits it."""
     skip_chat_ids = set()
     for user_id in await get_registered_user_ids():
+        if only_chat_id is not None and user_id != only_chat_id:
+            skip_chat_ids.add(user_id)
+            continue
         if await has_open_ezhednevnik(user_id) or await get_open_activity_prompt(user_id) is not None:
             print(f"clear_chat_history: skipping user={user_id}, has an open question", flush=True)
             skip_chat_ids.add(user_id)

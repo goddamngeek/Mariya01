@@ -21,7 +21,7 @@ from app.db import (
 from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
-from app.scheduler import send_ezhednevnik_prompts
+from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
 
 router = APIRouter(prefix="/sync")
 
@@ -224,3 +224,17 @@ async def pending_deletions():
         {"id": r["id"], "chat_id": r["chat_id"], "message_id": r["message_id"], "due_at": r["due_at"]}
         for r in await peek_pending_message_deletions()
     ]
+
+
+class TriggerChatClearRequest(BaseModel):
+    user_id: Optional[int] = None
+
+
+@router.post("/trigger_chat_clear", dependencies=[Depends(require_bearer)])
+async def trigger_chat_clear(body: TriggerChatClearRequest):
+    """Manual on-demand trigger, reusing the exact same code path as the
+    04:00 MSK nightly job — for testing without waiting for the scheduled
+    time (same reasoning as /trigger_ezhednevnik). user_id restricts it to
+    a single chat; omit to clear everyone (same as the real cron call)."""
+    await clear_chat_history(only_chat_id=body.user_id)
+    return {"ok": True}

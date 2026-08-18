@@ -10,6 +10,7 @@ from app.db import (
     get_open_ezhednevnik_prompt,
     init_db,
     is_registered,
+    log_chat_message,
     register_user,
 )
 from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
@@ -87,6 +88,17 @@ async def telegram_webhook(request: Request):
 
     if text is None or chat_id is None:
         return {"ok": True}
+
+    if message_id is not None:
+        # Logged unconditionally, before /start or registration checks —
+        # the nightly cleanup (see scheduler.py's clear_chat_history) needs
+        # every real incoming message_id, not just ones the bot goes on to
+        # act on. Best-effort: a logging failure here must not break the
+        # actual webhook handling.
+        try:
+            await log_chat_message(chat_id, message_id)
+        except Exception as exc:
+            print(f"log_chat_message failed (non-fatal): {exc!r}", flush=True)
 
     if text.strip() == "/start":
         await handle_start(chat_id)

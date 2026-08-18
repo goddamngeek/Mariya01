@@ -15,6 +15,7 @@ from app.db import (
     get_registered_user_ids,
     has_open_ezhednevnik,
     mark_water_reminder_sent,
+    pop_all_logged_messages,
 )
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
@@ -178,6 +179,19 @@ async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None
     schedule_message_deletion(chat_id, message_id)
 
 
+async def clear_chat_history() -> None:
+    """Wipe the whole day's conversation every night — every message
+    logged since the last run (both the bot's own and the person's own;
+    see app/telegram.py's _log_sent and app/main.py's webhook handler) gets
+    deleted from Telegram. Pops the log first (see db.pop_all_logged_
+    messages' docstring for why) so a single failed deleteMessage call
+    (already too old, already deleted, etc.) can't leave anything stuck
+    retrying forever — it's simply gone from the log either way."""
+    rows = await pop_all_logged_messages()
+    for row in rows:
+        await delete_message(row["chat_id"], row["message_id"])
+
+
 async def start_scheduler() -> None:
     scheduler.add_job(
         send_ezhednevnik_prompts,
@@ -206,6 +220,11 @@ async def start_scheduler() -> None:
         send_market_review_reminder,
         trigger=CronTrigger(day_of_week="sat", hour=10, minute=0, timezone=TIMEZONE),
         id="market_review_reminder",
+    )
+    scheduler.add_job(
+        clear_chat_history,
+        trigger=CronTrigger(hour=4, minute=0, timezone=TIMEZONE),
+        id="clear_chat_history",
     )
     scheduler.add_job(
         release_due_reminders,

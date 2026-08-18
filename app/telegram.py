@@ -1,8 +1,19 @@
 import httpx
 
 from app.config import TELEGRAM_BOT_TOKEN
+from app.db import log_chat_message
 
 _client: httpx.AsyncClient | None = None
+
+
+async def _log_sent(chat_id: int | str, message_id: int) -> None:
+    """Best-effort — a logging failure here must never take down message
+    sending itself, only make that one message invisible to the nightly
+    chat-history cleanup (see scheduler.py's clear_chat_history)."""
+    try:
+        await log_chat_message(int(chat_id), message_id)
+    except Exception as exc:
+        print(f"log_chat_message failed (non-fatal): {exc!r}", flush=True)
 
 
 def get_client() -> httpx.AsyncClient:
@@ -30,6 +41,7 @@ async def send_message(chat_id: int | str, text: str, parse_mode: str | None = N
     try:
         resp = await get_client().post(url, json=payload)
         resp.raise_for_status()
+        await _log_sent(chat_id, resp.json()["result"]["message_id"])
         return True
     except httpx.HTTPError as exc:
         print(f"telegram sendMessage failed: {exc}", flush=True)
@@ -48,7 +60,9 @@ async def send_message_get_id(chat_id: int | str, text: str, parse_mode: str | N
     try:
         resp = await get_client().post(url, json=payload)
         resp.raise_for_status()
-        return resp.json()["result"]["message_id"]
+        message_id = resp.json()["result"]["message_id"]
+        await _log_sent(chat_id, message_id)
+        return message_id
     except httpx.HTTPError as exc:
         print(f"telegram sendMessage failed: {exc}", flush=True)
         return None

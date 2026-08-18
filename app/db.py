@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS activity_prompts (
     collected JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- Every message sent to/from a chat, purely so the nightly cleanup job
+-- (scheduler.py's clear_chat_history) knows which Telegram message_ids to
+-- delete. Telegram gives bots no "list messages in this chat" API — the
+-- only way to delete a message is to already know its id, so every send
+-- (telegram.py) and every incoming webhook update (main.py) logs itself
+-- here; the cleanup job deletes each one, then clears the rows it handled.
+CREATE TABLE IF NOT EXISTS chat_messages_log (
+    id SERIAL PRIMARY KEY,
+    chat_id BIGINT NOT NULL,
+    message_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
@@ -322,6 +335,31 @@ async def advance_activity_prompt_step(prompt_id: int, step: int, collected: dic
 async def close_activity_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE activity_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+# --- chat message log (nightly cleanup) -------------------------------------
+
+async def log_chat_message(chat_id: int, message_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO chat_messages_log (chat_id, message_id, created_at) VALUES ($1, $2, $3)",
+        chat_id, message_id, utcnow(),
+    )
+
+
+async def pop_all_logged_messages() -> list[asyncpg.Record]:
+    """Fetch and clear the whole log in one atomic step — used once a night
+    by clear_chat_history(). Deleting the rows here (not after the Telegram
+    calls) means a message that's already gone from the log never gets
+    retried forever even if its own deleteMessage call happens to fail
+    (harmless either way — Telegram just 400s on an already-deleted or
+    too-old message)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch("SELECT * FROM chat_messages_log ORDER BY id")
+            await conn.execute("DELETE FROM chat_messages_log")
+            return rows
 
 
 # --- reminders (schedule_send tool) -----------------------------------------

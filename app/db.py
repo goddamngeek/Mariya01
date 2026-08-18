@@ -360,18 +360,30 @@ async def log_chat_message(chat_id: int, message_id: int) -> None:
     )
 
 
-async def pop_all_logged_messages() -> list[asyncpg.Record]:
-    """Fetch and clear the whole log in one atomic step — used once a night
-    by clear_chat_history(). Deleting the rows here (not after the Telegram
-    calls) means a message that's already gone from the log never gets
-    retried forever even if its own deleteMessage call happens to fail
-    (harmless either way — Telegram just 400s on an already-deleted or
-    too-old message)."""
+async def pop_logged_messages_except(skip_chat_ids: set[int]) -> list[asyncpg.Record]:
+    """Fetch and clear the log in one atomic step, EXCLUDING any chat_id in
+    skip_chat_ids — used once a night by clear_chat_history(), which skips
+    a person's chat entirely while they have an open ежедневник/activity
+    question (clearing mid check-in would delete the bot's own pending
+    question along with everything else, losing where things left off).
+    Rows for a skipped chat_id are left untouched in the log for a future
+    night's attempt, once that question is answered or auto-closed.
+    Deleting the popped rows here (not after the Telegram calls) means a
+    message that's already gone from the log never gets retried forever
+    even if its own deleteMessage call happens to fail (harmless either
+    way — Telegram just 400s on an already-deleted or too-old message)."""
     pool = await get_pool()
+    skip_list = list(skip_chat_ids)
     async with pool.acquire() as conn:
         async with conn.transaction():
-            rows = await conn.fetch("SELECT * FROM chat_messages_log ORDER BY id")
-            await conn.execute("DELETE FROM chat_messages_log")
+            rows = await conn.fetch(
+                "SELECT * FROM chat_messages_log WHERE NOT (chat_id = ANY($1::bigint[])) ORDER BY id",
+                skip_list,
+            )
+            await conn.execute(
+                "DELETE FROM chat_messages_log WHERE NOT (chat_id = ANY($1::bigint[]))",
+                skip_list,
+            )
             return rows
 
 

@@ -412,11 +412,12 @@ async def add_book_review(book_title: str, review_text: str) -> None:
 
 
 async def get_week_summary(person_name: str) -> str:
-    """Aggregate the last 7 calendar days (today inclusive) from a person's
-    own ЕЖЕДНЕВНИК note: average AM/PM scores, and every notable event /
-    thing learned / mistake logged. Pure aggregation of what's actually
-    there — never invents or paraphrases, same "list it literally" ethos
-    as read_kanban_status."""
+    """Aggregate the current CALENDAR week (Monday through today — future
+    days in the same week obviously have no data yet) from a person's own
+    ЕЖЕДНЕВНИК note: average AM/PM scores, and every notable event / thing
+    learned / mistake logged. Pure aggregation of what's actually there —
+    never invents or paraphrases, same "list it literally" ethos as
+    read_kanban_status."""
     if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
         raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
 
@@ -432,7 +433,7 @@ async def get_week_summary(person_name: str) -> str:
     cell_data = sheet["cellData"]
 
     today = datetime.now(TIMEZONE).date()
-    start_date = today - timedelta(days=6)
+    start_date = today - timedelta(days=today.weekday())  # Monday of this week (weekday(): Mon=0)
     start_serial = (start_date - _date(1899, 12, 30)).days
     end_serial = (today - _date(1899, 12, 30)).days
 

@@ -12,11 +12,12 @@ from app.db import (
     ensure_water_reminder,
     get_due_reminders,
     get_due_water_reminders,
+    get_open_activity_prompt,
     get_registered_user_ids,
     has_open_ezhednevnik,
     mark_water_reminder_sent,
-    pop_all_logged_messages,
     pop_due_message_deletions,
+    pop_logged_messages_except,
     schedule_pending_message_deletion,
 )
 from app.prompts import ezhednevnik_step_text
@@ -180,11 +181,18 @@ async def clear_chat_history() -> None:
     """Wipe the whole day's conversation every night — every message
     logged since the last run (both the bot's own and the person's own;
     see app/telegram.py's _log_sent and app/main.py's webhook handler) gets
-    deleted from Telegram. Pops the log first (see db.pop_all_logged_
-    messages' docstring for why) so a single failed deleteMessage call
-    (already too old, already deleted, etc.) can't leave anything stuck
-    retrying forever — it's simply gone from the log either way."""
-    rows = await pop_all_logged_messages()
+    deleted from Telegram. Skips a person's chat entirely while they have
+    an open ежедневник or activity (yoga/chinese/trading) question — wiping
+    mid check-in would delete the bot's own pending question along with
+    everything else, losing where things left off; that chat's messages
+    just stay logged for a future night's attempt instead."""
+    skip_chat_ids = set()
+    for user_id in await get_registered_user_ids():
+        if await has_open_ezhednevnik(user_id) or await get_open_activity_prompt(user_id) is not None:
+            print(f"clear_chat_history: skipping user={user_id}, has an open question", flush=True)
+            skip_chat_ids.add(user_id)
+
+    rows = await pop_logged_messages_except(skip_chat_ids)
     for row in rows:
         await delete_message(row["chat_id"], row["message_id"])
 

@@ -146,6 +146,26 @@ async def release_due_water_reminders() -> None:
 TEMP_MESSAGE_DELETE_DELAY_MINUTES = 3
 
 
+def schedule_message_deletion(
+    chat_id: int, message_id: int, delay_minutes: float = TEMP_MESSAGE_DELETE_DELAY_MINUTES,
+) -> None:
+    """Delete an already-sent (or already-received) message after a delay.
+    Bots can delete their own outgoing messages in any chat, and — in a
+    private chat specifically — the other person's incoming messages too
+    (Telegram Bot API's own documented behavior, no special rights needed
+    there, unlike groups/channels which need admin/can_delete_messages).
+    Used both by send_temporary_message below (its own reply) and by
+    main.py (the person's own triggering command/message)."""
+    scheduler.add_job(
+        _delete_scheduled_message,
+        trigger="date",
+        run_date=datetime.now(TIMEZONE) + timedelta(minutes=delay_minutes),
+        args=[chat_id, message_id],
+        id=f"delete_temp_msg_{chat_id}_{message_id}",
+        replace_existing=True,
+    )
+
+
 async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None = None) -> None:
     """Send-and-forget message that deletes itself after a few minutes —
     for on-demand dumps (kanban board, /week summary, /links) that would
@@ -155,14 +175,7 @@ async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None
     message_id = await send_message_get_id(chat_id, text, parse_mode=parse_mode)
     if message_id is None:
         return
-    scheduler.add_job(
-        _delete_scheduled_message,
-        trigger="date",
-        run_date=datetime.now(TIMEZONE) + timedelta(minutes=TEMP_MESSAGE_DELETE_DELAY_MINUTES),
-        args=[chat_id, message_id],
-        id=f"delete_temp_msg_{message_id}",
-        replace_existing=True,
-    )
+    schedule_message_deletion(chat_id, message_id)
 
 
 async def start_scheduler() -> None:

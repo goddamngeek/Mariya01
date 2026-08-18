@@ -16,7 +16,7 @@ from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
 from app.people import USER_NAMES
 from app.prompts import ezhednevnik_step_text
-from app.scheduler import scheduler, send_temporary_message, start_scheduler
+from app.scheduler import scheduler, schedule_message_deletion, send_temporary_message, start_scheduler
 from app.service import process_incoming_message
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
@@ -83,6 +83,7 @@ async def telegram_webhook(request: Request):
     text = message.get("text") if message else None
     chat = message.get("chat") if message else None
     chat_id = chat.get("id") if chat else None
+    message_id = message.get("message_id") if message else None
 
     if text is None or chat_id is None:
         return {"ok": True}
@@ -98,6 +99,8 @@ async def telegram_webhook(request: Request):
         # A guaranteed-reliable direct trigger — reads straight from
         # Trilium (see app/trilium_client.py), no LLM involved at all.
         await send_kanban_status(chat_id)
+        if message_id is not None:
+            schedule_message_deletion(chat_id, message_id)
         return {"ok": True}
 
     if text.strip() == "/week":
@@ -107,6 +110,8 @@ async def telegram_webhook(request: Request):
         except Exception:
             summary = TRILIUM_UNAVAILABLE_TEXT
         await send_temporary_message(chat_id, summary, parse_mode="HTML")
+        if message_id is not None:
+            schedule_message_deletion(chat_id, message_id)
         return {"ok": True}
 
     if text.strip() == "/checkin":
@@ -126,6 +131,8 @@ async def telegram_webhook(request: Request):
 
     if text.strip() == "/links":
         await send_temporary_message(chat_id, LINKS_TEXT)
+        if message_id is not None:
+            schedule_message_deletion(chat_id, message_id)
         return {"ok": True}
 
     # Telegram's native "reply" feature attaches the full replied-to message

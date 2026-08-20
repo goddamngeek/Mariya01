@@ -25,7 +25,13 @@ from app.scheduler import (
     send_temporary_message,
     start_scheduler,
 )
-from app.service import handle_message_edit, process_incoming_message, start_quote_flow
+from app.service import (
+    handle_book_details_reply,
+    handle_message_edit,
+    process_incoming_message,
+    start_book_add_flow,
+    start_quote_flow,
+)
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
 from app.trilium_client import get_week_summary
@@ -43,11 +49,13 @@ HELP_TEXT = (
     "/links — ссылки на Odysseus и Trilium\n"
     "/clear — очистить историю чата\n"
     "/quote — добавить интересный момент из книги\n"
+    "/addbook — добавить новую книгу\n"
     "\n"
     "Просто напиши мне:\n"
     "— напомнить о чём-то себе или передать другому человеку\n"
     "— зафиксировать мысль или заметку (траты уходят в финансы отдельно)\n"
-    "— добавить книгу, отзыв на книгу, китайское слово, продажу или задачу в канбан\n"
+    "— добавь книгу / хочу почитать X — спрошу название и автора\n"
+    "— отзыв на книгу, китайское слово, продажу или задачу в канбан\n"
     "— позанималась йогой / китайским / трейдингом — спрошу, как прошло, и запишу\n"
     "— цитата — добавлю интересный момент из книги, которую сейчас читаешь"
 )
@@ -177,6 +185,10 @@ async def telegram_webhook(request: Request):
         await start_quote_flow(chat_id)
         return {"ok": True}
 
+    if text.strip() == "/addbook":
+        await start_book_add_flow(chat_id, text)
+        return {"ok": True}
+
     if text.strip() == "/help":
         await send_message(chat_id, HELP_TEXT)
         return {"ok": True}
@@ -193,6 +205,19 @@ async def telegram_webhook(request: Request):
     # ever reached Odysseus.
     reply_to = message.get("reply_to_message") or {}
     reply_to_text = reply_to.get("text")
+    reply_to_message_id = reply_to.get("message_id")
+
+    # A reply to a /addbook "расскажи подробнее" template — checked before
+    # any other routing, since it's identified purely by which message it
+    # replies to (see handle_book_details_reply) and works no matter how
+    # much time has passed. A no-match (any other reply, or none at all)
+    # just falls through to normal handling below.
+    if reply_to_message_id is not None and message_id is not None:
+        handled = await handle_book_details_reply(
+            chat_id, message_id, reply_to_message_id, text, reply_to_text,
+        )
+        if handled:
+            return {"ok": True}
 
     await process_incoming_message(chat_id, text, reply_to_text=reply_to_text, telegram_message_id=message_id)
 

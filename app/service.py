@@ -12,16 +12,22 @@ from app.db import (
     advance_ezhednevnik_step,
     append_book_quote_prompt_message,
     close_activity_prompt,
+    close_book_add_prompt,
     close_book_quote_prompt,
     close_ezhednevnik_prompt,
     create_activity_prompt,
+    create_book_add_prompt,
     create_book_quote_prompt,
+    finalize_book_add_prompt,
+    get_book_add_prompt_by_template_message,
     get_book_quote_prompt,
     get_incoming_message_by_telegram_id,
     get_open_activity_prompt,
+    get_open_book_add_prompt,
     get_open_book_quote_prompt,
     get_open_ezhednevnik_prompt,
     insert_incoming_message,
+    set_book_add_title,
     set_book_quote_prompt_book,
     update_incoming_message_text,
     utcnow,
@@ -30,8 +36,10 @@ from app.ingest import TRILIUM_UNAVAILABLE_TEXT, handle_active_message
 from app.people import USER_NAMES
 from app.prompts import (
     ACTIVITY_STEPS,
+    BOOK_DETAILS_TEMPLATE,
     EZHEDNEVNIK_STEPS,
     activity_step_text,
+    book_add_step_text,
     ezhednevnik_step_text,
     quote_step_text,
 )
@@ -42,8 +50,10 @@ from app.telegram import (
     send_message_with_buttons,
 )
 from app.trilium_client import (
+    add_book,
     add_book_quote,
     extract_duration,
+    fill_book_details,
     fill_ezhednevnik,
     get_active_reading_books,
     log_activity,
@@ -73,6 +83,13 @@ _ACTIVITY_PROMPT_TIMEOUT = timedelta(hours=3)
 # that's about to be wiped out from under it.
 _QUOTE_PROMPT_TIMEOUT = timedelta(minutes=5)
 
+# Stage 1 only (title/author collection) — same reasoning as
+# _ACTIVITY_PROMPT_TIMEOUT. Once stage 1 finishes and the "расскажи
+# подробнее" template is sent, the row is finalized (see
+# finalize_book_add_prompt) and stays addressable forever via a reply —
+# that part has no timeout at all, per explicit request.
+_BOOK_ADD_PROMPT_TIMEOUT = timedelta(hours=3)
+
 _ACTIVITY_VERBS = (
     "позанимал", "занимал", "делал", "сделал", "провел", "провёл",
     "отработал", "потрейдил", "затрейдил",
@@ -89,6 +106,20 @@ def _looks_like_quote_request(text: str) -> bool:
     ...) — they all share the "цитат" stem, so a plain substring check
     covers every inflection without needing a word list."""
     return "цитат" in text.lower()
+
+
+def _looks_like_book_add(text: str) -> bool:
+    """"добавь книгу ..." / "хочу почитать ..." / "начал читать ..." —
+    ported from the old (now removed) ingest.py heuristic of the same name,
+    just moved here now that adding a book is a deterministic 2-question
+    flow (title, then author) instead of a single narrow LLM extraction.
+    "добавь"/"добавить" need "книг" alongside them (too generic alone —
+    collides with the plain note-request "добавь"), but "хочу почитать X"/
+    "начал читать X" are distinctive enough to stand alone."""
+    lowered = text.lower()
+    if "книг" in lowered and any(kw in lowered for kw in ("добавь", "добавить")):
+        return True
+    return any(kw in lowered for kw in ("хочу почитать", "буду читать", "начал читать", "начала читать"))
 
 
 def _looks_like_activity_log(text: str) -> str | None:
@@ -159,6 +190,25 @@ async def process_incoming_message(
 
     if _looks_like_quote_request(text):
         await start_quote_flow(user_id, text, reply_to_text)
+        return
+
+    # Same shape as activity — stage 1 only (title, then author); once the
+    # book note is created and the "расскажи подробнее" template is sent,
+    # the row is finalized (see finalize_book_add_prompt) and this branch
+    # never sees it again — a later reply to that template is matched
+    # separately in app/main.py's webhook (by reply-to message_id, not
+    # through this open-prompt check at all).
+    open_book_add = await get_open_book_add_prompt(user_id)
+    if open_book_add is not None:
+        if utcnow() - open_book_add["updated_at"] > _BOOK_ADD_PROMPT_TIMEOUT:
+            await close_book_add_prompt(open_book_add["id"])
+            open_book_add = None
+    if open_book_add is not None:
+        await _handle_book_add_reply(user_id, text, reply_to_text, open_book_add)
+        return
+
+    if _looks_like_book_add(text):
+        await start_book_add_flow(user_id, text, reply_to_text)
         return
 
     received_at = utcnow()
@@ -455,5 +505,101 @@ async def handle_message_edit(user_id: int, telegram_message_id: int, new_text: 
         await send_message(
             user_id, f"Не получилось обновить запись (Trilium недоступен): {type(exc).__name__}.",
         )
+
+
+_SKIP_AUTHOR_WORDS = ("нет", "не знаю", "неизвестно", "не помню")
+
+
+async def start_book_add_flow(user_id: int, text: str, reply_to_text: str | None = None) -> None:
+    """Shared by the free-text trigger (_looks_like_book_add above) and the
+    /addbook command (app/main.py)."""
+    message_id = await insert_incoming_message(user_id, text, "book_add_start", reply_to_text)
+    await create_book_add_prompt(user_id)
+    await send_message(user_id, book_add_step_text(0))
+    await ack_incoming_messages([message_id])
+
+
+async def _handle_book_add_reply(
+    user_id: int, text: str, reply_to_text: str | None, prompt,
+) -> None:
+    """step 0 = awaiting title, step 1 = awaiting author (or a skip word
+    like "нет"/"не знаю" — author is optional). Once both are in, creates
+    the book note right away and sends the "расскажи подробнее" template —
+    the row then stays open-ended for a stage-2 reply (see
+    handle_book_details_reply), no further steps here."""
+    step = prompt["step"]
+    kind = f"book_add_{step}"
+    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
+
+    if step == 0:
+        await set_book_add_title(prompt["id"], text.strip())
+        await send_message(user_id, book_add_step_text(1))
+        await ack_incoming_messages([message_id])
+        return
+
+    title = prompt["title"]
+    author = "" if text.strip().lower() in _SKIP_AUTHOR_WORDS else text.strip()
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    try:
+        note_id = await add_book(person_name, title, author)
+        template_message_id = await send_message_get_id(
+            user_id, BOOK_DETAILS_TEMPLATE.format(title=title, author=author),
+        )
+        if template_message_id is not None:
+            await finalize_book_add_prompt(prompt["id"], author, note_id, template_message_id)
+        else:
+            await close_book_add_prompt(prompt["id"])
+    except Exception as exc:
+        print(f"add_book failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(
+            user_id,
+            f"Не получилось добавить книгу (Trilium недоступен): {type(exc).__name__}. "
+            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        )
+    await ack_incoming_messages([message_id])
+
+
+async def handle_book_details_reply(
+    user_id: int, telegram_message_id: int, reply_to_message_id: int,
+    text: str, reply_to_text: str | None,
+) -> bool:
+    """A Telegram reply to a /addbook "расскажи подробнее" template — see
+    app/main.py, checked before any other routing since it works no matter
+    how much time has passed (finalize_book_add_prompt never expires it).
+    Returns False (do nothing further here — let normal routing continue)
+    if this reply doesn't match any book_add_prompts row.
+
+    No header matching — text is just split into paragraphs (blank-line
+    separated), taken by POSITION in the same order as the template
+    (Об Авторе / Аннотация / Жанр / Похожие книги), since the reply always
+    mirrors that same paragraph structure. Each paragraph's own first line
+    is dropped (the echoed-back header) if it has more than one line."""
+    prompt = await get_book_add_prompt_by_template_message(user_id, reply_to_message_id)
+    if prompt is None or prompt["book_note_id"] is None:
+        return False
+
+    message_id = await insert_incoming_message(
+        user_id, text, "book_add_details", reply_to_text, telegram_message_id,
+    )
+
+    raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    paragraphs = []
+    for block in raw_paragraphs:
+        lines = block.split("\n")
+        paragraphs.append("\n".join(lines[1:]).strip() if len(lines) > 1 else lines[0].strip())
+    values = (paragraphs + [None, None, None, None])[:4]
+
+    try:
+        await fill_book_details(prompt["book_note_id"], values)
+        await send_message(user_id, "Спасибо, добавил книгу!")
+    except Exception as exc:
+        print(f"fill_book_details failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(
+            user_id, f"Не получилось записать подробности (Trilium недоступен): {type(exc).__name__}.",
+        )
+    await ack_incoming_messages([message_id])
+    return True
 
 

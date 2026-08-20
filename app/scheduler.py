@@ -11,12 +11,14 @@ from app.db import (
     close_stale_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
+    get_due_book_add_notices,
     get_due_reminders,
     get_due_water_reminders,
     get_open_activity_prompt,
     get_registered_user_ids,
     get_stale_book_quote_prompts,
     has_open_ezhednevnik,
+    mark_book_add_notified,
     mark_water_reminder_sent,
     pop_due_message_deletions,
     pop_logged_messages_except,
@@ -168,6 +170,18 @@ async def release_stale_quote_prompts() -> None:
         await close_book_quote_prompt(row["id"])
 
 
+async def release_due_book_add_notices() -> None:
+    """One-time courtesy notice for a /addbook flow (see app/service.py's
+    start_book_add_flow) — if 5 minutes pass with no reply to the "расскажи
+    подробнее" template, send "Добавил книгу" so the person isn't left
+    wondering whether it went through. Purely a notice: the row itself
+    (and the ability to reply later) is never touched — see
+    finalize_book_add_prompt/get_book_add_prompt_by_template_message."""
+    for row in await get_due_book_add_notices():
+        await send_message(row["user_id"], "Добавил книгу")
+        await mark_book_add_notified(row["id"])
+
+
 async def release_due_water_reminders() -> None:
     for row in await get_due_water_reminders():
         text = random.choice(WATER_REMINDER_TEXTS)
@@ -274,6 +288,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_stale_quote_prompts",
+    )
+    scheduler.add_job(
+        release_due_book_add_notices,
+        trigger="interval",
+        seconds=60,
+        id="release_due_book_add_notices",
     )
     scheduler.start()
     await ensure_today_water_reminders()

@@ -360,11 +360,19 @@ async def add_chinese_word(
                 await _create_attribute(client, note_id, "label", name, value)
 
 
-async def add_book(person_name: str, title: str, author: str = "") -> None:
+async def add_book(person_name: str, title: str, author: str = "") -> str:
     """Add a new book note under КНИГИ, templated from _ШАБЛОН_КНИГА via a
     ~template RELATION (not a #template label — a relation's value is a
     real noteId, a label's is plain text; confirmed live which one the
-    actual template uses)."""
+    actual template uses) — that relation gives attribute inheritance
+    (promoted attributes like readingStart/readingEnd render correctly),
+    but NOT the template's body content: that's a Trilium client-side
+    "duplicate on create" behavior that only fires from the desktop/web UI,
+    never from the ETAPI create-note call (confirmed live — a note created
+    via ETAPI with just the relation set came back with empty content, no
+    "Об Авторе"/"Аннотация"/"Жанр"/"Похожие книги" sections at all). So the
+    template's real content is fetched and copied in explicitly here.
+    Returns the new note's id, for fill_book_details to target later."""
     if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
         raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
 
@@ -375,9 +383,11 @@ async def add_book(person_name: str, title: str, author: str = "") -> None:
         if knigi_id is None or template_id is None:
             raise TriliumNoteNotFoundError("Could not find КНИГИ or _ШАБЛОН_КНИГА.")
 
+        template_content = await _get_content(client, template_id)
+
         create_resp = await client.post(
             f"{TRILIUM_URL}/etapi/create-note",
-            json={"parentNoteId": knigi_id, "title": title, "type": "text", "content": ""},
+            json={"parentNoteId": knigi_id, "title": title, "type": "text", "content": template_content},
         )
         create_resp.raise_for_status()
         note_id = create_resp.json()["note"]["noteId"]
@@ -389,6 +399,45 @@ async def add_book(person_name: str, title: str, author: str = "") -> None:
             client, note_id, "label", "readingStart", datetime.now(TIMEZONE).strftime("%Y-%m-%d"),
         )
         await _create_attribute(client, note_id, "label", "owner", person_name)
+        return note_id
+
+
+# Order matches the /addbook template message sent to the person (see
+# app/prompts.py's BOOK_DETAILS_TEMPLATE) — their reply's paragraphs are
+# taken by POSITION, not by matching these header strings back out of the
+# reply (per explicit request, since the reply is always paragraph-per-
+# section in this same order). Only used here to locate each section
+# INSIDE the book note's own content, which does still use these exact
+# <h2> headers (from _ШАБЛОН_КНИГА).
+BOOK_DETAIL_HEADERS = ("Об Авторе", "Аннотация", "Жанр", "Похожие книги")
+
+
+async def fill_book_details(note_id: str, values: list[Optional[str]]) -> None:
+    """Fills in whichever of the 4 template sections have a value (None =
+    skip, leave whatever placeholder is already there) — values is
+    positional, same order as BOOK_DETAIL_HEADERS. Each section is replaced
+    wholesale, from its <h2> up to the next <h2> (or end of note), with a
+    single normalized <h2>+<p> block — this cleanly overwrites whatever
+    placeholder was there (an empty "&nbsp;" paragraph, the "scifi / drama /
+    romance" example, or the "…" bullet list), regardless of its original
+    markup shape."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        content = await _get_content(client, note_id)
+        for header, value in zip(BOOK_DETAIL_HEADERS, values):
+            if not value:
+                continue
+            pattern = re.compile(
+                r"(<h2>" + re.escape(header) + r"</h2>).*?(?=<h2>|$)", re.DOTALL,
+            )
+            replacement = r"\1" + f"<p>{html.escape(value)}</p>"
+            content, count = pattern.subn(replacement, content, count=1)
+            if count == 0:
+                print(f"fill_book_details: header '{header}' not found in note {note_id}, skipped", flush=True)
+        await _put_content(client, note_id, content)
 
 
 async def add_book_review(book_title: str, review_text: str) -> None:

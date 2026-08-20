@@ -107,6 +107,32 @@ CREATE TABLE IF NOT EXISTS book_quote_prompts (
     message_ids INTEGER[] NOT NULL DEFAULT '{}'
 );
 
+-- /addbook flow (title, then author — see app/service.py) — stage 1 is the
+-- normal is_open/step shape, closed (is_open=FALSE) once the book note is
+-- created and the "расскажи подробнее" template is sent. Unlike every other
+-- prompt table, the row is never deleted or made unreachable after that:
+-- template_message_id stays valid forever so a reply to that message —
+-- Telegram's native reply, matched by its message_id — can be found and
+-- applied at any later time (stage 2, filling in author/annotation/genre/
+-- similar-books), even days later, per explicit request. template_sent_at +
+-- details_notified only drive the one-time "Добавил книгу" courtesy
+-- message if nothing comes back within 5 minutes — they don't gate or
+-- expire the reply itself.
+CREATE TABLE IF NOT EXISTS book_add_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    step INTEGER NOT NULL DEFAULT 0,
+    title TEXT,
+    author TEXT,
+    book_note_id TEXT,
+    template_message_id BIGINT,
+    template_sent_at TIMESTAMPTZ,
+    details_notified BOOLEAN NOT NULL DEFAULT FALSE
+);
+
 -- Every message sent to/from a chat, purely so the nightly cleanup job
 -- (scheduler.py's clear_chat_history) knows which Telegram message_ids to
 -- delete. Telegram gives bots no "list messages in this chat" API — the
@@ -479,6 +505,80 @@ async def get_stale_book_quote_prompts() -> list[asyncpg.Record]:
 async def close_book_quote_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE book_quote_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+# --- /addbook -----------------------------------------------------------
+
+async def get_open_book_add_prompt(user_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM book_add_prompts WHERE user_id = $1 AND is_open = TRUE "
+        "ORDER BY sent_at DESC LIMIT 1",
+        user_id,
+    )
+
+
+async def create_book_add_prompt(user_id: int) -> int:
+    pool = await get_pool()
+    now = utcnow()
+    return await pool.fetchval(
+        "INSERT INTO book_add_prompts (user_id, sent_at, updated_at, is_open) "
+        "VALUES ($1, $2, $2, TRUE) RETURNING id",
+        user_id, now,
+    )
+
+
+async def set_book_add_title(prompt_id: int, title: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_add_prompts SET step = 1, title = $1, updated_at = $2 WHERE id = $3",
+        title, utcnow(), prompt_id,
+    )
+
+
+async def close_book_add_prompt(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE book_add_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+async def finalize_book_add_prompt(
+    prompt_id: int, author: str, book_note_id: str, template_message_id: int,
+) -> None:
+    """Marks stage 1 done (book note created, template sent) — but unlike
+    close_book_add_prompt, this keeps the row fully addressable forever via
+    template_message_id, for a stage-2 reply to find whenever it comes."""
+    pool = await get_pool()
+    now = utcnow()
+    await pool.execute(
+        "UPDATE book_add_prompts SET is_open = FALSE, author = $1, book_note_id = $2, "
+        "template_message_id = $3, template_sent_at = $4, updated_at = $4 WHERE id = $5",
+        author, book_note_id, template_message_id, now, prompt_id,
+    )
+
+
+async def get_book_add_prompt_by_template_message(user_id: int, template_message_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM book_add_prompts WHERE user_id = $1 AND template_message_id = $2",
+        user_id, template_message_id,
+    )
+
+
+async def get_due_book_add_notices() -> list[asyncpg.Record]:
+    """Rows whose template was sent 5+ minutes ago with no reply yet and no
+    courtesy notice sent — see scheduler.py's release_due_book_add_notices.
+    Does NOT close/expire anything — a reply is still accepted afterward."""
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM book_add_prompts WHERE template_message_id IS NOT NULL "
+        "AND details_notified = FALSE AND template_sent_at < $1",
+        utcnow() - timedelta(minutes=5),
+    )
+
+
+async def mark_book_add_notified(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE book_add_prompts SET details_notified = TRUE WHERE id = $1", prompt_id)
 
 
 # --- chat message log (nightly cleanup) -------------------------------------

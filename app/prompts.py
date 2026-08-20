@@ -19,7 +19,6 @@ INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло �
   * Если вопрос требует знания о прошлом — сначала вызови trilium_notes с action="search", person_name="__NAME__" (короткие ключевые слова, поиск ищет точные слова — при неудаче попробуй другой запрос). Если вопрос общий и явно не про журнал и не про напоминание — отвечай сразу. Если релевантного в журнале нет — честно скажи, что не знаешь, и предложи обсудить отдельно.
   * Если человек спрашивает про канбан-доску задач ("что в канбане?", "что в работе?", "покажи бэклог") — вызови тул kanban_status (без параметров — по умолчанию читает доску задач; board_name="ПРОДАЖИ // SALES" для доски продаж). Это чтение, ничего не придумывай от себя — отвечай строго тем, что вернул тул.
   * Если человек просит добавить китайское слово/иероглиф для Остапа ("добавь иероглиф 你好, пиньинь ni hao, тон 3, значение привет") — вызови add_chinese_word с person_name="__NAME__", hieroglyph, pinyin, tone, translation. status можно не указывать (по умолчанию "новое").
-  * Если человек просит добавить книгу в список ("добавь книгу X", "хочу почитать X") — вызови add_book с person_name="__NAME__", title, и author если упомянут.
   * Если человек делится отзывом/мнением о книге ("не понравилась книга X", "отзыв на X: ...") — вызови add_book_review с book_title (точное название — если не уверен, сначала trilium_notes search) и review_text (мнение своими словами человека, без искажения сути).
   * Если человек сообщает о продаже ("продал куртку за 3000") — вызови log_sale с person_name="__NAME__", item (что продано), status (цена/дата, как есть в сообщении, можно опустить если не названо).
 
@@ -35,9 +34,6 @@ INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло �
 ```
 ```add_chinese_word
 {"person_name": "__NAME__", "hieroglyph": "...", "pinyin": "...", "tone": "...", "translation": "...", "status": "новое"}
-```
-```add_book
-{"person_name": "__NAME__", "title": "...", "author": "..."}
 ```
 ```add_book_review
 {"book_title": "...", "review_text": "..."}
@@ -141,3 +137,27 @@ QUOTE_STEPS = ["Какой момент понравился?", "Что понр
 
 def quote_step_text(step: int) -> str:
     return QUOTE_STEPS[step]
+
+
+# /addbook flow (or the free-text triggers in app/service.py) — two plain
+# text steps (title, then author), then the note gets created and this
+# template is sent as a follow-up. Its 4 lines (Об Авторе/Аннотация/Жанр/
+# Похожие книги) match, in order, the 4 sections already present in every
+# book note (from _ШАБЛОН_КНИГА — see app/trilium_client.BOOK_DETAIL_HEADERS)
+# — a reply to THIS message (Telegram's native reply, matched by its
+# message_id) is taken by paragraph POSITION, not by re-matching these
+# header strings out of the reply, per explicit request.
+BOOK_ADD_STEPS = ["Какое название книги?", "Кто автор книги?"]
+
+
+def book_add_step_text(step: int) -> str:
+    return BOOK_ADD_STEPS[step]
+
+
+BOOK_DETAILS_TEMPLATE = (
+    "«{title}» {author}. Расскажи мне пожалуйста подробнее:\n"
+    "Об Авторе\n"
+    "Аннотация\n"
+    "Жанр\n"
+    "Похожие книги"
+)

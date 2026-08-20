@@ -1,16 +1,15 @@
 """Handles every real (ACTIVE) message the bot receives — see
 handle_active_message(), called straight from app/service.py as soon as the
 webhook receives it. Kanban reads, relay/reminders, Chinese words, book
-add/review, and sales are all fully deterministic (or a single narrow LLM
+review, and sales are all fully deterministic (or a single narrow LLM
 extraction at most — see app/odysseus_client.extract_fields_via_llm) and
 answered directly, never through Odysseus's agent loop. Only general
 journal notes/finance logging and open-ended Q&A still go through Odysseus,
 since those genuinely need search + reasoning over existing entries.
 
-Ежедневник (daily journal check-in) replies are handled entirely in
-app/service.py instead — deterministically, no LLM involved at all — since
-EZHEDNEVNIK_STEPS in app/prompts.py asks one question at a time, so every
-reply maps to exactly one known field.
+Ежедневник (daily journal check-in), activity tracking, and /addbook are
+all handled entirely in app/service.py instead — deterministically, no LLM
+involved at all, since each is a fixed one-question-at-a-time sequence.
 """
 
 import re
@@ -40,7 +39,6 @@ from app.telegram import send_message
 from app.trilium_client import (
     KANBAN_COLUMNS,
     TriliumNoteNotFoundError,
-    add_book,
     add_book_review,
     add_chinese_word,
     add_kanban_card,
@@ -182,30 +180,6 @@ async def _handle_chinese_word(message_id: int, user_id: int, text: str) -> None
         await send_message(user_id, f"Добавил «{fields['hieroglyph']}» в словарь.")
     except Exception:
         print(f"_handle_chinese_word failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
-    await ack_incoming_messages([message_id])
-
-
-async def _handle_book_add(message_id: int, user_id: int, text: str) -> None:
-    """"добавь книгу X" / "хочу почитать X"."""
-    person_name = USER_NAMES.get(user_id, str(user_id))
-    fields = await extract_fields_via_llm(
-        text,
-        "Пользователь добавляет книгу, которую собирается читать. Извлеки "
-        "из его сообщения поля JSON: title (название книги), author (автор, "
-        "если назван). title обязателен.",
-    )
-    if not fields or not fields.get("title"):
-        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
-        await ack_incoming_messages([message_id])
-        return
-
-    try:
-        await add_book(person_name, fields["title"], fields.get("author", ""))
-        await send_message(user_id, f"Добавил книгу «{fields['title']}».")
-    except Exception:
-        print(f"_handle_book_add failed for user={user_id}:", flush=True)
         traceback.print_exc()
         await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
     await ack_incoming_messages([message_id])
@@ -376,25 +350,14 @@ def _looks_like_chinese_word(text: str) -> bool:
 
 
 def _looks_like_book_review(text: str) -> bool:
-    """"отзыв на книгу ..." / "мне не понравилась книга ..." — checked
-    BEFORE _looks_like_book_add since both share the "книг" context word;
-    review-specific keywords win the ambiguity."""
+    """"отзыв на книгу ..." / "мне не понравилась книга ..." — review-
+    specific keywords, so it doesn't collide with app/service.py's
+    "добавь книгу"/"хочу почитать" trigger for /addbook (checked earlier,
+    before this ever reaches handle_active_message)."""
     lowered = text.lower()
     return "книг" in lowered and any(
         kw in lowered for kw in ("отзыв", "ревью", "понравилась", "не понравилась", "мнение")
     )
-
-
-def _looks_like_book_add(text: str) -> bool:
-    """"добавь книгу ..." / "хочу почитать ..." / "начал читать ..." —
-    adding a new book note under КНИГИ. "добавь"/"добавить" need "книг"
-    alongside them (too generic alone — collides with the plain note-request
-    "добавь"), but "хочу почитать X"/"начал читать X" are distinctive enough
-    to stand alone — a real title usually won't itself contain "книг"."""
-    lowered = text.lower()
-    if "книг" in lowered and any(kw in lowered for kw in ("добавь", "добавить")):
-        return True
-    return any(kw in lowered for kw in ("хочу почитать", "буду читать", "начал читать", "начала читать"))
 
 
 _SALE_KEYWORDS = ("продал", "продала", "продажа", "выручил", "выручила")
@@ -498,9 +461,6 @@ async def handle_active_message(
             return
         if _looks_like_book_review(text):
             await _handle_book_review(message_id, user_id, text)
-            return
-        if _looks_like_book_add(text):
-            await _handle_book_add(message_id, user_id, text)
             return
         if _looks_like_sale(text):
             await _handle_sale(message_id, user_id, text)

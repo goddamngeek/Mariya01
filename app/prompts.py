@@ -131,3 +131,13 @@ ACTIVITY_STEPS = {
 def activity_step_text(activity: str, step: int) -> str:
     _kind, text, _field = ACTIVITY_STEPS[activity][step]
     return text
+
+
+# Book "interesting moment" flow (/quote or the word "цитата") — book choice
+# itself is a button (see app/callbacks.py), these two are the text steps
+# that follow it: send the quote, then say what you liked about it.
+QUOTE_STEPS = ["Какой момент понравился?", "Что понравилось в этом моменте?"]
+
+
+def quote_step_text(step: int) -> str:
+    return QUOTE_STEPS[step]

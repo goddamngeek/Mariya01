@@ -25,7 +25,7 @@ from app.scheduler import (
     send_temporary_message,
     start_scheduler,
 )
-from app.service import process_incoming_message
+from app.service import process_incoming_message, start_quote_flow
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
 from app.trilium_client import get_week_summary
@@ -42,12 +42,14 @@ HELP_TEXT = (
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
     "/links — ссылки на Odysseus и Trilium\n"
     "/clear — очистить историю чата\n"
+    "/quote — добавить интересный момент из книги\n"
     "\n"
     "Просто напиши мне:\n"
     "— напомнить о чём-то себе или передать другому человеку\n"
     "— зафиксировать мысль или заметку (траты уходят в финансы отдельно)\n"
     "— добавить книгу, отзыв на книгу, китайское слово, продажу или задачу в канбан\n"
-    "— позанималась йогой / китайским / трейдингом — спрошу, как прошло, и запишу"
+    "— позанималась йогой / китайским / трейдингом — спрошу, как прошло, и запишу\n"
+    "— цитата — добавлю интересный момент из книги, которую сейчас читаешь"
 )
 
 
@@ -155,6 +157,10 @@ async def telegram_webhook(request: Request):
             await send_temporary_message(chat_id, "Есть открытый вопрос — почищу чат, когда ответишь на него.")
         else:
             await send_temporary_message(chat_id, "Чат очищен.")
+        return {"ok": True}
+
+    if text.strip() == "/quote":
+        await start_quote_flow(chat_id)
         return {"ok": True}
 
     if text.strip() == "/help":

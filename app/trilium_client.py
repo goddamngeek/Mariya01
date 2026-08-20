@@ -411,6 +411,54 @@ async def add_book_review(book_title: str, review_text: str) -> None:
         await _put_content(client, note_id, existing + review_html)
 
 
+async def get_active_reading_books() -> list[dict]:
+    """Books currently being read — child notes of КНИГИ (see add_book) that
+    have a readingStart label but no readingEnd one yet. Same
+    fetch-every-child-then-inspect-its-labels approach as read_kanban_status,
+    since Trilium's ETAPI has no "search by missing label" filter."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        knigi_id = await _find_note_id(client, "КНИГИ")
+        if knigi_id is None:
+            raise TriliumNoteNotFoundError("Could not find the КНИГИ note.")
+
+        knigi_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{knigi_id}")
+        knigi_resp.raise_for_status()
+        child_ids = knigi_resp.json().get("childNoteIds") or []
+
+        books = []
+        for child_id in child_ids:
+            child_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{child_id}")
+            child_resp.raise_for_status()
+            child = child_resp.json()
+            labels = {a["name"] for a in child.get("attributes", []) if a.get("type") == "label"}
+            if "readingStart" in labels and "readingEnd" not in labels:
+                books.append({"note_id": child_id, "title": child.get("title") or "(без названия)"})
+        return books
+
+
+async def add_book_quote(note_id: str, quote_text: str, impression: str) -> None:
+    """Append one 'interesting moment' entry straight into the book's own
+    note content (not a separate child note, per explicit request) — a
+    divider, then the quote verbatim wrapped in quotation marks, then the
+    person's own answer about what they liked about it."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        existing = await _get_content(client, note_id)
+        entry_html = (
+            "<hr>"
+            f"<p>«{html.escape(quote_text)}»</p>"
+            f"<p>{html.escape(impression)}</p>"
+        )
+        await _put_content(client, note_id, existing + entry_html)
+
+
 async def get_week_summary(person_name: str) -> str:
     """Aggregate the current CALENDAR week (Monday through today — future
     days in the same week obviously have no data yet) from a person's own

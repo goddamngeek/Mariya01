@@ -81,6 +81,25 @@ CREATE TABLE IF NOT EXISTS activity_prompts (
     collected JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- User-initiated "add an interesting book moment" flow (/quote or the word
+-- "цитата") — same one-question-at-a-time shape as activity_prompts, but
+-- with an extra button-driven step 0 (pick which book, from the notes
+-- under КНИГИ that have readingStart set and no readingEnd) before the two
+-- text steps (quote, then impression). collected holds {"candidates": [...]}
+-- while step 0 is still open (so the callback handler can resolve a button
+-- press back to a note_id/title without re-querying Trilium), then the
+-- quote/impression answers once step advances past 0.
+CREATE TABLE IF NOT EXISTS book_quote_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    step INTEGER NOT NULL DEFAULT 0,
+    book_note_id TEXT,
+    book_title TEXT,
+    collected JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
 -- Every message sent to/from a chat, purely so the nightly cleanup job
 -- (scheduler.py's clear_chat_history) knows which Telegram message_ids to
 -- delete. Telegram gives bots no "list messages in this chat" API — the
@@ -348,6 +367,52 @@ async def advance_activity_prompt_step(prompt_id: int, step: int, collected: dic
 async def close_activity_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE activity_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+# --- book quotes ("interesting moments") -------------------------------------
+
+async def get_open_book_quote_prompt(user_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM book_quote_prompts WHERE user_id = $1 AND is_open = TRUE "
+        "ORDER BY sent_at DESC LIMIT 1",
+        user_id,
+    )
+
+
+async def get_book_quote_prompt(prompt_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM book_quote_prompts WHERE id = $1", prompt_id)
+
+
+async def create_book_quote_prompt(user_id: int, candidates: list[dict]) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "INSERT INTO book_quote_prompts (user_id, sent_at, is_open, collected) "
+        "VALUES ($1, $2, TRUE, $3::jsonb) RETURNING id",
+        user_id, utcnow(), json.dumps({"candidates": candidates}),
+    )
+
+
+async def set_book_quote_prompt_book(prompt_id: int, note_id: str, title: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_quote_prompts SET step = 1, book_note_id = $1, book_title = $2 WHERE id = $3",
+        note_id, title, prompt_id,
+    )
+
+
+async def advance_book_quote_prompt_step(prompt_id: int, step: int, collected: dict) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_quote_prompts SET step = $1, collected = $2::jsonb WHERE id = $3",
+        step, json.dumps(collected), prompt_id,
+    )
+
+
+async def close_book_quote_prompt(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE book_quote_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
 
 
 # --- chat message log (nightly cleanup) -------------------------------------

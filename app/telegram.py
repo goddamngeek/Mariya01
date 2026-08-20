@@ -68,6 +68,29 @@ async def send_message_get_id(chat_id: int | str, text: str, parse_mode: str | N
         return None
 
 
+async def send_message_with_buttons(
+    chat_id: int | str, text: str, buttons: list[tuple[str, str]],
+) -> int | None:
+    """Send a message with an inline keyboard, one button per row —
+    buttons is [(label, callback_data), ...]. Returns the sent message_id
+    (or None on failure), same as send_message_get_id."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": {"inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons]},
+    }
+    try:
+        resp = await get_client().post(url, json=payload)
+        resp.raise_for_status()
+        message_id = resp.json()["result"]["message_id"]
+        await _log_sent(chat_id, message_id)
+        return message_id
+    except httpx.HTTPError as exc:
+        print(f"telegram sendMessage (with buttons) failed: {exc}", flush=True)
+        return None
+
+
 async def set_bot_commands() -> None:
     """Registers commands in Telegram's own native bot command menu (the "/"
     menu button next to the message input, built into every Telegram chat
@@ -84,6 +107,7 @@ async def set_bot_commands() -> None:
         {"command": "checkin", "description": "Повторить текущий вопрос ежедневника"},
         {"command": "links", "description": "Ссылки на Odysseus и Trilium"},
         {"command": "clear", "description": "Очистить историю чата"},
+        {"command": "quote", "description": "Добавить интересный момент из книги"},
         {"command": "help", "description": "Что умеет бот"},
     ]
     try:
@@ -106,10 +130,13 @@ async def delete_message(chat_id: int | str, message_id: int) -> bool:
         return False
 
 
-async def answer_callback_query(callback_query_id: str) -> bool:
+async def answer_callback_query(callback_query_id: str, text: str | None = None) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
     try:
-        resp = await get_client().post(url, json={"callback_query_id": callback_query_id})
+        resp = await get_client().post(url, json=payload)
         resp.raise_for_status()
         return True
     except httpx.HTTPError as exc:

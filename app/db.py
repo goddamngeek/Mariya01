@@ -107,6 +107,25 @@ CREATE TABLE IF NOT EXISTS book_quote_prompts (
     message_ids INTEGER[] NOT NULL DEFAULT '{}'
 );
 
+-- "Я дочитал" flow (the button on /reading's book description — see
+-- app/service.py's handle_book_finished) — two steps, rating then free-text
+-- review, which together become a review note cloned into both the book
+-- and ОТЗЫВЫ НА КНИГИ. readingEnd is stamped on the book immediately at
+-- button press, before this row is even created, so an abandoned dialogue
+-- still leaves the book correctly marked as finished.
+CREATE TABLE IF NOT EXISTS book_review_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    book_note_id TEXT NOT NULL,
+    book_title TEXT NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    step INTEGER NOT NULL DEFAULT 0,
+    rating INTEGER,
+    message_ids INTEGER[] NOT NULL DEFAULT '{}'
+);
+
 -- /addbook flow (title, then author — see app/service.py) — stage 1 is the
 -- normal is_open/step shape, closed (is_open=FALSE) once the book note is
 -- created and the "расскажи подробнее" template is sent. Unlike every other
@@ -620,6 +639,63 @@ async def append_book_add_prompt_message(prompt_id: int, message_id: int) -> Non
     await pool.execute(
         "UPDATE book_add_prompts SET message_ids = array_append(message_ids, $1) WHERE id = $2",
         message_id, prompt_id,
+    )
+
+
+# --- book reviews ("я дочитал") ---------------------------------------------
+
+async def get_open_book_review_prompt(user_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM book_review_prompts WHERE user_id = $1 AND is_open = TRUE "
+        "ORDER BY sent_at DESC LIMIT 1",
+        user_id,
+    )
+
+
+async def create_book_review_prompt(user_id: int, book_note_id: str, book_title: str) -> int:
+    pool = await get_pool()
+    now = utcnow()
+    return await pool.fetchval(
+        "INSERT INTO book_review_prompts (user_id, book_note_id, book_title, sent_at, updated_at, is_open) "
+        "VALUES ($1, $2, $3, $4, $4, TRUE) RETURNING id",
+        user_id, book_note_id, book_title, now,
+    )
+
+
+async def set_book_review_rating(prompt_id: int, rating: int) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_review_prompts SET step = 1, rating = $1, updated_at = $2 WHERE id = $3",
+        rating, utcnow(), prompt_id,
+    )
+
+
+async def close_book_review_prompt(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE book_review_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+async def append_book_review_prompt_message(prompt_id: int, message_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_review_prompts SET message_ids = array_append(message_ids, $1) WHERE id = $2",
+        message_id, prompt_id,
+    )
+
+
+async def get_book_review_prompt(prompt_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM book_review_prompts WHERE id = $1", prompt_id)
+
+
+async def get_stale_book_review_prompts() -> list[asyncpg.Record]:
+    """Same 5-minute staleness rule as book_quote_prompts — see
+    scheduler.py's release_stale_book_review_prompts."""
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM book_review_prompts WHERE is_open = TRUE AND updated_at < $1",
+        utcnow() - QUOTE_PROMPT_STALE_AFTER,
     )
 
 

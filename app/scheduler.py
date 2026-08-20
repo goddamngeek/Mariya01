@@ -9,6 +9,7 @@ from app.db import (
     claim_reminder,
     close_book_add_prompt,
     close_book_quote_prompt,
+    close_book_review_prompt,
     close_stale_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
@@ -18,6 +19,7 @@ from app.db import (
     get_open_activity_prompt,
     get_registered_user_ids,
     get_stale_book_quote_prompts,
+    get_stale_book_review_prompts,
     has_open_ezhednevnik,
     mark_book_add_notified,
     mark_water_reminder_sent,
@@ -171,6 +173,18 @@ async def release_stale_quote_prompts() -> None:
         await close_book_quote_prompt(row["id"])
 
 
+async def release_stale_book_review_prompts() -> None:
+    """Same cleanup as release_stale_quote_prompts, for an abandoned
+    "Я дочитал" rating/review dialogue. Note the book itself stays marked
+    finished — readingEnd is stamped at button press, well before this
+    (see app/service.py's handle_book_finished); only the unfinished
+    review conversation is cleared away."""
+    for row in await get_stale_book_review_prompts():
+        for message_id in row["message_ids"]:
+            await delete_message(row["user_id"], message_id)
+        await close_book_review_prompt(row["id"])
+
+
 async def release_due_book_add_notices() -> None:
     """Closes out the "normal dialogue" window for a /addbook flow (see
     app/service.py's start_book_add_flow) — 5 minutes with no answer to the
@@ -294,6 +308,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_stale_quote_prompts",
+    )
+    scheduler.add_job(
+        release_stale_book_review_prompts,
+        trigger="interval",
+        seconds=60,
+        id="release_stale_book_review_prompts",
     )
     scheduler.add_job(
         release_due_book_add_notices,

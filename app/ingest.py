@@ -1,15 +1,16 @@
 """Handles every real (ACTIVE) message the bot receives — see
 handle_active_message(), called straight from app/service.py as soon as the
-webhook receives it. Kanban reads, relay/reminders, Chinese words, book
-review, and sales are all fully deterministic (or a single narrow LLM
-extraction at most — see app/odysseus_client.extract_fields_via_llm) and
-answered directly, never through Odysseus's agent loop. Only general
-journal notes/finance logging and open-ended Q&A still go through Odysseus,
-since those genuinely need search + reasoning over existing entries.
+webhook receives it. Kanban reads, relay/reminders, Chinese words and
+sales are all fully deterministic (or a single narrow LLM extraction at
+most — see app/odysseus_client.extract_fields_via_llm) and answered
+directly, never through Odysseus's agent loop. Only general journal
+notes/finance logging and open-ended Q&A still go through Odysseus, since
+those genuinely need search + reasoning over existing entries.
 
-Ежедневник (daily journal check-in), activity tracking, and /addbook are
-all handled entirely in app/service.py instead — deterministically, no LLM
-involved at all, since each is a fixed one-question-at-a-time sequence.
+Ежедневник (daily journal check-in), activity tracking, /addbook and book
+reviews are all handled entirely in app/service.py instead —
+deterministically, no LLM involved at all, since each is a fixed
+one-question-at-a-time sequence.
 """
 
 import re
@@ -39,7 +40,6 @@ from app.telegram import send_message
 from app.trilium_client import (
     KANBAN_COLUMNS,
     TriliumNoteNotFoundError,
-    add_book_review,
     add_chinese_word,
     add_kanban_card,
     log_reminder_to_calendar,
@@ -185,32 +185,6 @@ async def _handle_chinese_word(message_id: int, user_id: int, text: str) -> None
     await ack_incoming_messages([message_id])
 
 
-async def _handle_book_review(message_id: int, user_id: int, text: str) -> None:
-    """"не понравилась книга X, потому что..." — needs an EXACT existing
-    note title match (see app/trilium_client.add_book_review); no search
-    fallback here, matching what the Odysseus tool already required."""
-    fields = await extract_fields_via_llm(
-        text,
-        "Пользователь делится отзывом на книгу. Извлеки из его сообщения "
-        "поля JSON: book_title (точное название книги) и review_text "
-        "(мнение своими словами, без искажения сути). Оба обязательны.",
-    )
-    if not fields or not fields.get("book_title") or not fields.get("review_text"):
-        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
-        await ack_incoming_messages([message_id])
-        return
-
-    try:
-        await add_book_review(fields["book_title"], fields["review_text"])
-        await send_message(user_id, f"Записал отзыв на «{fields['book_title']}».")
-    except TriliumNoteNotFoundError:
-        await send_message(user_id, f"Не нашёл книгу «{fields['book_title']}» — проверь название.")
-    except Exception:
-        print(f"_handle_book_review failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
-    await ack_incoming_messages([message_id])
-
 
 async def _handle_sale(message_id: int, user_id: int, text: str) -> None:
     """"продал куртку за 3000"."""
@@ -324,7 +298,7 @@ _KANBAN_ADD_VERBS = ("добавь", "добавить", "закинь", "зак
 def _looks_like_kanban_add(text: str) -> bool:
     """"добавь в канбан купить молоко" / "закинь задачу..." — checked
     BEFORE _looks_like_kanban_status (both share "канбан"/"бэклог" as
-    context words), same precedence pattern as book review vs. book add.
+    context words), same most-specific-first precedence used throughout.
     "задач" alone (without "канбан" itself) also counts, since "добавь
     задачу X" is a very natural phrasing that never says the board's name."""
     lowered = text.lower()
@@ -347,17 +321,6 @@ def _looks_like_chinese_word(text: str) -> bool:
     if "иероглиф" not in lowered and "китайск" not in lowered:
         return False
     return any(v in lowered for v in _CHINESE_WORD_VERBS)
-
-
-def _looks_like_book_review(text: str) -> bool:
-    """"отзыв на книгу ..." / "мне не понравилась книга ..." — review-
-    specific keywords, so it doesn't collide with app/service.py's
-    "добавь книгу"/"хочу почитать" trigger for /addbook (checked earlier,
-    before this ever reaches handle_active_message)."""
-    lowered = text.lower()
-    return "книг" in lowered and any(
-        kw in lowered for kw in ("отзыв", "ревью", "понравилась", "не понравилась", "мнение")
-    )
 
 
 _SALE_KEYWORDS = ("продал", "продала", "продажа", "выручил", "выручила")
@@ -451,16 +414,12 @@ async def handle_active_message(
             await _handle_relay_or_reminder(message_id, user_id, text)
             return
 
-        # Chinese word / book add / book review / sale all need a model to
-        # read free text, but only ever a single narrow extraction — never
-        # the full agent loop, sessions, or Odysseus's require_tool retry
-        # dance (see extract_fields_via_llm). Order matters: most-specific
-        # first, since e.g. "книг" appears in both review and add phrasing.
+        # Chinese word and sale both need a model to read free text, but
+        # only ever a single narrow extraction — never the full agent loop,
+        # sessions, or Odysseus's require_tool retry dance (see
+        # extract_fields_via_llm).
         if _looks_like_chinese_word(text):
             await _handle_chinese_word(message_id, user_id, text)
-            return
-        if _looks_like_book_review(text):
-            await _handle_book_review(message_id, user_id, text)
             return
         if _looks_like_sale(text):
             await _handle_sale(message_id, user_id, text)

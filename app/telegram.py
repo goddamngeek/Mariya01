@@ -69,7 +69,7 @@ async def send_message_get_id(chat_id: int | str, text: str, parse_mode: str | N
 
 
 async def send_message_with_buttons(
-    chat_id: int | str, text: str, buttons: list[tuple[str, str]],
+    chat_id: int | str, text: str, buttons: list[tuple[str, str]], parse_mode: str | None = None,
 ) -> int | None:
     """Send a message with an inline keyboard, one button per row —
     buttons is [(label, callback_data), ...]. Returns the sent message_id
@@ -80,6 +80,8 @@ async def send_message_with_buttons(
         "text": text,
         "reply_markup": {"inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons]},
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
         resp = await get_client().post(url, json=payload)
         resp.raise_for_status()

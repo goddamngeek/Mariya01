@@ -13,13 +13,16 @@ from app.db import (
     advance_ezhednevnik_step,
     append_book_add_prompt_message,
     append_book_quote_prompt_message,
+    append_book_review_prompt_message,
     close_activity_prompt,
     close_book_add_prompt,
     close_book_quote_prompt,
+    close_book_review_prompt,
     close_ezhednevnik_prompt,
     create_activity_prompt,
     create_book_add_prompt,
     create_book_quote_prompt,
+    create_book_review_prompt,
     finalize_book_add_prompt,
     get_book_add_prompt,
     get_book_add_prompt_by_template_message,
@@ -28,10 +31,12 @@ from app.db import (
     get_open_activity_prompt,
     get_open_book_add_prompt,
     get_open_book_quote_prompt,
+    get_open_book_review_prompt,
     get_open_ezhednevnik_prompt,
     insert_incoming_message,
     set_book_add_title,
     set_book_quote_prompt_book,
+    set_book_review_rating,
     update_incoming_message_text,
     utcnow,
 )
@@ -43,6 +48,7 @@ from app.prompts import (
     EZHEDNEVNIK_STEPS,
     activity_step_text,
     book_add_step_text,
+    book_review_step_text,
     ezhednevnik_step_text,
     quote_step_text,
 )
@@ -57,12 +63,14 @@ from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
     add_book,
     add_book_quote,
+    create_book_review_note,
     extract_duration,
     fill_book_details,
     fill_ezhednevnik,
     get_active_reading_books,
     get_book_details,
     log_activity,
+    set_reading_end,
 )
 
 # asyncio only holds a weak reference to a task with no other referrer, so an
@@ -207,6 +215,18 @@ async def process_incoming_message(
 
     if _looks_like_reading_status(text):
         await show_reading_status(user_id)
+        return
+
+    # "Я дочитал" — started by a button under a book's description (see
+    # handle_book_finished), then two plain steps: rating, then free text.
+    # Same 5-minute staleness rule as /quote.
+    open_review = await get_open_book_review_prompt(user_id)
+    if open_review is not None:
+        if utcnow() - open_review["updated_at"] > _QUOTE_PROMPT_TIMEOUT:
+            await close_book_review_prompt(open_review["id"])
+            open_review = None
+    if open_review is not None:
+        await _handle_book_review_reply(user_id, text, reply_to_text, open_review, telegram_message_id)
         return
 
     # Same shape as activity for steps 0/1 (title, then author). Step 2 is
@@ -720,6 +740,89 @@ async def handle_reading_book_selected(callback_query: dict) -> None:
         f"<b>{html.escape(header)}</b>\n{html.escape(details[header]) if details[header] else '—'}"
         for header in BOOK_DETAIL_HEADERS
     )
-    await send_message(chat_id, sections, parse_mode="HTML")
+    await send_message_with_buttons(
+        chat_id, sections, [("Я дочитал", f"fd:{note_id}")], parse_mode="HTML",
+    )
+
+
+async def handle_book_finished(callback_query: dict) -> None:
+    """"Я дочитал" — the button under a book's description (see
+    handle_reading_book_selected above). Stamps readingEnd on the book
+    IMMEDIATELY, before asking anything (per explicit request), so an
+    abandoned review dialogue still leaves the book correctly marked as
+    finished — it just won't get a review note. Then opens the two-step
+    rating/review flow (_handle_book_review_reply below)."""
+    query_id = callback_query["id"]
+    data = callback_query.get("data") or ""
+    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+    note_id = data[len("fd:"):]
+
+    await answer_callback_query(query_id)
+    try:
+        books = await get_active_reading_books()
+        title = next((b["title"] for b in books if b["note_id"] == note_id), None)
+        if title is None:
+            await send_message(chat_id, "Эта книга уже отмечена как прочитанная.")
+            return
+        await set_reading_end(note_id)
+    except Exception as exc:
+        print(f"set_reading_end failed for user={chat_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(chat_id, f"Не получилось отметить книгу: {type(exc).__name__}.")
+        return
+
+    prompt_id = await create_book_review_prompt(chat_id, note_id, title)
+    sent_id = await send_message_get_id(chat_id, book_review_step_text(0))
+    if sent_id is not None:
+        await append_book_review_prompt_message(prompt_id, sent_id)
+
+
+async def _handle_book_review_reply(
+    user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None = None,
+) -> None:
+    """step 0 = awaiting a 1-10 rating, step 1 = awaiting the free-text
+    review. Out-of-range or non-numeric ratings re-ask rather than being
+    clamped or invented, same as the activity tracker's score step."""
+    step = prompt["step"]
+    message_id = await insert_incoming_message(
+        user_id, text, f"book_review_{step}", reply_to_text, telegram_message_id,
+    )
+    if telegram_message_id is not None:
+        await append_book_review_prompt_message(prompt["id"], telegram_message_id)
+
+    if step == 0:
+        match = _SCORE_RE.search(text)
+        rating = int(match.group()) if match else None
+        if rating is None or not 1 <= rating <= 10:
+            sent_id = await send_message_get_id(
+                user_id, "Нужно число от 1 до 10 — " + book_review_step_text(0),
+            )
+            if sent_id is not None:
+                await append_book_review_prompt_message(prompt["id"], sent_id)
+            await ack_incoming_messages([message_id])
+            return
+        await set_book_review_rating(prompt["id"], rating)
+        sent_id = await send_message_get_id(user_id, book_review_step_text(1))
+        if sent_id is not None:
+            await append_book_review_prompt_message(prompt["id"], sent_id)
+        await ack_incoming_messages([message_id])
+        return
+
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    try:
+        await create_book_review_note(
+            prompt["book_note_id"], prompt["book_title"], prompt["rating"], text.strip(), person_name,
+        )
+        await close_book_review_prompt(prompt["id"])
+        await send_message(user_id, "Спасибо, записал отзыв!")
+    except Exception as exc:
+        print(f"create_book_review_note failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(
+            user_id,
+            f"Не получилось записать отзыв (Trilium недоступен): {type(exc).__name__}. "
+            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        )
+    await ack_incoming_messages([message_id])
 
 

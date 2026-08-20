@@ -481,24 +481,77 @@ async def get_book_details(note_id: str) -> dict[str, str]:
     return details
 
 
-async def add_book_review(book_title: str, review_text: str) -> None:
-    """Append a review to a specific book's own note, under a new 'Ревью'
-    heading — NOT also to a separate summary note, to avoid the same
-    review existing in two places. Requires an exact note-title match;
-    raises TriliumNoteNotFoundError if the title isn't found verbatim."""
+async def set_reading_end(note_id: str, when: Optional[_date] = None) -> None:
+    """Stamp a book as finished. The readingEnd label may already exist with
+    an EMPTY value rather than not exist at all — clearing a promoted date
+    field in Trilium's UI leaves the attribute attached (confirmed live, see
+    get_active_reading_books) — so this PATCHes an existing attribute when
+    there is one and only creates a new one otherwise; blindly creating
+    would leave two competing readingEnd labels on the same note."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    value = (when or datetime.now(TIMEZONE).date()).strftime("%Y-%m-%d")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+        note_resp.raise_for_status()
+        existing = next(
+            (a for a in note_resp.json().get("attributes", [])
+             if a.get("type") == "label" and a.get("name") == "readingEnd"),
+            None,
+        )
+        if existing is not None:
+            patch_resp = await client.patch(
+                f"{TRILIUM_URL}/etapi/attributes/{existing['attributeId']}", json={"value": value},
+            )
+            patch_resp.raise_for_status()
+            return
+        await _create_attribute(client, note_id, "label", "readingEnd", value)
+
+
+async def create_book_review_note(
+    book_note_id: str, book_title: str, rating: int, review_text: str, person_name: str,
+) -> None:
+    """Create one review note for a finished book, living in BOTH places at
+    once: physically created under the book itself, then CLONED into
+    ОТЗЫВЫ НА КНИГИ via a second branch (Trilium's own multi-parent
+    mechanism — one note, two positions in the tree, so edits in either
+    place are the same note, rather than two copies that drift apart).
+
+    Titled "{book} — отзыв" rather than reusing the book's exact title,
+    which would make every exact-title lookup (_find_note_id) ambiguous
+    between the book and its review."""
     if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
         raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
 
     headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
     async with httpx.AsyncClient(timeout=15, headers=headers) as client:
-        note_id = await _find_note_id(client, book_title)
-        if note_id is None:
-            raise TriliumNoteNotFoundError(f"No book note titled '{book_title}' found.")
+        reviews_id = await _find_note_id(client, "ОТЗЫВЫ НА КНИГИ")
+        if reviews_id is None:
+            raise TriliumNoteNotFoundError("Could not find the ОТЗЫВЫ НА КНИГИ note.")
 
-        existing = await _get_content(client, note_id)
-        stamp = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
-        review_html = f"<h2>Ревью ({stamp})</h2><p>{review_text}</p>"
-        await _put_content(client, note_id, existing + review_html)
+        content = f"<p>{int(rating)}/10</p><p>{html.escape(review_text)}</p>"
+        create_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/create-note",
+            json={
+                "parentNoteId": book_note_id,
+                "title": f"{book_title} — отзыв",
+                "type": "text",
+                "content": content,
+            },
+        )
+        create_resp.raise_for_status()
+        note_id = create_resp.json()["note"]["noteId"]
+
+        clone_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/branches",
+            json={"noteId": note_id, "parentNoteId": reviews_id},
+        )
+        clone_resp.raise_for_status()
+
+        await _create_attribute(client, note_id, "label", "rating", str(int(rating)))
+        await _create_attribute(client, note_id, "label", "owner", person_name)
 
 
 async def get_note_content_by_title(title: str) -> str:

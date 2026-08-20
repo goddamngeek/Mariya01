@@ -19,7 +19,6 @@ INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло �
   * Если вопрос требует знания о прошлом — сначала вызови trilium_notes с action="search", person_name="__NAME__" (короткие ключевые слова, поиск ищет точные слова — при неудаче попробуй другой запрос). Если вопрос общий и явно не про журнал и не про напоминание — отвечай сразу. Если релевантного в журнале нет — честно скажи, что не знаешь, и предложи обсудить отдельно.
   * Если человек спрашивает про канбан-доску задач ("что в канбане?", "что в работе?", "покажи бэклог") — вызови тул kanban_status (без параметров — по умолчанию читает доску задач; board_name="ПРОДАЖИ // SALES" для доски продаж). Это чтение, ничего не придумывай от себя — отвечай строго тем, что вернул тул.
   * Если человек просит добавить китайское слово/иероглиф для Остапа ("добавь иероглиф 你好, пиньинь ni hao, тон 3, значение привет") — вызови add_chinese_word с person_name="__NAME__", hieroglyph, pinyin, tone, translation. status можно не указывать (по умолчанию "новое").
-  * Если человек делится отзывом/мнением о книге ("не понравилась книга X", "отзыв на X: ...") — вызови add_book_review с book_title (точное название — если не уверен, сначала trilium_notes search) и review_text (мнение своими словами человека, без искажения сути).
   * Если человек сообщает о продаже ("продал куртку за 3000") — вызови log_sale с person_name="__NAME__", item (что продано), status (цена/дата, как есть в сообщении, можно опустить если не названо).
 
 Формат вызова тула — тег сразу после тройных кавычек, без переноса строки:
@@ -34,9 +33,6 @@ INGEST_PROMPT_TEMPLATE = """Ты — Odysseus. Сообщение пришло �
 ```
 ```add_chinese_word
 {"person_name": "__NAME__", "hieroglyph": "...", "pinyin": "...", "tone": "...", "translation": "...", "status": "новое"}
-```
-```add_book_review
-{"book_title": "...", "review_text": "..."}
 ```
 ```log_sale
 {"person_name": "__NAME__", "item": "...", "status": "..."}
@@ -161,3 +157,14 @@ BOOK_DETAILS_TEMPLATE = (
     "Жанр\n"
     "Похожие книги"
 )
+
+
+# "Я дочитал" flow — the button under a book's description in /reading (see
+# app/service.py's handle_book_finished). Two steps, rating then free text;
+# together they become a review note cloned into both the book itself and
+# ОТЗЫВЫ НА КНИГИ.
+BOOK_REVIEW_STEPS = ["Оцените от 1 до 10?", "Расскажите подробнее?"]
+
+
+def book_review_step_text(step: int) -> str:
+    return BOOK_REVIEW_STEPS[step]

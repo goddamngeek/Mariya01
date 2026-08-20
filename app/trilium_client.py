@@ -440,6 +440,47 @@ async def fill_book_details(note_id: str, values: list[Optional[str]]) -> None:
         await _put_content(client, note_id, content)
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"[ \t]+")
+
+
+def _strip_html(fragment: str) -> str:
+    text = _TAG_RE.sub("\n", fragment)
+    text = html.unescape(text)
+    text = _WHITESPACE_RE.sub(" ", text)
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+
+async def get_book_details(note_id: str) -> dict[str, str]:
+    """Reverse of fill_book_details — reads back whatever's currently under
+    each of the 4 template sections (see BOOK_DETAIL_HEADERS), for showing
+    a book's description on demand (see the "что я сейчас читаю" flow in
+    app/service.py). A section with nothing meaningful filled in (still the
+    original template placeholder, or genuinely empty) comes back as an
+    empty string — the caller decides how to display that."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        content = await _get_content(client, note_id)
+
+    details = {}
+    for header in BOOK_DETAIL_HEADERS:
+        match = re.search(
+            r"<h2>" + re.escape(header) + r"</h2>(.*?)(?=<h2>|$)", content, re.DOTALL,
+        )
+        text = _strip_html(match.group(1)) if match else ""
+        # The un-filled template placeholders aren't real content — never
+        # show "scifi / drama / romance" or "…" back as if they were an
+        # actual answer.
+        if text in ("scifi / drama / romance", "…"):
+            text = ""
+        details[header] = text
+    return details
+
+
 async def add_book_review(book_title: str, review_text: str) -> None:
     """Append a review to a specific book's own note, under a new 'Ревью'
     heading — NOT also to a separate summary note, to avoid the same

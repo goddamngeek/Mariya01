@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import re
 import traceback
@@ -53,12 +54,14 @@ from app.telegram import (
     send_message_with_buttons,
 )
 from app.trilium_client import (
+    BOOK_DETAIL_HEADERS,
     add_book,
     add_book_quote,
     extract_duration,
     fill_book_details,
     fill_ezhednevnik,
     get_active_reading_books,
+    get_book_details,
     log_activity,
 )
 
@@ -109,6 +112,13 @@ def _looks_like_quote_request(text: str) -> bool:
     ...) — they all share the "цитат" stem, so a plain substring check
     covers every inflection without needing a word list."""
     return "цитат" in text.lower()
+
+
+def _looks_like_reading_status(text: str) -> bool:
+    """"что я сейчас читаю" / "что читаю" — present tense only ("читаю"),
+    so it never collides with _looks_like_book_add's "начал читать"/"хочу
+    почитать" (infinitive forms)."""
+    return "читаю" in text.lower()
 
 
 def _looks_like_book_add(text: str) -> bool:
@@ -193,6 +203,10 @@ async def process_incoming_message(
 
     if _looks_like_quote_request(text):
         await start_quote_flow(user_id, text, reply_to_text)
+        return
+
+    if _looks_like_reading_status(text):
+        await show_reading_status(user_id)
         return
 
     # Same shape as activity for steps 0/1 (title, then author). Step 2 is
@@ -662,5 +676,50 @@ async def handle_book_details_reply(
     await close_book_add_prompt(prompt["id"])
     await ack_incoming_messages([message_id])
     return True
+
+
+async def show_reading_status(user_id: int) -> None:
+    """"что я сейчас читаю" / /reading — same book list as /quote
+    (get_active_reading_books), but here the button just shows that book's
+    description on click (handle_reading_book_selected) instead of
+    starting a multi-step flow. Entirely stateless — the note_id is
+    encoded directly in the button's callback_data, no DB row needed."""
+    try:
+        books = await get_active_reading_books()
+    except Exception:
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+
+    if not books:
+        await send_message(user_id, "Нет книг в активном чтении (без даты окончания).")
+        return
+
+    buttons = [(book["title"], f"rb:{book['note_id']}") for book in books]
+    await send_message_with_buttons(user_id, "Какую книгу показать?", buttons)
+
+
+async def handle_reading_book_selected(callback_query: dict) -> None:
+    """Routes a "rb:{note_id}" button press from show_reading_status above
+    — called from app/callbacks.py."""
+    query_id = callback_query["id"]
+    data = callback_query.get("data") or ""
+    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+    note_id = data[len("rb:"):]
+
+    await answer_callback_query(query_id)
+    try:
+        details = await get_book_details(note_id)
+    except Exception as exc:
+        print(f"get_book_details failed for user={chat_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(chat_id, f"Не получилось прочитать описание: {type(exc).__name__}.")
+        return
+
+    sections = "\n\n".join(
+        f"<b>{html.escape(header)}</b>\n{html.escape(details[header]) if details[header] else '—'}"
+        for header in BOOK_DETAIL_HEADERS
+    )
+    await send_message(chat_id, sections, parse_mode="HTML")
 
 

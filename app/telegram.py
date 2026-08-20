@@ -111,6 +111,7 @@ async def set_bot_commands() -> None:
         {"command": "clear", "description": "Очистить историю чата"},
         {"command": "quote", "description": "Добавить интересный момент из книги"},
         {"command": "addbook", "description": "Добавить новую книгу"},
+        {"command": "reading", "description": "Что я сейчас читаю"},
         {"command": "help", "description": "Что умеет бот"},
     ]
     try:

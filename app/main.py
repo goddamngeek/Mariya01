@@ -29,6 +29,7 @@ from app.service import (
     handle_book_details_reply,
     handle_message_edit,
     process_incoming_message,
+    show_reading_status,
     start_book_add_flow,
     start_quote_flow,
 )
@@ -50,6 +51,7 @@ HELP_TEXT = (
     "/clear — очистить историю чата\n"
     "/quote — добавить интересный момент из книги\n"
     "/addbook — добавить новую книгу\n"
+    "/reading — что я сейчас читаю\n"
     "\n"
     "Просто напиши мне:\n"
     "— напомнить о чём-то себе или передать другому человеку\n"
@@ -57,7 +59,8 @@ HELP_TEXT = (
     "— добавь книгу / хочу почитать X — спрошу название и автора\n"
     "— отзыв на книгу, китайское слово, продажу или задачу в канбан\n"
     "— позанималась йогой / китайским / трейдингом — спрошу, как прошло, и запишу\n"
-    "— цитата — добавлю интересный момент из книги, которую сейчас читаешь"
+    "— цитата — добавлю интересный момент из книги, которую сейчас читаешь\n"
+    "— что я сейчас читаю — покажу активные книги и их описание"
 )
 
 
@@ -187,6 +190,10 @@ async def telegram_webhook(request: Request):
 
     if text.strip() == "/addbook":
         await start_book_add_flow(chat_id, text, telegram_message_id=message_id)
+        return {"ok": True}
+
+    if text.strip() == "/reading":
+        await show_reading_status(chat_id)
         return {"ok": True}
 
     if text.strip() == "/help":

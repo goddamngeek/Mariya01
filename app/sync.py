@@ -23,7 +23,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.trilium_client import get_active_reading_books, get_note_content_by_title
+from app.trilium_client import get_active_reading_books, get_note_content_by_title, list_all_books
 
 router = APIRouter(prefix="/sync")
 
@@ -256,6 +256,14 @@ async def note_content(title: str):
     """Diagnostic: raw content of a note by exact title — used to inspect
     _ШАБЛОН_КНИГА's real structure while building /addbook."""
     return {"content": await get_note_content_by_title(title)}
+
+
+@router.get("/all_books", dependencies=[Depends(require_bearer)])
+async def all_books():
+    """Diagnostic: every book under КНИГИ with its full label set,
+    unfiltered — for debugging why a specific book doesn't show up in
+    /active_books (e.g. missing readingStart)."""
+    return await list_all_books()
 
 
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])

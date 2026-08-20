@@ -1,4 +1,9 @@
+.DS_Store
 .env
 .venv/
 __pycache__/
 *.pyc
+
+# Contain live odysseus_session tokens — never commit
+cookies.txt
+mac_sync/

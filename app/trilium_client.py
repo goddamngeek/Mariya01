@@ -452,18 +452,22 @@ def _strip_html(fragment: str) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
-async def get_book_details(note_id: str) -> dict[str, str]:
-    """Reverse of fill_book_details — reads back whatever's currently under
-    each of the 4 template sections (see BOOK_DETAIL_HEADERS), for showing
-    a book's description on demand (see the "что я сейчас читаю" flow in
-    app/service.py). A section with nothing meaningful filled in (still the
-    original template placeholder, or genuinely empty) comes back as an
-    empty string — the caller decides how to display that."""
+async def get_book_details(note_id: str) -> tuple[str, dict[str, str]]:
+    """Reverse of fill_book_details — reads back the note's title plus
+    whatever's currently under each of the 4 template sections (see
+    BOOK_DETAIL_HEADERS), for showing a book's description on demand (see
+    the /reading and /finished flows in app/service.py). A section with
+    nothing meaningful filled in (still the original template placeholder,
+    or genuinely empty) comes back as an empty string — the caller decides
+    how to display that."""
     if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
         raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
 
     headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
     async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+        note_resp.raise_for_status()
+        title = note_resp.json().get("title") or "(без названия)"
         content = await _get_content(client, note_id)
 
     details = {}
@@ -478,7 +482,7 @@ async def get_book_details(note_id: str) -> dict[str, str]:
         if text in ("scifi / drama / romance", "…"):
             text = ""
         details[header] = text
-    return details
+    return title, details
 
 
 async def set_reading_end(note_id: str, when: Optional[_date] = None) -> None:
@@ -568,11 +572,16 @@ async def get_note_content_by_title(title: str) -> str:
         return await _get_content(client, note_id)
 
 
-async def get_active_reading_books() -> list[dict]:
-    """Books currently being read — child notes of КНИГИ (see add_book) that
-    have a readingStart label but no readingEnd one yet. Same
-    fetch-every-child-then-inspect-its-labels approach as read_kanban_status,
-    since Trilium's ETAPI has no "search by missing label" filter."""
+async def _list_books(finished: bool) -> list[dict]:
+    """Child notes of КНИГИ (see add_book), split by whether readingEnd is
+    filled in. Same fetch-every-child-then-inspect-its-labels approach as
+    read_kanban_status, since Trilium's ETAPI has no "search by missing
+    label" filter.
+
+    Checks the label's VALUE, not just its presence — clearing a promoted
+    date field in Trilium's UI leaves the attribute attached with an empty
+    string rather than removing it outright (confirmed live), which a plain
+    "not in labels" check silently missed."""
     if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
         raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
 
@@ -591,16 +600,25 @@ async def get_active_reading_books() -> list[dict]:
             child_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{child_id}")
             child_resp.raise_for_status()
             child = child_resp.json()
-            # Value, not just presence — clearing a promoted date field in
-            # Trilium's UI leaves the readingEnd label attached with an
-            # empty string value rather than removing it outright
-            # (confirmed live), so a plain "not in labels" check missed it.
             labels = {
                 a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
             }
-            if labels.get("readingStart") and not labels.get("readingEnd"):
-                books.append({"note_id": child_id, "title": child.get("title") or "(без названия)"})
+            if not labels.get("readingStart"):
+                continue
+            if bool(labels.get("readingEnd")) != finished:
+                continue
+            books.append({"note_id": child_id, "title": child.get("title") or "(без названия)"})
         return books
+
+
+async def get_active_reading_books() -> list[dict]:
+    """Books currently being read — readingStart set, readingEnd not."""
+    return await _list_books(finished=False)
+
+
+async def get_finished_books() -> list[dict]:
+    """Books already read through — both readingStart and readingEnd set."""
+    return await _list_books(finished=True)
 
 
 async def list_all_books() -> list[dict]:

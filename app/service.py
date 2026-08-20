@@ -69,6 +69,7 @@ from app.trilium_client import (
     fill_ezhednevnik,
     get_active_reading_books,
     get_book_details,
+    get_finished_books,
     log_activity,
     set_reading_end,
 )
@@ -127,6 +128,13 @@ def _looks_like_reading_status(text: str) -> bool:
     so it never collides with _looks_like_book_add's "начал читать"/"хочу
     почитать" (infinitive forms)."""
     return "читаю" in text.lower()
+
+
+def _looks_like_finished_books(text: str) -> bool:
+    """"прочитанные" / "прочитанных книг" — the "прочитанн" stem covers
+    every inflection and doesn't overlap with "читаю" (_looks_like_reading_status)
+    or the infinitive forms _looks_like_book_add matches."""
+    return "прочитанн" in text.lower()
 
 
 def _looks_like_book_add(text: str) -> bool:
@@ -215,6 +223,10 @@ async def process_incoming_message(
 
     if _looks_like_reading_status(text):
         await show_reading_status(user_id)
+        return
+
+    if _looks_like_finished_books(text):
+        await show_finished_books(user_id)
         return
 
     # "Я дочитал" — started by a button under a book's description (see
@@ -719,17 +731,31 @@ async def show_reading_status(user_id: int) -> None:
     await send_message_with_buttons(user_id, "Какую книгу показать?", buttons)
 
 
-async def handle_reading_book_selected(callback_query: dict) -> None:
-    """Routes a "rb:{note_id}" button press from show_reading_status above
-    — called from app/callbacks.py."""
-    query_id = callback_query["id"]
-    data = callback_query.get("data") or ""
-    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
-    note_id = data[len("rb:"):]
-
-    await answer_callback_query(query_id)
+async def show_finished_books(user_id: int) -> None:
+    """"прочитанные" / /finished — the mirror of show_reading_status, for
+    books that already have a readingEnd date. Same description on click
+    (handle_finished_book_selected), minus the "Я дочитал" button, which
+    would be meaningless on an already-finished book."""
     try:
-        details = await get_book_details(note_id)
+        books = await get_finished_books()
+    except Exception:
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+
+    if not books:
+        await send_message(user_id, "Пока нет прочитанных книг.")
+        return
+
+    buttons = [(book["title"], f"pb:{book['note_id']}") for book in books]
+    await send_message_with_buttons(user_id, "Какую книгу показать?", buttons)
+
+
+async def _send_book_description(chat_id: int, note_id: str, with_finish_button: bool) -> None:
+    """Shared by both book lists — the description always leads with the
+    book's own title (per request), then the 4 template sections."""
+    try:
+        title, details = await get_book_details(note_id)
     except Exception as exc:
         print(f"get_book_details failed for user={chat_id}:", flush=True)
         traceback.print_exc()
@@ -740,9 +766,30 @@ async def handle_reading_book_selected(callback_query: dict) -> None:
         f"<b>{html.escape(header)}</b>\n{html.escape(details[header]) if details[header] else '—'}"
         for header in BOOK_DETAIL_HEADERS
     )
-    await send_message_with_buttons(
-        chat_id, sections, [("Я дочитал", f"fd:{note_id}")], parse_mode="HTML",
-    )
+    body = f"<b>{html.escape(title)}</b>\n\n{sections}"
+    if with_finish_button:
+        await send_message_with_buttons(
+            chat_id, body, [("Я дочитал", f"fd:{note_id}")], parse_mode="HTML",
+        )
+        return
+    await send_message(chat_id, body, parse_mode="HTML")
+
+
+async def handle_reading_book_selected(callback_query: dict) -> None:
+    """Routes a "rb:{note_id}" button press from show_reading_status above
+    — called from app/callbacks.py."""
+    await answer_callback_query(callback_query["id"])
+    data = callback_query.get("data") or ""
+    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+    await _send_book_description(chat_id, data[len("rb:"):], with_finish_button=True)
+
+
+async def handle_finished_book_selected(callback_query: dict) -> None:
+    """Routes a "pb:{note_id}" button press from show_finished_books above."""
+    await answer_callback_query(callback_query["id"])
+    data = callback_query.get("data") or ""
+    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+    await _send_book_description(chat_id, data[len("pb:"):], with_finish_button=False)
 
 
 async def handle_book_finished(callback_query: dict) -> None:

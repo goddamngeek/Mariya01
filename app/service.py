@@ -11,32 +11,25 @@ from app.db import (
     advance_activity_prompt_step,
     advance_book_quote_prompt_step,
     advance_ezhednevnik_step,
-    append_book_add_prompt_message,
-    append_book_quote_prompt_message,
-    append_thread_message,
     close_activity_prompt,
     close_book_add_prompt,
     close_book_quote_prompt,
     close_book_review_prompt,
-    close_book_review_prompts_for_thread,
     close_ezhednevnik_prompt,
-    close_message_thread,
     create_activity_prompt,
     create_book_add_prompt,
     create_book_quote_prompt,
     create_book_review_prompt,
-    create_message_thread,
     finalize_book_add_prompt,
-    get_book_add_prompt,
     get_book_add_prompt_by_template_message,
     get_book_quote_prompt,
     get_incoming_message_by_telegram_id,
+    get_message_thread,
     get_open_activity_prompt,
     get_open_book_add_prompt,
     get_open_book_quote_prompt,
     get_open_book_review_prompt,
     get_open_ezhednevnik_prompt,
-    get_thread_by_message,
     insert_incoming_message,
     set_book_add_title,
     set_book_quote_prompt_book,
@@ -56,14 +49,8 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app.telegram import (
-    answer_callback_query,
-    clear_reply_markup,
-    delete_message,
-    send_message,
-    send_message_get_id,
-    send_message_with_buttons,
-)
+from app.telegram import answer_callback_query, clear_reply_markup, send_message
+from app import threads
 from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
     add_book,
@@ -86,29 +73,11 @@ _background_tasks: set[asyncio.Task] = set()
 
 _SCORE_RE = re.compile(r"-?\d+")
 
-# How long an open activity_prompt (yoga/chinese/trading) can sit unanswered
-# before it's treated as abandoned rather than still "in flight" — unlike
-# ежедневник (re-checked at each fixed AM/PM/evening cron tick), nothing
-# else ever re-visits this, so without a timeout a forgotten reply would
-# silently gate every future message from that person forever, same class
-# of bug already fixed once for ежедневник (see close_stale_ezhednevnik_prompts).
-_ACTIVITY_PROMPT_TIMEOUT = timedelta(hours=3)
-
-# Much shorter than ежедневник/activity, per request — this is a quick
-# on-the-spot action, not something meant to sit half-answered for hours.
-# The real cleanup (deleting the dangling messages, not just closing the
-# prompt) happens proactively in scheduler.py's release_stale_quote_prompts
-# (polled every 60s); this is only a same-value fallback so a reply that
-# slips in right at the boundary is never treated as answering a prompt
-# that's about to be wiped out from under it.
-_QUOTE_PROMPT_TIMEOUT = timedelta(minutes=5)
-
-# Stage 1 only (title/author collection) — same reasoning as
-# _ACTIVITY_PROMPT_TIMEOUT. Once stage 1 finishes and the "расскажи
-# подробнее" template is sent, the row is finalized (see
-# finalize_book_add_prompt) and stays addressable forever via a reply —
-# that part has no timeout at all, per explicit request.
-_BOOK_ADD_PROMPT_TIMEOUT = timedelta(hours=3)
+# Mirrors threads.TTL_DIALOG deliberately. The thread's own staleness job
+# is what actually tears an abandoned dialogue down; this inline check just
+# makes sure a reply landing right at the boundary is never treated as
+# answering a prompt that is about to be wiped out from under it.
+_PROMPT_TIMEOUT = timedelta(minutes=threads.TTL_DIALOG)
 
 _ACTIVITY_VERBS = (
     "позанимал", "занимал", "делал", "сделал", "провел", "провёл",
@@ -192,16 +161,16 @@ async def process_incoming_message(
     # spontaneous message.
     open_activity = await get_open_activity_prompt(user_id)
     if open_activity is not None:
-        if utcnow() - open_activity["sent_at"] > _ACTIVITY_PROMPT_TIMEOUT:
+        if utcnow() - open_activity["sent_at"] > _PROMPT_TIMEOUT:
             await close_activity_prompt(open_activity["id"])
             open_activity = None
     if open_activity is not None:
-        await _handle_activity_reply(user_id, text, reply_to_text, open_activity)
+        await _handle_activity_reply(user_id, text, reply_to_text, open_activity, telegram_message_id)
         return
 
     activity = _looks_like_activity_log(text)
     if activity is not None:
-        await _start_activity_flow(user_id, text, reply_to_text, activity)
+        await _start_activity_flow(user_id, text, reply_to_text, activity, telegram_message_id)
         return
 
     # Same shape again — an open book_quote_prompt with step >= 1 means this
@@ -212,18 +181,18 @@ async def process_incoming_message(
     # the button rather than being consumed as an answer.
     open_quote = await get_open_book_quote_prompt(user_id)
     if open_quote is not None:
-        if utcnow() - open_quote["updated_at"] > _QUOTE_PROMPT_TIMEOUT:
+        if utcnow() - open_quote["updated_at"] > _PROMPT_TIMEOUT:
             await close_book_quote_prompt(open_quote["id"])
             open_quote = None
     if open_quote is not None:
         if open_quote["step"] == 0:
             await send_message(user_id, "Выбери книгу, нажав на кнопку в сообщении выше.")
             return
-        await _handle_quote_reply(user_id, text, reply_to_text, open_quote)
+        await _handle_quote_reply(user_id, text, reply_to_text, open_quote, telegram_message_id)
         return
 
     if _looks_like_quote_request(text):
-        await start_quote_flow(user_id, text, reply_to_text)
+        await start_quote_flow(user_id, text, reply_to_text, telegram_message_id)
         return
 
     if _looks_like_reading_status(text):
@@ -239,7 +208,7 @@ async def process_incoming_message(
     # Same 5-minute staleness rule as /quote.
     open_review = await get_open_book_review_prompt(user_id)
     if open_review is not None:
-        if utcnow() - open_review["updated_at"] > _QUOTE_PROMPT_TIMEOUT:
+        if utcnow() - open_review["updated_at"] > _PROMPT_TIMEOUT:
             await close_book_review_prompt(open_review["id"])
             open_review = None
     if open_review is not None:
@@ -260,8 +229,7 @@ async def process_incoming_message(
     # of is_open, so it's unaffected by the close here.
     open_book_add = await get_open_book_add_prompt(user_id)
     if open_book_add is not None:
-        timeout = _QUOTE_PROMPT_TIMEOUT if open_book_add["step"] == 2 else _BOOK_ADD_PROMPT_TIMEOUT
-        if utcnow() - open_book_add["updated_at"] > timeout:
+        if utcnow() - open_book_add["updated_at"] > _PROMPT_TIMEOUT:
             await close_book_add_prompt(open_book_add["id"])
             open_book_add = None
     if open_book_add is not None:
@@ -276,7 +244,7 @@ async def process_incoming_message(
     message_id = await insert_incoming_message(user_id, text, "active", reply_to_text)
 
     task = asyncio.create_task(
-        handle_active_message(message_id, user_id, text, received_at, reply_to_text)
+        handle_active_message(message_id, user_id, text, received_at, reply_to_text, telegram_message_id)
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -360,18 +328,21 @@ async def _handle_ezhednevnik_reply(
 
 async def _start_activity_flow(
     user_id: int, text: str, reply_to_text: str | None, activity: str,
+    telegram_message_id: int | None = None,
 ) -> None:
     """The trigger message itself ("позанималась йогой") carries no data —
     just log it for the audit trail, open the prompt, and ask the first
     question."""
     message_id = await insert_incoming_message(user_id, text, f"activity_{activity}_start", reply_to_text)
-    await create_activity_prompt(user_id, activity)
-    await send_message(user_id, activity_step_text(activity, 0))
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
+    await create_activity_prompt(user_id, activity, thread_id)
+    await threads.send(thread_id, user_id, activity_step_text(activity, 0))
     await ack_incoming_messages([message_id])
 
 
 async def _handle_activity_reply(
     user_id: int, text: str, reply_to_text: str | None, prompt,
+    telegram_message_id: int | None = None,
 ) -> None:
     """Advance one step in the activity's 2-step sequence (feedback, then
     score) — same shape as _handle_ezhednevnik_reply. The feedback step's
@@ -384,7 +355,9 @@ async def _handle_activity_reply(
     field = steps[step][2]
 
     kind = f"activity_{activity}_{step}"
-    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
+    thread_id = prompt["thread_id"]
+    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text, telegram_message_id)
+    await threads.track(thread_id, telegram_message_id)
 
     collected = json.loads(prompt["collected"] or "{}")
     if field == "score":
@@ -392,7 +365,7 @@ async def _handle_activity_reply(
         if not match:
             # Never invent a score — re-ask instead of defaulting to 0 or
             # completing with a missing value.
-            await send_message(user_id, "Не расслышал число — " + activity_step_text(activity, step))
+            await threads.send(thread_id, user_id, "Не расслышал число — " + activity_step_text(activity, step))
             await ack_incoming_messages([message_id])
             return
         collected[field] = max(0, min(100, int(match.group())))
@@ -405,7 +378,7 @@ async def _handle_activity_reply(
     next_step = step + 1
     if next_step < len(steps):
         await advance_activity_prompt_step(prompt["id"], next_step, collected)
-        await send_message(user_id, activity_step_text(activity, next_step))
+        await threads.send(thread_id, user_id, activity_step_text(activity, next_step))
         await ack_incoming_messages([message_id])
         return
 
@@ -419,7 +392,8 @@ async def _handle_activity_reply(
             collected.get("duration"),
         )
         await close_activity_prompt(prompt["id"])
-        await send_message(user_id, "Записал, спасибо.")
+        await threads.send(thread_id, user_id, "Записал, спасибо.")
+        await _dismiss_thread_by_id(thread_id)
     except Exception as exc:
         print(f"log_activity failed for user={user_id}:", flush=True)
         traceback.print_exc()
@@ -431,7 +405,10 @@ async def _handle_activity_reply(
     await ack_incoming_messages([message_id])
 
 
-async def start_quote_flow(user_id: int, text: str = "цитата", reply_to_text: str | None = None) -> None:
+async def start_quote_flow(
+    user_id: int, text: str = "цитата", reply_to_text: str | None = None,
+    telegram_message_id: int | None = None,
+) -> None:
     """Look up books currently in active reading (readingStart set, no
     readingEnd — see get_active_reading_books) and offer them as buttons.
     Shared by the "цитата" text trigger above and the /quote command
@@ -452,11 +429,10 @@ async def start_quote_flow(user_id: int, text: str = "цитата", reply_to_te
         await ack_incoming_messages([message_id])
         return
 
-    prompt_id = await create_book_quote_prompt(user_id, books)
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
+    prompt_id = await create_book_quote_prompt(user_id, books, thread_id)
     buttons = [(book["title"], f"bq:{prompt_id}:{i}") for i, book in enumerate(books)]
-    sent_id = await send_message_with_buttons(user_id, "Какую книгу?", buttons)
-    if sent_id is not None:
-        await append_book_quote_prompt_message(prompt_id, sent_id)
+    await threads.send(thread_id, user_id, "Какую книгу?", buttons=buttons)
     await ack_incoming_messages([message_id])
 
 
@@ -487,27 +463,29 @@ async def handle_quote_book_selected(callback_query: dict) -> None:
     book = candidates[index]
     await set_book_quote_prompt_book(prompt_id, book["note_id"], book["title"])
     await answer_callback_query(query_id, f"Книга: {book['title']}")
-    sent_id = await send_message_get_id(chat_id, quote_step_text(0))
-    if sent_id is not None:
-        await append_book_quote_prompt_message(prompt_id, sent_id)
+    list_message_id = (callback_query.get("message") or {}).get("message_id")
+    if list_message_id is not None:
+        await clear_reply_markup(chat_id, list_message_id)
+    await threads.send(prompt["thread_id"], chat_id, quote_step_text(0))
 
 
 async def _handle_quote_reply(
     user_id: int, text: str, reply_to_text: str | None, prompt,
+    telegram_message_id: int | None = None,
 ) -> None:
     """step 1 = awaiting the quote text, step 2 = awaiting the impression —
     same shape as _handle_activity_reply."""
     step = prompt["step"]
+    thread_id = prompt["thread_id"]
     kind = f"quote_{step}"
-    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
+    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text, telegram_message_id)
+    await threads.track(thread_id, telegram_message_id)
 
     collected = json.loads(prompt["collected"] or "{}")
     if step == 1:
         collected["quote"] = text.strip()
         await advance_book_quote_prompt_step(prompt["id"], 2, collected)
-        sent_id = await send_message_get_id(user_id, quote_step_text(1))
-        if sent_id is not None:
-            await append_book_quote_prompt_message(prompt["id"], sent_id)
+        await threads.send(thread_id, user_id, quote_step_text(1))
         await ack_incoming_messages([message_id])
         return
 
@@ -517,7 +495,8 @@ async def _handle_quote_reply(
     try:
         await add_book_quote(prompt["book_note_id"], collected["quote"], collected["impression"])
         await close_book_quote_prompt(prompt["id"])
-        await send_message(user_id, "Записал, спасибо.")
+        await threads.send(thread_id, user_id, "Записал, спасибо.")
+        await _dismiss_thread_by_id(thread_id)
     except Exception as exc:
         print(f"add_book_quote failed for user={user_id}:", flush=True)
         traceback.print_exc()
@@ -580,28 +559,18 @@ async def start_book_add_flow(
     append_book_add_prompt_message, so it can all be deleted in one shot
     once both stages finish successfully — see _cleanup_book_add_messages."""
     message_id = await insert_incoming_message(user_id, text, "book_add_start", reply_to_text)
-    prompt_id = await create_book_add_prompt(user_id)
-    if telegram_message_id is not None:
-        await append_book_add_prompt_message(prompt_id, telegram_message_id)
-    sent_id = await send_message_get_id(user_id, book_add_step_text(0))
-    if sent_id is not None:
-        await append_book_add_prompt_message(prompt_id, sent_id)
+    # closing_text: if the "расскажи подробнее" template goes unanswered,
+    # the thread signs off with this before tearing itself down, so the
+    # book being added isn't left unconfirmed.
+    thread_id = await threads.open_thread(
+        user_id, threads.TTL_DIALOG, telegram_message_id, closing_text="Добавил книгу",
+    )
+    await create_book_add_prompt(user_id, thread_id)
+    await threads.send(thread_id, user_id, book_add_step_text(0))
     await ack_incoming_messages([message_id])
 
 
-async def _cleanup_book_add_messages(user_id: int, prompt_id: int) -> None:
-    """Deletes every message tagged onto this /addbook exchange — only
-    called once both stages have actually finished successfully (see
-    _apply_book_details), per explicit request: unlike /quote's stale-flow
-    cleanup, this is never a "you took too long" wipe."""
-    prompt = await get_book_add_prompt(prompt_id)
-    if prompt is None:
-        return
-    for message_id in prompt["message_ids"]:
-        await delete_message(user_id, message_id)
-
-
-async def _apply_book_details(user_id: int, prompt_id: int, note_id: str, text: str) -> bool:
+async def _apply_book_details(user_id: int, thread_id: int | None, note_id: str, text: str) -> bool:
     """Shared by both ways of answering the "расскажи подробнее" template —
     the immediate plain-message continuation (step 2 in
     _handle_book_add_reply below) and a later reply (handle_book_details_reply).
@@ -621,10 +590,8 @@ async def _apply_book_details(user_id: int, prompt_id: int, note_id: str, text: 
 
     try:
         await fill_book_details(note_id, values)
-        confirm_id = await send_message_get_id(user_id, "Спасибо, добавил книгу!")
-        if confirm_id is not None:
-            await append_book_add_prompt_message(prompt_id, confirm_id)
-        await _cleanup_book_add_messages(user_id, prompt_id)
+        await threads.send(thread_id, user_id, "Спасибо, добавил книгу!")
+        await _dismiss_thread_by_id(thread_id)
         return True
     except Exception as exc:
         print(f"fill_book_details failed for user={user_id}:", flush=True)
@@ -646,21 +613,19 @@ async def _handle_book_add_reply(
     that same template, after the window's closed, is handled separately
     by handle_book_details_reply below."""
     step = prompt["step"]
+    thread_id = prompt["thread_id"]
     kind = f"book_add_{step}"
     message_id = await insert_incoming_message(user_id, text, kind, reply_to_text, telegram_message_id)
-    if telegram_message_id is not None:
-        await append_book_add_prompt_message(prompt["id"], telegram_message_id)
+    await threads.track(thread_id, telegram_message_id)
 
     if step == 0:
         await set_book_add_title(prompt["id"], text.strip())
-        sent_id = await send_message_get_id(user_id, book_add_step_text(1))
-        if sent_id is not None:
-            await append_book_add_prompt_message(prompt["id"], sent_id)
+        await threads.send(thread_id, user_id, book_add_step_text(1))
         await ack_incoming_messages([message_id])
         return
 
     if step == 2:
-        await _apply_book_details(user_id, prompt["id"], prompt["book_note_id"], text)
+        await _apply_book_details(user_id, thread_id, prompt["book_note_id"], text)
         await close_book_add_prompt(prompt["id"])
         await ack_incoming_messages([message_id])
         return
@@ -670,12 +635,11 @@ async def _handle_book_add_reply(
     person_name = USER_NAMES.get(user_id, str(user_id))
     try:
         note_id = await add_book(person_name, title, author)
-        template_message_id = await send_message_get_id(
-            user_id, BOOK_DETAILS_TEMPLATE.format(title=title, author=author),
+        template_message_id = await threads.send(
+            thread_id, user_id, BOOK_DETAILS_TEMPLATE.format(title=title, author=author),
         )
         if template_message_id is not None:
             await finalize_book_add_prompt(prompt["id"], author, note_id, template_message_id)
-            await append_book_add_prompt_message(prompt["id"], template_message_id)
         else:
             await close_book_add_prompt(prompt["id"])
     except Exception as exc:
@@ -708,8 +672,8 @@ async def handle_book_details_reply(
     message_id = await insert_incoming_message(
         user_id, text, "book_add_details", reply_to_text, telegram_message_id,
     )
-    await append_book_add_prompt_message(prompt["id"], telegram_message_id)
-    await _apply_book_details(user_id, prompt["id"], prompt["book_note_id"], text)
+    await threads.track(prompt["thread_id"], telegram_message_id)
+    await _apply_book_details(user_id, prompt["thread_id"], prompt["book_note_id"], text)
     await close_book_add_prompt(prompt["id"])
     await ack_incoming_messages([message_id])
     return True
@@ -734,13 +698,9 @@ async def _show_book_list(
         await send_message(user_id, empty_text)
         return
 
-    thread_id = await create_message_thread(user_id)
-    if trigger_message_id is not None:
-        await append_thread_message(thread_id, trigger_message_id)
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
     buttons = [(book["title"], f"{prefix}:{book['note_id']}") for book in books]
-    sent_id = await send_message_with_buttons(user_id, "Какую книгу показать?", buttons)
-    if sent_id is not None:
-        await append_thread_message(thread_id, sent_id)
+    await threads.send(thread_id, user_id, "Какую книгу показать?", buttons=buttons)
 
 
 async def show_reading_status(user_id: int, trigger_message_id: int | None = None) -> None:
@@ -779,7 +739,8 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     thread = None
     if list_message_id is not None:
         await clear_reply_markup(chat_id, list_message_id)
-        thread = await get_thread_by_message(chat_id, list_message_id)
+        thread = await threads.thread_for_message(chat_id, list_message_id)
+    thread_id = thread["id"] if thread is not None else None
 
     try:
         title, details = await get_book_details(note_id)
@@ -794,14 +755,8 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
         for header in BOOK_DETAIL_HEADERS
     )
     body = f"<b>{html.escape(title)}</b>\n\n{sections}"
-    if with_finish_button:
-        sent_id = await send_message_with_buttons(
-            chat_id, body, [("Я дочитал", f"fd:{note_id}")], parse_mode="HTML",
-        )
-    else:
-        sent_id = await send_message_get_id(chat_id, body, parse_mode="HTML")
-    if thread is not None and sent_id is not None:
-        await append_thread_message(thread["id"], sent_id)
+    buttons = [("Я дочитал", f"fd:{note_id}")] if with_finish_button else None
+    await threads.send(thread_id, chat_id, body, parse_mode="HTML", buttons=buttons)
 
 
 async def handle_reading_book_selected(callback_query: dict) -> None:
@@ -822,19 +777,21 @@ async def handle_message_reaction(user_id: int, message_id: int) -> None:
     staleness window (see scheduler.py's release_stale_message_threads,
     which does exactly the same thing on a timer). A reaction anywhere
     else is ignored."""
-    thread = await get_thread_by_message(user_id, message_id)
+    thread = await threads.thread_for_message(user_id, message_id)
     if thread is None:
         return
-    await _dismiss_thread(thread)
+    await threads.dismiss(thread)
 
 
-async def _dismiss_thread(thread) -> None:
-    """Delete every message in a thread and close it out — shared by the
-    reaction shortcut above and the staleness job in scheduler.py."""
-    for message_id in thread["message_ids"]:
-        await delete_message(thread["user_id"], message_id)
-    await close_book_review_prompts_for_thread(thread["id"])
-    await close_message_thread(thread["id"])
+async def _dismiss_thread_by_id(thread_id: int | None) -> None:
+    """The success path into a thread's terminal state — the flow finished
+    and wrote what it collected, so the conversation has served its purpose.
+    No closing_text here: the flow just sent its own confirmation."""
+    if thread_id is None:
+        return
+    thread = await get_message_thread(thread_id)
+    if thread is not None and thread["is_open"]:
+        await threads.dismiss(thread)
 
 
 async def handle_book_finished(callback_query: dict) -> None:
@@ -856,7 +813,7 @@ async def handle_book_finished(callback_query: dict) -> None:
     thread = None
     if description_message_id is not None:
         await clear_reply_markup(chat_id, description_message_id)
-        thread = await get_thread_by_message(chat_id, description_message_id)
+        thread = await threads.thread_for_message(chat_id, description_message_id)
 
     try:
         books = await get_active_reading_books()
@@ -873,18 +830,7 @@ async def handle_book_finished(callback_query: dict) -> None:
 
     thread_id = thread["id"] if thread is not None else None
     await create_book_review_prompt(chat_id, note_id, title, thread_id)
-    sent_id = await send_message_get_id(chat_id, book_review_step_text(0))
-    if sent_id is not None:
-        await _track_thread_message(thread_id, sent_id)
-
-
-async def _track_thread_message(thread_id: int | None, message_id: int) -> None:
-    """Add one message to its /reading thread, so it disappears with the
-    rest of that conversation. A None thread_id (only possible if the
-    thread was already dismissed between the button press and this call)
-    just means the message isn't tracked — harmless."""
-    if thread_id is not None:
-        await append_thread_message(thread_id, message_id)
+    await threads.send(thread_id, chat_id, book_review_step_text(0))
 
 
 async def _handle_book_review_reply(
@@ -898,24 +844,19 @@ async def _handle_book_review_reply(
     message_id = await insert_incoming_message(
         user_id, text, f"book_review_{step}", reply_to_text, telegram_message_id,
     )
-    if telegram_message_id is not None:
-        await _track_thread_message(thread_id, telegram_message_id)
+    await threads.track(thread_id, telegram_message_id)
 
     if step == 0:
         match = _SCORE_RE.search(text)
         rating = int(match.group()) if match else None
         if rating is None or not 1 <= rating <= 10:
-            sent_id = await send_message_get_id(
-                user_id, "Нужно число от 1 до 10 — " + book_review_step_text(0),
+            await threads.send(
+                thread_id, user_id, "Нужно число от 1 до 10 — " + book_review_step_text(0),
             )
-            if sent_id is not None:
-                await _track_thread_message(thread_id, sent_id)
             await ack_incoming_messages([message_id])
             return
         await set_book_review_rating(prompt["id"], rating)
-        sent_id = await send_message_get_id(user_id, book_review_step_text(1))
-        if sent_id is not None:
-            await _track_thread_message(thread_id, sent_id)
+        await threads.send(thread_id, user_id, book_review_step_text(1))
         await ack_incoming_messages([message_id])
         return
 
@@ -925,9 +866,8 @@ async def _handle_book_review_reply(
             prompt["book_note_id"], prompt["book_title"], prompt["rating"], text.strip(), person_name,
         )
         await close_book_review_prompt(prompt["id"])
-        sent_id = await send_message_get_id(user_id, "Спасибо, записал отзыв!")
-        if sent_id is not None:
-            await _track_thread_message(thread_id, sent_id)
+        await threads.send(thread_id, user_id, "Спасибо, записал отзыв!")
+        await _dismiss_thread_by_id(thread_id)
     except Exception as exc:
         print(f"create_book_review_note failed for user={user_id}:", flush=True)
         traceback.print_exc()

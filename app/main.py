@@ -18,13 +18,8 @@ from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
 from app.people import USER_NAMES
 from app.prompts import ezhednevnik_step_text
-from app.scheduler import (
-    clear_chat_history,
-    scheduler,
-    schedule_message_deletion,
-    send_temporary_message,
-    start_scheduler,
-)
+from app.scheduler import clear_chat_history, scheduler, start_scheduler
+from app import threads
 from app.service import (
     handle_book_details_reply,
     handle_message_edit,
@@ -170,9 +165,7 @@ async def telegram_webhook(request: Request):
     if text.strip() == "/kanban":
         # A guaranteed-reliable direct trigger — reads straight from
         # Trilium (see app/trilium_client.py), no LLM involved at all.
-        await send_kanban_status(chat_id)
-        if message_id is not None:
-            await schedule_message_deletion(chat_id, message_id)
+        await send_kanban_status(chat_id, trigger_message_id=message_id)
         return {"ok": True}
 
     if text.strip() == "/week":
@@ -181,9 +174,8 @@ async def telegram_webhook(request: Request):
             summary = await get_week_summary(person_name)
         except Exception:
             summary = TRILIUM_UNAVAILABLE_TEXT
-        await send_temporary_message(chat_id, summary, parse_mode="HTML")
-        if message_id is not None:
-            await schedule_message_deletion(chat_id, message_id)
+        thread_id = await threads.open_thread(chat_id, threads.TTL_INFO, message_id)
+        await threads.send(thread_id, chat_id, summary, parse_mode="HTML")
         return {"ok": True}
 
     if text.strip() == "/checkin":
@@ -203,10 +195,9 @@ async def telegram_webhook(request: Request):
             or await get_open_activity_prompt(chat_id) is not None
         )
         await clear_chat_history(only_chat_id=chat_id)
-        if has_open:
-            await send_temporary_message(chat_id, "Есть открытый вопрос — почищу чат, когда ответишь на него.")
-        else:
-            await send_temporary_message(chat_id, "Чат очищен.")
+        note = "Есть открытый вопрос — почищу чат, когда ответишь на него." if has_open else "Чат очищен."
+        thread_id = await threads.open_thread(chat_id, threads.TTL_INFO)
+        await threads.send(thread_id, chat_id, note)
         return {"ok": True}
 
     if text.strip() == "/quote":
@@ -230,9 +221,8 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/links":
-        await send_temporary_message(chat_id, LINKS_TEXT)
-        if message_id is not None:
-            await schedule_message_deletion(chat_id, message_id)
+        thread_id = await threads.open_thread(chat_id, threads.TTL_INFO, message_id)
+        await threads.send(thread_id, chat_id, LINKS_TEXT)
         return {"ok": True}
 
     # Telegram's native "reply" feature attaches the full replied-to message

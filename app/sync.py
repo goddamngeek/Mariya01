@@ -14,7 +14,6 @@ from app.db import (
     get_recent_reminders,
     get_water_reminders_for_date,
     peek_logged_messages,
-    peek_pending_message_deletions,
     pull_unconfirmed_incoming,
     set_odysseus_session_id,
     utcnow,
@@ -215,16 +214,6 @@ async def chat_log():
     return [
         {"id": r["id"], "chat_id": r["chat_id"], "message_id": r["message_id"], "created_at": r["created_at"]}
         for r in await peek_logged_messages()
-    ]
-
-
-@router.get("/pending_deletions", dependencies=[Depends(require_bearer)])
-async def pending_deletions():
-    """Diagnostic: messages currently queued for delayed deletion (kanban/
-    week/links/water reminders), without popping them."""
-    return [
-        {"id": r["id"], "chat_id": r["chat_id"], "message_id": r["message_id"], "due_at": r["due_at"]}
-        for r in await peek_pending_message_deletions()
     ]
 
 

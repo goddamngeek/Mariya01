@@ -1,5 +1,5 @@
 import random
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -7,30 +7,22 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import TIMEZONE, WATER_REMINDER_TEXTS, WATER_REMINDER_WINDOWS
 from app.db import (
     claim_reminder,
-    close_book_add_prompt,
-    close_book_quote_prompt,
-    close_book_review_prompt,
     close_stale_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
-    get_due_book_add_notices,
     get_due_reminders,
     get_due_water_reminders,
     get_open_activity_prompt,
     get_registered_user_ids,
-    get_stale_book_quote_prompts,
-    get_stale_book_review_prompts,
     get_stale_message_threads,
     has_open_ezhednevnik,
-    mark_book_add_notified,
     mark_water_reminder_sent,
-    pop_due_message_deletions,
     pop_logged_messages_except,
-    schedule_pending_message_deletion,
 )
+from app import threads
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
-from app.telegram import delete_message, send_message, send_message_get_id
+from app.telegram import delete_message, send_message
 
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
@@ -128,116 +120,28 @@ async def ensure_today_water_reminders() -> None:
             await ensure_water_reminder(user_id, i, today, due_at)
 
 
-WATER_REMINDER_DELETE_DELAY_MINUTES = 2
-TEMP_MESSAGE_DELETE_DELAY_MINUTES = 3
-
-
-async def schedule_message_deletion(
-    chat_id: int, message_id: int, delay_minutes: float = TEMP_MESSAGE_DELETE_DELAY_MINUTES,
-) -> None:
-    """Delete an already-sent (or already-received) message after a delay.
-    Bots can delete their own outgoing messages in any chat, and — in a
-    private chat specifically — the other person's incoming messages too
-    (Telegram Bot API's own documented behavior, no special rights needed
-    there, unlike groups/channels which need admin/can_delete_messages).
-
-    DB-backed (pending_message_deletions table), unlike the in-memory
-    APScheduler trigger="date" jobs this replaces — confirmed live: a
-    delayed delete scheduled purely in process memory silently vanished
-    when a redeploy landed inside the delay window, leaving the message
-    stuck in the chat forever with no trace it was ever meant to be
-    cleaned up. Actual deletion happens from release_due_message_deletions
-    below, polled every 60s regardless of how many times the process has
-    restarted since this was scheduled. Used both by send_temporary_message
-    below (its own reply), main.py (the person's own triggering message),
-    and release_due_water_reminders (its own reminder text)."""
-    due_at = datetime.now(TIMEZONE) + timedelta(minutes=delay_minutes)
-    await schedule_pending_message_deletion(chat_id, message_id, due_at.astimezone(timezone.utc))
-
-
-async def release_due_message_deletions() -> None:
-    for row in await pop_due_message_deletions():
-        await delete_message(row["chat_id"], row["message_id"])
-
-
-async def release_stale_quote_prompts() -> None:
-    """Cleans up a /quote flow (see app/service.py's start_quote_flow) that
-    the person walked away from mid-conversation — 5 minutes since the last
-    step (get_stale_book_quote_prompts' updated_at cutoff), unlike
-    ежедневник/activity which just get silently closed on timeout, this
-    actually deletes every message the bot sent as part of that exchange
-    (message_ids), per request — a half-answered "Какую книгу?" shouldn't
-    just sit in the chat forever."""
-    for row in await get_stale_book_quote_prompts():
-        for message_id in row["message_ids"]:
-            await delete_message(row["user_id"], message_id)
-        await close_book_quote_prompt(row["id"])
-
-
-async def release_stale_book_review_prompts() -> None:
-    """Closes out an abandoned "Я дочитал" rating/review dialogue so it
-    stops swallowing the person's next unrelated message. Deleting its
-    messages is NOT this job's business — they belong to the /reading
-    thread that spawned it, which clears them itself (see
-    release_stale_message_threads / handle_message_reaction). The book
-    itself stays marked finished either way: readingEnd is stamped at
-    button press, well before any of this."""
-    for row in await get_stale_book_review_prompts():
-        await close_book_review_prompt(row["id"])
-
-
 async def release_stale_message_threads() -> None:
-    """The timer half of dismissing a /reading or /finished conversation —
-    5 minutes after the last thing that happened in it, the whole thread's
-    messages get deleted. The other half is instant, on a reaction (see
-    app/service.py's handle_message_reaction); both funnel into the same
-    _dismiss_thread."""
-    from app.service import _dismiss_thread  # imported here: app.service imports this module
-
+    """The timeout path into a thread's terminal state — nothing has
+    happened in it for its ttl_minutes, so it gets torn down. The other two
+    paths are the flow succeeding and the person reacting to one of its
+    messages; all three end in threads.dismiss(). Only this one passes
+    send_closing, since only an abandoned thread has anything left to say
+    (see /addbook's "Добавил книгу")."""
     for thread in await get_stale_message_threads():
-        await _dismiss_thread(thread)
-
-
-async def release_due_book_add_notices() -> None:
-    """Closes out the "normal dialogue" window for a /addbook flow (see
-    app/service.py's start_book_add_flow) — 5 minutes with no answer to the
-    "расскажи подробнее" template means the very-next-plain-message
-    auto-capture no longer applies (see finalize_book_add_prompt), so this
-    both sends a one-time "Добавил книгу" courtesy notice AND closes the
-    prompt (is_open=FALSE). template_message_id stays valid regardless —
-    get_book_add_prompt_by_template_message ignores is_open entirely — so a
-    reply to that same message still works any time after this, per the
-    original point of the reply mechanism: answering once the normal
-    window has already expired."""
-    for row in await get_due_book_add_notices():
-        await send_message(row["user_id"], "Добавил книгу")
-        await mark_book_add_notified(row["id"])
-        await close_book_add_prompt(row["id"])
+        await threads.dismiss(thread, send_closing=True)
 
 
 async def release_due_water_reminders() -> None:
     for row in await get_due_water_reminders():
         text = random.choice(WATER_REMINDER_TEXTS)
-        message_id = await send_message_get_id(row["user_id"], text)
+        # A self-clearing nudge: a thread of exactly one message, so the
+        # same teardown as every other flow takes it away (app/threads.py).
+        thread_id = await threads.open_thread(row["user_id"], threads.TTL_WATER)
+        message_id = await threads.send(thread_id, row["user_id"], text)
         if message_id is None:
             print(f"failed to send water reminder id={row['id']} user={row['user_id']}, will retry", flush=True)
             continue
         await mark_water_reminder_sent(row["id"])
-        # Self-cleaning nudge — not worth leaving in the chat forever and
-        # cluttering it, per request.
-        await schedule_message_deletion(row["user_id"], message_id, WATER_REMINDER_DELETE_DELAY_MINUTES)
-
-
-async def send_temporary_message(chat_id: int, text: str, parse_mode: str | None = None) -> None:
-    """Send-and-forget message that deletes itself after a few minutes —
-    for on-demand dumps (kanban board, /week summary, /links) that would
-    otherwise sit in the chat forever cluttering it, same self-cleaning
-    idea as water reminders. Silently does nothing if the send itself
-    fails — the caller already logs that."""
-    message_id = await send_message_get_id(chat_id, text, parse_mode=parse_mode)
-    if message_id is None:
-        return
-    await schedule_message_deletion(chat_id, message_id)
 
 
 async def clear_chat_history(only_chat_id: int | None = None) -> None:
@@ -311,34 +215,10 @@ async def start_scheduler() -> None:
         id="release_due_water_reminders",
     )
     scheduler.add_job(
-        release_due_message_deletions,
-        trigger="interval",
-        seconds=60,
-        id="release_due_message_deletions",
-    )
-    scheduler.add_job(
-        release_stale_quote_prompts,
-        trigger="interval",
-        seconds=60,
-        id="release_stale_quote_prompts",
-    )
-    scheduler.add_job(
         release_stale_message_threads,
         trigger="interval",
         seconds=60,
         id="release_stale_message_threads",
-    )
-    scheduler.add_job(
-        release_stale_book_review_prompts,
-        trigger="interval",
-        seconds=60,
-        id="release_stale_book_review_prompts",
-    )
-    scheduler.add_job(
-        release_due_book_add_notices,
-        trigger="interval",
-        seconds=60,
-        id="release_due_book_add_notices",
     )
     scheduler.start()
     await ensure_today_water_reminders()

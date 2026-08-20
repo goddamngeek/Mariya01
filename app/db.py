@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import asyncpg
 
@@ -78,7 +78,8 @@ CREATE TABLE IF NOT EXISTS activity_prompts (
     sent_at TIMESTAMPTZ NOT NULL,
     is_open BOOLEAN NOT NULL DEFAULT TRUE,
     step INTEGER NOT NULL DEFAULT 0,
-    collected JSONB NOT NULL DEFAULT '{}'::jsonb
+    collected JSONB NOT NULL DEFAULT '{}'::jsonb,
+    thread_id INTEGER
 );
 
 -- User-initiated "add an interesting book moment" flow (/quote or the word
@@ -104,23 +105,35 @@ CREATE TABLE IF NOT EXISTS book_quote_prompts (
     book_note_id TEXT,
     book_title TEXT,
     collected JSONB NOT NULL DEFAULT '{}'::jsonb,
-    message_ids INTEGER[] NOT NULL DEFAULT '{}'
+    thread_id INTEGER
 );
 
--- One /reading or /finished interaction, start to finish: the triggering
--- command, the book list, the description, and (if "Я дочитал" is pressed)
--- the whole rating/review exchange. Unlike the per-flow message_ids columns
--- elsewhere, this spans several flows, because from the person's point of
--- view it's all one conversation that should disappear together — either
--- 5 minutes after the last activity (see scheduler.py's
--- release_stale_message_threads) or as soon as they put a reaction on any
--- message in it (see app/service.py's handle_message_reaction).
+-- One interaction, start to finish — the triggering command, every question
+-- and answer, and the final confirmation. THE single mechanism for making
+-- messages go away (see app/threads.py); it replaced four overlapping ones
+-- that each had their own rule for when a conversation disappeared, which
+-- together were impossible to predict.
+--
+-- A thread has exactly one terminal state, "завершена", reachable three
+-- ways: the flow succeeded, ttl_minutes elapsed with no activity, or the
+-- person reacted to one of its messages. Reaching it ALWAYS wipes every
+-- message the thread owns — a reaction doesn't delete anything by itself,
+-- it just ends the thread early and the usual teardown follows.
+--
+-- closing_text, if set, is sent on the timeout path only, as the thread's
+-- final act before teardown (see /addbook's "Добавил книгу").
+--
+-- The one flow with no thread at all is ежедневник: its messages stay until
+-- an explicit /clear, so an answer can still be edited after the fact (see
+-- handle_message_edit).
 CREATE TABLE IF NOT EXISTS message_threads (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
     message_ids INTEGER[] NOT NULL DEFAULT '{}',
     updated_at TIMESTAMPTZ NOT NULL,
-    is_open BOOLEAN NOT NULL DEFAULT TRUE
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    ttl_minutes INTEGER NOT NULL DEFAULT 5,
+    closing_text TEXT
 );
 
 -- "Я дочитал" flow (the button on /reading's book description — see
@@ -165,8 +178,7 @@ CREATE TABLE IF NOT EXISTS book_add_prompts (
     book_note_id TEXT,
     template_message_id BIGINT,
     template_sent_at TIMESTAMPTZ,
-    details_notified BOOLEAN NOT NULL DEFAULT FALSE,
-    message_ids INTEGER[] NOT NULL DEFAULT '{}'
+    thread_id INTEGER
 );
 
 -- Every message sent to/from a chat, purely so the nightly cleanup job
@@ -180,19 +192,6 @@ CREATE TABLE IF NOT EXISTS chat_messages_log (
     chat_id BIGINT NOT NULL,
     message_id BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL
-);
-
--- DB-backed like water_reminders, unlike the in-memory APScheduler
--- trigger="date" jobs this replaces: confirmed live, a 3-minute delayed
--- delete job scheduled purely in process memory silently vanished when a
--- redeploy landed inside that window, leaving the message stuck forever
--- with no trace it was ever supposed to be cleaned up. A row here survives
--- any number of restarts untouched.
-CREATE TABLE IF NOT EXISTS pending_message_deletions (
-    id SERIAL PRIMARY KEY,
-    chat_id BIGINT NOT NULL,
-    message_id BIGINT NOT NULL,
-    due_at TIMESTAMPTZ NOT NULL
 );
 
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
@@ -236,6 +235,18 @@ ALTER TABLE book_review_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
 -- Review-flow messages are tracked on the /reading thread that spawned
 -- them (message_threads), which was double-counting them here.
 ALTER TABLE book_review_prompts DROP COLUMN IF EXISTS message_ids;
+-- Unifying every flow onto message_threads (see app/threads.py): each
+-- prompt table now just points at the thread that owns its messages,
+-- instead of keeping a parallel list of its own.
+ALTER TABLE message_threads ADD COLUMN IF NOT EXISTS ttl_minutes INTEGER NOT NULL DEFAULT 5;
+ALTER TABLE message_threads ADD COLUMN IF NOT EXISTS closing_text TEXT;
+ALTER TABLE activity_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
+ALTER TABLE book_quote_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
+ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
+ALTER TABLE book_quote_prompts DROP COLUMN IF EXISTS message_ids;
+ALTER TABLE book_add_prompts DROP COLUMN IF EXISTS message_ids;
+ALTER TABLE book_add_prompts DROP COLUMN IF EXISTS details_notified;
+DROP TABLE IF EXISTS pending_message_deletions;
 -- Flashcard feature removed entirely (unused, per explicit confirmation
 -- there was nothing worth keeping in it) — drops the tables outright
 -- rather than leaving them as dead weight nothing references anymore.
@@ -474,12 +485,12 @@ async def get_open_activity_prompt(user_id: int) -> asyncpg.Record | None:
     )
 
 
-async def create_activity_prompt(user_id: int, activity: str) -> int:
+async def create_activity_prompt(user_id: int, activity: str, thread_id: int | None = None) -> int:
     pool = await get_pool()
     return await pool.fetchval(
-        "INSERT INTO activity_prompts (user_id, activity, sent_at, is_open) "
-        "VALUES ($1, $2, $3, TRUE) RETURNING id",
-        user_id, activity, utcnow(),
+        "INSERT INTO activity_prompts (user_id, activity, sent_at, is_open, thread_id) "
+        "VALUES ($1, $2, $3, TRUE, $4) RETURNING id",
+        user_id, activity, utcnow(), thread_id,
     )
 
 
@@ -512,13 +523,15 @@ async def get_book_quote_prompt(prompt_id: int) -> asyncpg.Record | None:
     return await pool.fetchrow("SELECT * FROM book_quote_prompts WHERE id = $1", prompt_id)
 
 
-async def create_book_quote_prompt(user_id: int, candidates: list[dict]) -> int:
+async def create_book_quote_prompt(
+    user_id: int, candidates: list[dict], thread_id: int | None = None,
+) -> int:
     pool = await get_pool()
     now = utcnow()
     return await pool.fetchval(
-        "INSERT INTO book_quote_prompts (user_id, sent_at, updated_at, is_open, collected) "
-        "VALUES ($1, $2, $2, TRUE, $3::jsonb) RETURNING id",
-        user_id, now, json.dumps({"candidates": candidates}),
+        "INSERT INTO book_quote_prompts (user_id, sent_at, updated_at, is_open, collected, thread_id) "
+        "VALUES ($1, $2, $2, TRUE, $3::jsonb, $4) RETURNING id",
+        user_id, now, json.dumps({"candidates": candidates}), thread_id,
     )
 
 
@@ -539,28 +552,6 @@ async def advance_book_quote_prompt_step(prompt_id: int, step: int, collected: d
     )
 
 
-async def append_book_quote_prompt_message(prompt_id: int, message_id: int) -> None:
-    """Records a message sent as part of this flow (the book-choice buttons,
-    or one of the two follow-up questions) so release_stale_quote_prompts
-    (scheduler.py) can delete the whole exchange if the person goes quiet."""
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE book_quote_prompts SET message_ids = array_append(message_ids, $1) WHERE id = $2",
-        message_id, prompt_id,
-    )
-
-
-QUOTE_PROMPT_STALE_AFTER = timedelta(minutes=5)
-
-
-async def get_stale_book_quote_prompts() -> list[asyncpg.Record]:
-    pool = await get_pool()
-    return await pool.fetch(
-        "SELECT * FROM book_quote_prompts WHERE is_open = TRUE AND updated_at < $1",
-        utcnow() - QUOTE_PROMPT_STALE_AFTER,
-    )
-
-
 async def close_book_quote_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE book_quote_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
@@ -577,18 +568,13 @@ async def get_open_book_add_prompt(user_id: int) -> asyncpg.Record | None:
     )
 
 
-async def get_book_add_prompt(prompt_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow("SELECT * FROM book_add_prompts WHERE id = $1", prompt_id)
-
-
-async def create_book_add_prompt(user_id: int) -> int:
+async def create_book_add_prompt(user_id: int, thread_id: int | None = None) -> int:
     pool = await get_pool()
     now = utcnow()
     return await pool.fetchval(
-        "INSERT INTO book_add_prompts (user_id, sent_at, updated_at, is_open) "
-        "VALUES ($1, $2, $2, TRUE) RETURNING id",
-        user_id, now,
+        "INSERT INTO book_add_prompts (user_id, sent_at, updated_at, is_open, thread_id) "
+        "VALUES ($1, $2, $2, TRUE, $3) RETURNING id",
+        user_id, now, thread_id,
     )
 
 
@@ -634,34 +620,6 @@ async def get_book_add_prompt_by_template_message(user_id: int, template_message
     )
 
 
-async def get_due_book_add_notices() -> list[asyncpg.Record]:
-    """Rows whose template was sent 5+ minutes ago with no reply yet and no
-    courtesy notice sent — see scheduler.py's release_due_book_add_notices.
-    Does NOT close/expire anything — a reply is still accepted afterward."""
-    pool = await get_pool()
-    return await pool.fetch(
-        "SELECT * FROM book_add_prompts WHERE template_message_id IS NOT NULL "
-        "AND details_notified = FALSE AND template_sent_at < $1",
-        utcnow() - timedelta(minutes=5),
-    )
-
-
-async def mark_book_add_notified(prompt_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute("UPDATE book_add_prompts SET details_notified = TRUE WHERE id = $1", prompt_id)
-
-
-async def append_book_add_prompt_message(prompt_id: int, message_id: int) -> None:
-    """Records one message belonging to this /addbook exchange (either
-    direction) — see _apply_book_details in app/service.py, which deletes
-    every recorded message once both stages finish successfully."""
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE book_add_prompts SET message_ids = array_append(message_ids, $1) WHERE id = $2",
-        message_id, prompt_id,
-    )
-
-
 # --- book reviews ("я дочитал") ---------------------------------------------
 
 async def get_open_book_review_prompt(user_id: int) -> asyncpg.Record | None:
@@ -704,23 +662,16 @@ async def get_book_review_prompt(prompt_id: int) -> asyncpg.Record | None:
     return await pool.fetchrow("SELECT * FROM book_review_prompts WHERE id = $1", prompt_id)
 
 
-async def get_stale_book_review_prompts() -> list[asyncpg.Record]:
-    """Same 5-minute staleness rule as book_quote_prompts — see
-    scheduler.py's release_stale_book_review_prompts."""
-    pool = await get_pool()
-    return await pool.fetch(
-        "SELECT * FROM book_review_prompts WHERE is_open = TRUE AND updated_at < $1",
-        utcnow() - QUOTE_PROMPT_STALE_AFTER,
-    )
-
-
 # --- message threads (/reading & /finished conversations) --------------------
 
-async def create_message_thread(user_id: int) -> int:
+async def create_message_thread(
+    user_id: int, ttl_minutes: int = 5, closing_text: str | None = None,
+) -> int:
     pool = await get_pool()
     return await pool.fetchval(
-        "INSERT INTO message_threads (user_id, updated_at, is_open) VALUES ($1, $2, TRUE) RETURNING id",
-        user_id, utcnow(),
+        "INSERT INTO message_threads (user_id, updated_at, is_open, ttl_minutes, closing_text) "
+        "VALUES ($1, $2, TRUE, $3, $4) RETURNING id",
+        user_id, utcnow(), ttl_minutes, closing_text,
     )
 
 
@@ -757,22 +708,31 @@ async def close_message_thread(thread_id: int) -> None:
 
 
 async def get_stale_message_threads() -> list[asyncpg.Record]:
+    """Per-row ttl_minutes, not one global cutoff — a water reminder is
+    stale after 2 minutes while a half-answered dialogue gets 5."""
     pool = await get_pool()
     return await pool.fetch(
-        "SELECT * FROM message_threads WHERE is_open = TRUE AND updated_at < $1",
-        utcnow() - QUOTE_PROMPT_STALE_AFTER,
+        "SELECT * FROM message_threads WHERE is_open = TRUE "
+        "AND updated_at < now() - (ttl_minutes * interval '1 minute')"
     )
 
 
-async def close_book_review_prompts_for_thread(thread_id: int) -> None:
-    """A thread going away takes any half-finished review dialogue with it —
-    its questions are among the messages just deleted, so leaving the prompt
-    open would silently swallow the person's next unrelated message."""
+_THREADED_PROMPT_TABLES = (
+    "activity_prompts", "book_quote_prompts", "book_add_prompts", "book_review_prompts",
+)
+
+
+async def close_prompts_for_thread(thread_id: int) -> None:
+    """A thread going away takes any half-finished dialogue with it — the
+    questions are among the messages just deleted, so leaving a prompt open
+    would silently swallow the person's next unrelated message as if it
+    were an answer."""
     pool = await get_pool()
-    await pool.execute(
-        "UPDATE book_review_prompts SET is_open = FALSE WHERE thread_id = $1 AND is_open = TRUE",
-        thread_id,
-    )
+    for table in _THREADED_PROMPT_TABLES:
+        await pool.execute(
+            f"UPDATE {table} SET is_open = FALSE WHERE thread_id = $1 AND is_open = TRUE",
+            thread_id,
+        )
 
 
 # --- chat message log (nightly cleanup) -------------------------------------
@@ -818,42 +778,6 @@ async def peek_logged_messages(limit: int = 20) -> list[asyncpg.Record]:
     tonight's real clear_chat_history run."""
     pool = await get_pool()
     return await pool.fetch("SELECT * FROM chat_messages_log ORDER BY id DESC LIMIT $1", limit)
-
-
-async def schedule_pending_message_deletion(chat_id: int, message_id: int, due_at: datetime) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "INSERT INTO pending_message_deletions (chat_id, message_id, due_at) VALUES ($1, $2, $3)",
-        chat_id, message_id, due_at,
-    )
-
-
-async def pop_due_message_deletions() -> list[asyncpg.Record]:
-    """Same atomic fetch-and-clear shape as pop_all_logged_messages — a
-    failed deleteMessage call (already gone, too old, etc.) must not retry
-    forever, just be dropped either way."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            rows = await conn.fetch(
-                "SELECT * FROM pending_message_deletions WHERE due_at <= $1", utcnow(),
-            )
-            if rows:
-                await conn.execute(
-                    "DELETE FROM pending_message_deletions WHERE id = ANY($1::int[])",
-                    [r["id"] for r in rows],
-                )
-            return rows
-
-
-async def peek_pending_message_deletions(limit: int = 20) -> list[asyncpg.Record]:
-    """Diagnostic: everything currently queued for deletion, without
-    popping it — for confirming scheduling is actually happening ahead of
-    the next 60s release_due_message_deletions tick."""
-    pool = await get_pool()
-    return await pool.fetch(
-        "SELECT * FROM pending_message_deletions ORDER BY id DESC LIMIT $1", limit,
-    )
 
 
 # --- reminders (schedule_send tool) -----------------------------------------

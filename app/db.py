@@ -107,6 +107,22 @@ CREATE TABLE IF NOT EXISTS book_quote_prompts (
     message_ids INTEGER[] NOT NULL DEFAULT '{}'
 );
 
+-- One /reading or /finished interaction, start to finish: the triggering
+-- command, the book list, the description, and (if "Я дочитал" is pressed)
+-- the whole rating/review exchange. Unlike the per-flow message_ids columns
+-- elsewhere, this spans several flows, because from the person's point of
+-- view it's all one conversation that should disappear together — either
+-- 5 minutes after the last activity (see scheduler.py's
+-- release_stale_message_threads) or as soon as they put a reaction on any
+-- message in it (see app/service.py's handle_message_reaction).
+CREATE TABLE IF NOT EXISTS message_threads (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    message_ids INTEGER[] NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE
+);
+
 -- "Я дочитал" flow (the button on /reading's book description — see
 -- app/service.py's handle_book_finished) — two steps, rating then free-text
 -- review, which together become a review note cloned into both the book
@@ -123,7 +139,8 @@ CREATE TABLE IF NOT EXISTS book_review_prompts (
     is_open BOOLEAN NOT NULL DEFAULT TRUE,
     step INTEGER NOT NULL DEFAULT 0,
     rating INTEGER,
-    message_ids INTEGER[] NOT NULL DEFAULT '{}'
+    message_ids INTEGER[] NOT NULL DEFAULT '{}',
+    thread_id INTEGER
 );
 
 -- /addbook flow (title, then author — see app/service.py) — stage 1 is the
@@ -216,6 +233,7 @@ ALTER TABLE book_quote_prompts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 UPDATE book_quote_prompts SET updated_at = sent_at WHERE updated_at IS NULL;
 ALTER TABLE book_quote_prompts ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE book_quote_prompts ADD COLUMN IF NOT EXISTS message_ids INTEGER[] NOT NULL DEFAULT '{}';
+ALTER TABLE book_review_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
 -- Flashcard feature removed entirely (unused, per explicit confirmation
 -- there was nothing worth keeping in it) — drops the tables outright
 -- rather than leaving them as dead weight nothing references anymore.
@@ -653,13 +671,16 @@ async def get_open_book_review_prompt(user_id: int) -> asyncpg.Record | None:
     )
 
 
-async def create_book_review_prompt(user_id: int, book_note_id: str, book_title: str) -> int:
+async def create_book_review_prompt(
+    user_id: int, book_note_id: str, book_title: str, thread_id: int | None = None,
+) -> int:
     pool = await get_pool()
     now = utcnow()
     return await pool.fetchval(
-        "INSERT INTO book_review_prompts (user_id, book_note_id, book_title, sent_at, updated_at, is_open) "
-        "VALUES ($1, $2, $3, $4, $4, TRUE) RETURNING id",
-        user_id, book_note_id, book_title, now,
+        "INSERT INTO book_review_prompts "
+        "(user_id, book_note_id, book_title, sent_at, updated_at, is_open, thread_id) "
+        "VALUES ($1, $2, $3, $4, $4, TRUE, $5) RETURNING id",
+        user_id, book_note_id, book_title, now, thread_id,
     )
 
 
@@ -696,6 +717,67 @@ async def get_stale_book_review_prompts() -> list[asyncpg.Record]:
     return await pool.fetch(
         "SELECT * FROM book_review_prompts WHERE is_open = TRUE AND updated_at < $1",
         utcnow() - QUOTE_PROMPT_STALE_AFTER,
+    )
+
+
+# --- message threads (/reading & /finished conversations) --------------------
+
+async def create_message_thread(user_id: int) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "INSERT INTO message_threads (user_id, updated_at, is_open) VALUES ($1, $2, TRUE) RETURNING id",
+        user_id, utcnow(),
+    )
+
+
+async def append_thread_message(thread_id: int, message_id: int) -> None:
+    """Also bumps updated_at — the 5-minute staleness window is measured
+    from the last thing that happened in the thread, not from its start."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE message_threads SET message_ids = array_append(message_ids, $1), updated_at = $2 "
+        "WHERE id = $3",
+        message_id, utcnow(), thread_id,
+    )
+
+
+async def get_thread_by_message(user_id: int, message_id: int) -> asyncpg.Record | None:
+    """Which open thread (if any) a given Telegram message belongs to — for
+    resolving both a button press and a reaction back to its conversation."""
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM message_threads WHERE user_id = $1 AND is_open = TRUE "
+        "AND $2 = ANY(message_ids) ORDER BY id DESC LIMIT 1",
+        user_id, message_id,
+    )
+
+
+async def get_message_thread(thread_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM message_threads WHERE id = $1", thread_id)
+
+
+async def close_message_thread(thread_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE message_threads SET is_open = FALSE WHERE id = $1", thread_id)
+
+
+async def get_stale_message_threads() -> list[asyncpg.Record]:
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM message_threads WHERE is_open = TRUE AND updated_at < $1",
+        utcnow() - QUOTE_PROMPT_STALE_AFTER,
+    )
+
+
+async def close_book_review_prompts_for_thread(thread_id: int) -> None:
+    """A thread going away takes any half-finished review dialogue with it —
+    its questions are among the messages just deleted, so leaving the prompt
+    open would silently swallow the person's next unrelated message."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_review_prompts SET is_open = FALSE WHERE thread_id = $1 AND is_open = TRUE",
+        thread_id,
     )
 
 

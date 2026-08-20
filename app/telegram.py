@@ -93,6 +93,57 @@ async def send_message_with_buttons(
         return None
 
 
+async def clear_reply_markup(chat_id: int | str, message_id: int) -> bool:
+    """Strip the inline keyboard off an already-sent message, leaving its
+    text alone — used right after a button is pressed so the same list
+    can't be answered twice (see app/service.py's book-list handlers)."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup"
+    try:
+        resp = await get_client().post(
+            url, json={"chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []}},
+        )
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        print(f"telegram editMessageReplyMarkup failed: {exc}", flush=True)
+        return False
+
+
+# Telegram does NOT send reaction updates unless they're explicitly listed
+# in the webhook's allowed_updates — "message_reaction" is one of the few
+# update types excluded from the default set, so without this the reaction
+# shortcut for dismissing a thread (see app/service.py's
+# handle_message_reaction) would silently never fire.
+ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "message_reaction"]
+
+
+async def ensure_webhook_allowed_updates() -> None:
+    """Re-register the EXISTING webhook URL with our allowed_updates list.
+    Reads the current URL from getWebhookInfo rather than hardcoding it, so
+    this stays correct across deploys/URL changes; a no-op if no webhook is
+    set yet. Idempotent — safe to run on every startup."""
+    try:
+        info_resp = await get_client().get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo",
+        )
+        info_resp.raise_for_status()
+        result = info_resp.json().get("result") or {}
+        url = result.get("url")
+        if not url:
+            print("ensure_webhook_allowed_updates: no webhook set, skipping", flush=True)
+            return
+        if set(result.get("allowed_updates") or []) == set(ALLOWED_UPDATES):
+            return
+        set_resp = await get_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+            json={"url": url, "allowed_updates": ALLOWED_UPDATES},
+        )
+        set_resp.raise_for_status()
+        print(f"webhook allowed_updates set to {ALLOWED_UPDATES}", flush=True)
+    except httpx.HTTPError as exc:
+        print(f"ensure_webhook_allowed_updates failed (non-fatal): {exc}", flush=True)
+
+
 async def set_bot_commands() -> None:
     """Registers commands in Telegram's own native bot command menu (the "/"
     menu button next to the message input, built into every Telegram chat

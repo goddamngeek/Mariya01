@@ -14,15 +14,19 @@ from app.db import (
     append_book_add_prompt_message,
     append_book_quote_prompt_message,
     append_book_review_prompt_message,
+    append_thread_message,
     close_activity_prompt,
     close_book_add_prompt,
     close_book_quote_prompt,
     close_book_review_prompt,
+    close_book_review_prompts_for_thread,
     close_ezhednevnik_prompt,
+    close_message_thread,
     create_activity_prompt,
     create_book_add_prompt,
     create_book_quote_prompt,
     create_book_review_prompt,
+    create_message_thread,
     finalize_book_add_prompt,
     get_book_add_prompt,
     get_book_add_prompt_by_template_message,
@@ -33,6 +37,7 @@ from app.db import (
     get_open_book_quote_prompt,
     get_open_book_review_prompt,
     get_open_ezhednevnik_prompt,
+    get_thread_by_message,
     insert_incoming_message,
     set_book_add_title,
     set_book_quote_prompt_book,
@@ -54,6 +59,7 @@ from app.prompts import (
 )
 from app.telegram import (
     answer_callback_query,
+    clear_reply_markup,
     delete_message,
     send_message,
     send_message_get_id,
@@ -222,11 +228,11 @@ async def process_incoming_message(
         return
 
     if _looks_like_reading_status(text):
-        await show_reading_status(user_id)
+        await show_reading_status(user_id, telegram_message_id)
         return
 
     if _looks_like_finished_books(text):
-        await show_finished_books(user_id)
+        await show_finished_books(user_id, telegram_message_id)
         return
 
     # "Я дочитал" — started by a button under a book's description (see
@@ -710,50 +716,72 @@ async def handle_book_details_reply(
     return True
 
 
-async def show_reading_status(user_id: int) -> None:
-    """"что я сейчас читаю" / /reading — same book list as /quote
-    (get_active_reading_books), but here the button just shows that book's
-    description on click (handle_reading_book_selected) instead of
-    starting a multi-step flow. Entirely stateless — the note_id is
-    encoded directly in the button's callback_data, no DB row needed."""
+async def _show_book_list(
+    user_id: int, fetch, prefix: str, empty_text: str, trigger_message_id: int | None,
+) -> None:
+    """Shared by /reading and /finished — both just list books as buttons,
+    differing only in which set they fetch and what the buttons do on click.
+    Opens a message_thread covering the whole interaction (the trigger, this
+    list, the description, and any review dialogue that follows), so it can
+    all be cleared away together later."""
     try:
-        books = await get_active_reading_books()
+        books = await fetch()
     except Exception:
         traceback.print_exc()
         await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
         return
 
     if not books:
-        await send_message(user_id, "Нет книг в активном чтении (без даты окончания).")
+        await send_message(user_id, empty_text)
         return
 
-    buttons = [(book["title"], f"rb:{book['note_id']}") for book in books]
-    await send_message_with_buttons(user_id, "Какую книгу показать?", buttons)
+    thread_id = await create_message_thread(user_id)
+    if trigger_message_id is not None:
+        await append_thread_message(thread_id, trigger_message_id)
+    buttons = [(book["title"], f"{prefix}:{book['note_id']}") for book in books]
+    sent_id = await send_message_with_buttons(user_id, "Какую книгу показать?", buttons)
+    if sent_id is not None:
+        await append_thread_message(thread_id, sent_id)
 
 
-async def show_finished_books(user_id: int) -> None:
+async def show_reading_status(user_id: int, trigger_message_id: int | None = None) -> None:
+    """"что я сейчас читаю" / /reading — same book list as /quote
+    (get_active_reading_books), but here the button just shows that book's
+    description on click (handle_reading_book_selected) instead of
+    starting a multi-step flow."""
+    await _show_book_list(
+        user_id, get_active_reading_books, "rb",
+        "Нет книг в активном чтении (без даты окончания).", trigger_message_id,
+    )
+
+
+async def show_finished_books(user_id: int, trigger_message_id: int | None = None) -> None:
     """"прочитанные" / /finished — the mirror of show_reading_status, for
     books that already have a readingEnd date. Same description on click
     (handle_finished_book_selected), minus the "Я дочитал" button, which
     would be meaningless on an already-finished book."""
-    try:
-        books = await get_finished_books()
-    except Exception:
-        traceback.print_exc()
-        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
-        return
-
-    if not books:
-        await send_message(user_id, "Пока нет прочитанных книг.")
-        return
-
-    buttons = [(book["title"], f"pb:{book['note_id']}") for book in books]
-    await send_message_with_buttons(user_id, "Какую книгу показать?", buttons)
+    await _show_book_list(
+        user_id, get_finished_books, "pb", "Пока нет прочитанных книг.", trigger_message_id,
+    )
 
 
-async def _send_book_description(chat_id: int, note_id: str, with_finish_button: bool) -> None:
-    """Shared by both book lists — the description always leads with the
-    book's own title (per request), then the 4 template sections."""
+async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish_button: bool) -> None:
+    """Shared by both lists' button handlers: strip the list's keyboard (so
+    a second book can't be picked from the same message), then send that
+    book's description — always leading with the book's own title (per
+    request), then the 4 template sections."""
+    await answer_callback_query(callback_query["id"])
+    data = callback_query.get("data") or ""
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    list_message_id = message.get("message_id")
+    note_id = data[len(prefix) + 1:]
+
+    thread = None
+    if list_message_id is not None:
+        await clear_reply_markup(chat_id, list_message_id)
+        thread = await get_thread_by_message(chat_id, list_message_id)
+
     try:
         title, details = await get_book_details(note_id)
     except Exception as exc:
@@ -768,28 +796,46 @@ async def _send_book_description(chat_id: int, note_id: str, with_finish_button:
     )
     body = f"<b>{html.escape(title)}</b>\n\n{sections}"
     if with_finish_button:
-        await send_message_with_buttons(
+        sent_id = await send_message_with_buttons(
             chat_id, body, [("Я дочитал", f"fd:{note_id}")], parse_mode="HTML",
         )
-        return
-    await send_message(chat_id, body, parse_mode="HTML")
+    else:
+        sent_id = await send_message_get_id(chat_id, body, parse_mode="HTML")
+    if thread is not None and sent_id is not None:
+        await append_thread_message(thread["id"], sent_id)
 
 
 async def handle_reading_book_selected(callback_query: dict) -> None:
     """Routes a "rb:{note_id}" button press from show_reading_status above
     — called from app/callbacks.py."""
-    await answer_callback_query(callback_query["id"])
-    data = callback_query.get("data") or ""
-    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
-    await _send_book_description(chat_id, data[len("rb:"):], with_finish_button=True)
+    await _handle_book_list_press(callback_query, "rb", with_finish_button=True)
 
 
 async def handle_finished_book_selected(callback_query: dict) -> None:
     """Routes a "pb:{note_id}" button press from show_finished_books above."""
-    await answer_callback_query(callback_query["id"])
-    data = callback_query.get("data") or ""
-    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
-    await _send_book_description(chat_id, data[len("pb:"):], with_finish_button=False)
+    await _handle_book_list_press(callback_query, "pb", with_finish_button=False)
+
+
+async def handle_message_reaction(user_id: int, message_id: int) -> None:
+    """A reaction on any message in an open /reading or /finished thread
+    dismisses the whole thread on the spot — the deliberate shortcut for
+    "I'm done looking at this", instead of waiting out the 5-minute
+    staleness window (see scheduler.py's release_stale_message_threads,
+    which does exactly the same thing on a timer). A reaction anywhere
+    else is ignored."""
+    thread = await get_thread_by_message(user_id, message_id)
+    if thread is None:
+        return
+    await _dismiss_thread(thread)
+
+
+async def _dismiss_thread(thread) -> None:
+    """Delete every message in a thread and close it out — shared by the
+    reaction shortcut above and the staleness job in scheduler.py."""
+    for message_id in thread["message_ids"]:
+        await delete_message(thread["user_id"], message_id)
+    await close_book_review_prompts_for_thread(thread["id"])
+    await close_message_thread(thread["id"])
 
 
 async def handle_book_finished(callback_query: dict) -> None:
@@ -801,10 +847,18 @@ async def handle_book_finished(callback_query: dict) -> None:
     rating/review flow (_handle_book_review_reply below)."""
     query_id = callback_query["id"]
     data = callback_query.get("data") or ""
-    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    description_message_id = message.get("message_id")
     note_id = data[len("fd:"):]
 
     await answer_callback_query(query_id)
+
+    thread = None
+    if description_message_id is not None:
+        await clear_reply_markup(chat_id, description_message_id)
+        thread = await get_thread_by_message(chat_id, description_message_id)
+
     try:
         books = await get_active_reading_books()
         title = next((b["title"] for b in books if b["note_id"] == note_id), None)
@@ -818,10 +872,21 @@ async def handle_book_finished(callback_query: dict) -> None:
         await send_message(chat_id, f"Не получилось отметить книгу: {type(exc).__name__}.")
         return
 
-    prompt_id = await create_book_review_prompt(chat_id, note_id, title)
+    thread_id = thread["id"] if thread is not None else None
+    prompt_id = await create_book_review_prompt(chat_id, note_id, title, thread_id)
     sent_id = await send_message_get_id(chat_id, book_review_step_text(0))
     if sent_id is not None:
-        await append_book_review_prompt_message(prompt_id, sent_id)
+        await _track_review_message(prompt_id, thread_id, sent_id)
+
+
+async def _track_review_message(prompt_id: int, thread_id: int | None, message_id: int) -> None:
+    """Review-flow messages are tracked twice over: on the prompt itself
+    (so release_stale_book_review_prompts can clean up a review started
+    outside a thread) and on the thread when there is one (so a reaction
+    wipes the entire /reading conversation, review included)."""
+    await append_book_review_prompt_message(prompt_id, message_id)
+    if thread_id is not None:
+        await append_thread_message(thread_id, message_id)
 
 
 async def _handle_book_review_reply(
@@ -831,11 +896,12 @@ async def _handle_book_review_reply(
     review. Out-of-range or non-numeric ratings re-ask rather than being
     clamped or invented, same as the activity tracker's score step."""
     step = prompt["step"]
+    thread_id = prompt["thread_id"]
     message_id = await insert_incoming_message(
         user_id, text, f"book_review_{step}", reply_to_text, telegram_message_id,
     )
     if telegram_message_id is not None:
-        await append_book_review_prompt_message(prompt["id"], telegram_message_id)
+        await _track_review_message(prompt["id"], thread_id, telegram_message_id)
 
     if step == 0:
         match = _SCORE_RE.search(text)
@@ -845,13 +911,13 @@ async def _handle_book_review_reply(
                 user_id, "Нужно число от 1 до 10 — " + book_review_step_text(0),
             )
             if sent_id is not None:
-                await append_book_review_prompt_message(prompt["id"], sent_id)
+                await _track_review_message(prompt["id"], thread_id, sent_id)
             await ack_incoming_messages([message_id])
             return
         await set_book_review_rating(prompt["id"], rating)
         sent_id = await send_message_get_id(user_id, book_review_step_text(1))
         if sent_id is not None:
-            await append_book_review_prompt_message(prompt["id"], sent_id)
+            await _track_review_message(prompt["id"], thread_id, sent_id)
         await ack_incoming_messages([message_id])
         return
 
@@ -861,7 +927,9 @@ async def _handle_book_review_reply(
             prompt["book_note_id"], prompt["book_title"], prompt["rating"], text.strip(), person_name,
         )
         await close_book_review_prompt(prompt["id"])
-        await send_message(user_id, "Спасибо, записал отзыв!")
+        sent_id = await send_message_get_id(user_id, "Спасибо, записал отзыв!")
+        if sent_id is not None:
+            await _track_review_message(prompt["id"], thread_id, sent_id)
     except Exception as exc:
         print(f"create_book_review_note failed for user={user_id}:", flush=True)
         traceback.print_exc()

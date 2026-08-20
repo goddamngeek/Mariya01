@@ -20,6 +20,7 @@ from app.db import (
     get_registered_user_ids,
     get_stale_book_quote_prompts,
     get_stale_book_review_prompts,
+    get_stale_message_threads,
     has_open_ezhednevnik,
     mark_book_add_notified,
     mark_water_reminder_sent,
@@ -185,6 +186,18 @@ async def release_stale_book_review_prompts() -> None:
         await close_book_review_prompt(row["id"])
 
 
+async def release_stale_message_threads() -> None:
+    """The timer half of dismissing a /reading or /finished conversation —
+    5 minutes after the last thing that happened in it, the whole thread's
+    messages get deleted. The other half is instant, on a reaction (see
+    app/service.py's handle_message_reaction); both funnel into the same
+    _dismiss_thread."""
+    from app.service import _dismiss_thread  # imported here: app.service imports this module
+
+    for thread in await get_stale_message_threads():
+        await _dismiss_thread(thread)
+
+
 async def release_due_book_add_notices() -> None:
     """Closes out the "normal dialogue" window for a /addbook flow (see
     app/service.py's start_book_add_flow) — 5 minutes with no answer to the
@@ -308,6 +321,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_stale_quote_prompts",
+    )
+    scheduler.add_job(
+        release_stale_message_threads,
+        trigger="interval",
+        seconds=60,
+        id="release_stale_message_threads",
     )
     scheduler.add_job(
         release_stale_book_review_prompts,

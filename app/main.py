@@ -28,6 +28,7 @@ from app.scheduler import (
 from app.service import (
     handle_book_details_reply,
     handle_message_edit,
+    handle_message_reaction,
     process_incoming_message,
     show_finished_books,
     show_reading_status,
@@ -35,7 +36,12 @@ from app.service import (
     start_quote_flow,
 )
 from app.sync import router as sync_router
-from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
+from app.telegram import (
+    close_client as close_telegram_client,
+    ensure_webhook_allowed_updates,
+    send_message,
+    set_bot_commands,
+)
 from app.trilium_client import get_week_summary
 
 LINKS_TEXT = (
@@ -72,6 +78,7 @@ HELP_TEXT = (
 async def lifespan(app: FastAPI):
     await init_db()
     await set_bot_commands()
+    await ensure_webhook_allowed_updates()
     await start_scheduler()
     yield
     scheduler.shutdown(wait=False)
@@ -103,6 +110,20 @@ async def telegram_webhook(request: Request):
 
     if "callback_query" in update:
         await process_callback_query(update["callback_query"])
+        return {"ok": True}
+
+    if "message_reaction" in update:
+        # Putting a reaction on any message of an open /reading or
+        # /finished thread dismisses that whole thread immediately (see
+        # app/service.py's handle_message_reaction). Requires
+        # "message_reaction" in the webhook's allowed_updates — Telegram
+        # excludes it from the default set, see ensure_webhook_allowed_updates.
+        reaction = update["message_reaction"]
+        reaction_chat_id = (reaction.get("chat") or {}).get("id")
+        reaction_message_id = reaction.get("message_id")
+        if reaction_chat_id is not None and reaction_message_id is not None:
+            if await is_registered(reaction_chat_id):
+                await handle_message_reaction(reaction_chat_id, reaction_message_id)
         return {"ok": True}
 
     if "edited_message" in update:
@@ -197,11 +218,11 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/reading":
-        await show_reading_status(chat_id)
+        await show_reading_status(chat_id, trigger_message_id=message_id)
         return {"ok": True}
 
     if text.strip() == "/finished":
-        await show_finished_books(chat_id)
+        await show_finished_books(chat_id, trigger_message_id=message_id)
         return {"ok": True}
 
     if text.strip() == "/help":

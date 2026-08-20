@@ -130,7 +130,8 @@ CREATE TABLE IF NOT EXISTS book_add_prompts (
     book_note_id TEXT,
     template_message_id BIGINT,
     template_sent_at TIMESTAMPTZ,
-    details_notified BOOLEAN NOT NULL DEFAULT FALSE
+    details_notified BOOLEAN NOT NULL DEFAULT FALSE,
+    message_ids INTEGER[] NOT NULL DEFAULT '{}'
 );
 
 -- Every message sent to/from a chat, purely so the nightly cleanup job
@@ -177,6 +178,11 @@ ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS stage;
 ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS pending_text;
 ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS step INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- Every message belonging to a /addbook exchange (trigger, both questions
+-- and answers, the template, the details answer, the final confirmation)
+-- — cleared once both stages finish successfully, see
+-- app/service.py's _apply_book_details.
+ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS message_ids INTEGER[] NOT NULL DEFAULT '{}';
 -- Flashcard feature removed entirely (unused, per explicit confirmation
 -- there was nothing worth keeping in it) — drops the tables outright
 -- rather than leaving them as dead weight nothing references anymore.
@@ -518,6 +524,11 @@ async def get_open_book_add_prompt(user_id: int) -> asyncpg.Record | None:
     )
 
 
+async def get_book_add_prompt(prompt_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM book_add_prompts WHERE id = $1", prompt_id)
+
+
 async def create_book_add_prompt(user_id: int) -> int:
     pool = await get_pool()
     now = utcnow()
@@ -585,6 +596,17 @@ async def get_due_book_add_notices() -> list[asyncpg.Record]:
 async def mark_book_add_notified(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE book_add_prompts SET details_notified = TRUE WHERE id = $1", prompt_id)
+
+
+async def append_book_add_prompt_message(prompt_id: int, message_id: int) -> None:
+    """Records one message belonging to this /addbook exchange (either
+    direction) — see _apply_book_details in app/service.py, which deletes
+    every recorded message once both stages finish successfully."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_add_prompts SET message_ids = array_append(message_ids, $1) WHERE id = $2",
+        message_id, prompt_id,
+    )
 
 
 # --- chat message log (nightly cleanup) -------------------------------------

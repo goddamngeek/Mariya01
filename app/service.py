@@ -10,6 +10,7 @@ from app.db import (
     advance_activity_prompt_step,
     advance_book_quote_prompt_step,
     advance_ezhednevnik_step,
+    append_book_add_prompt_message,
     append_book_quote_prompt_message,
     close_activity_prompt,
     close_book_add_prompt,
@@ -19,6 +20,7 @@ from app.db import (
     create_book_add_prompt,
     create_book_quote_prompt,
     finalize_book_add_prompt,
+    get_book_add_prompt,
     get_book_add_prompt_by_template_message,
     get_book_quote_prompt,
     get_incoming_message_by_telegram_id,
@@ -45,6 +47,7 @@ from app.prompts import (
 )
 from app.telegram import (
     answer_callback_query,
+    delete_message,
     send_message,
     send_message_get_id,
     send_message_with_buttons,
@@ -211,11 +214,11 @@ async def process_incoming_message(
             await close_book_add_prompt(open_book_add["id"])
             open_book_add = None
     if open_book_add is not None:
-        await _handle_book_add_reply(user_id, text, reply_to_text, open_book_add)
+        await _handle_book_add_reply(user_id, text, reply_to_text, open_book_add, telegram_message_id)
         return
 
     if _looks_like_book_add(text):
-        await start_book_add_flow(user_id, text, reply_to_text)
+        await start_book_add_flow(user_id, text, reply_to_text, telegram_message_id)
         return
 
     received_at = utcnow()
@@ -517,16 +520,37 @@ async def handle_message_edit(user_id: int, telegram_message_id: int, new_text: 
 _SKIP_AUTHOR_WORDS = ("нет", "не знаю", "неизвестно", "не помню")
 
 
-async def start_book_add_flow(user_id: int, text: str, reply_to_text: str | None = None) -> None:
+async def start_book_add_flow(
+    user_id: int, text: str, reply_to_text: str | None = None, telegram_message_id: int | None = None,
+) -> None:
     """Shared by the free-text trigger (_looks_like_book_add above) and the
-    /addbook command (app/main.py)."""
+    /addbook command (app/main.py). Every message belonging to this
+    exchange (starting with the trigger itself) is tracked via
+    append_book_add_prompt_message, so it can all be deleted in one shot
+    once both stages finish successfully — see _cleanup_book_add_messages."""
     message_id = await insert_incoming_message(user_id, text, "book_add_start", reply_to_text)
-    await create_book_add_prompt(user_id)
-    await send_message(user_id, book_add_step_text(0))
+    prompt_id = await create_book_add_prompt(user_id)
+    if telegram_message_id is not None:
+        await append_book_add_prompt_message(prompt_id, telegram_message_id)
+    sent_id = await send_message_get_id(user_id, book_add_step_text(0))
+    if sent_id is not None:
+        await append_book_add_prompt_message(prompt_id, sent_id)
     await ack_incoming_messages([message_id])
 
 
-async def _apply_book_details(user_id: int, note_id: str, text: str) -> None:
+async def _cleanup_book_add_messages(user_id: int, prompt_id: int) -> None:
+    """Deletes every message tagged onto this /addbook exchange — only
+    called once both stages have actually finished successfully (see
+    _apply_book_details), per explicit request: unlike /quote's stale-flow
+    cleanup, this is never a "you took too long" wipe."""
+    prompt = await get_book_add_prompt(prompt_id)
+    if prompt is None:
+        return
+    for message_id in prompt["message_ids"]:
+        await delete_message(user_id, message_id)
+
+
+async def _apply_book_details(user_id: int, prompt_id: int, note_id: str, text: str) -> bool:
     """Shared by both ways of answering the "расскажи подробнее" template —
     the immediate plain-message continuation (step 2 in
     _handle_book_add_reply below) and a later reply (handle_book_details_reply).
@@ -534,7 +558,9 @@ async def _apply_book_details(user_id: int, note_id: str, text: str) -> None:
     separated), taken by POSITION in the same order as the template
     (Об Авторе / Аннотация / Жанр / Похожие книги), since the answer always
     mirrors that same paragraph structure. Each paragraph's own first line
-    is dropped (the echoed-back header) if it has more than one line."""
+    is dropped (the echoed-back header) if it has more than one line.
+    Returns whether it succeeded — the caller only deletes the exchange's
+    messages on True."""
     raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
     paragraphs = []
     for block in raw_paragraphs:
@@ -544,17 +570,22 @@ async def _apply_book_details(user_id: int, note_id: str, text: str) -> None:
 
     try:
         await fill_book_details(note_id, values)
-        await send_message(user_id, "Спасибо, добавил книгу!")
+        confirm_id = await send_message_get_id(user_id, "Спасибо, добавил книгу!")
+        if confirm_id is not None:
+            await append_book_add_prompt_message(prompt_id, confirm_id)
+        await _cleanup_book_add_messages(user_id, prompt_id)
+        return True
     except Exception as exc:
         print(f"fill_book_details failed for user={user_id}:", flush=True)
         traceback.print_exc()
         await send_message(
             user_id, f"Не получилось записать подробности (Trilium недоступен): {type(exc).__name__}.",
         )
+        return False
 
 
 async def _handle_book_add_reply(
-    user_id: int, text: str, reply_to_text: str | None, prompt,
+    user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None = None,
 ) -> None:
     """step 0 = awaiting title, step 1 = awaiting author (or a skip word
     like "нет"/"не знаю" — author is optional). step 2 = the book already
@@ -565,16 +596,20 @@ async def _handle_book_add_reply(
     by handle_book_details_reply below."""
     step = prompt["step"]
     kind = f"book_add_{step}"
-    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
+    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text, telegram_message_id)
+    if telegram_message_id is not None:
+        await append_book_add_prompt_message(prompt["id"], telegram_message_id)
 
     if step == 0:
         await set_book_add_title(prompt["id"], text.strip())
-        await send_message(user_id, book_add_step_text(1))
+        sent_id = await send_message_get_id(user_id, book_add_step_text(1))
+        if sent_id is not None:
+            await append_book_add_prompt_message(prompt["id"], sent_id)
         await ack_incoming_messages([message_id])
         return
 
     if step == 2:
-        await _apply_book_details(user_id, prompt["book_note_id"], text)
+        await _apply_book_details(user_id, prompt["id"], prompt["book_note_id"], text)
         await close_book_add_prompt(prompt["id"])
         await ack_incoming_messages([message_id])
         return
@@ -589,6 +624,7 @@ async def _handle_book_add_reply(
         )
         if template_message_id is not None:
             await finalize_book_add_prompt(prompt["id"], author, note_id, template_message_id)
+            await append_book_add_prompt_message(prompt["id"], template_message_id)
         else:
             await close_book_add_prompt(prompt["id"])
     except Exception as exc:
@@ -621,7 +657,8 @@ async def handle_book_details_reply(
     message_id = await insert_incoming_message(
         user_id, text, "book_add_details", reply_to_text, telegram_message_id,
     )
-    await _apply_book_details(user_id, prompt["book_note_id"], text)
+    await append_book_add_prompt_message(prompt["id"], telegram_message_id)
+    await _apply_book_details(user_id, prompt["id"], prompt["book_note_id"], text)
     await close_book_add_prompt(prompt["id"])
     await ack_incoming_messages([message_id])
     return True

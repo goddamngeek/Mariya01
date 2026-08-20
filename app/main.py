@@ -186,7 +186,7 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/addbook":
-        await start_book_add_flow(chat_id, text)
+        await start_book_add_flow(chat_id, text, telegram_message_id=message_id)
         return {"ok": True}
 
     if text.strip() == "/help":

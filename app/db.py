@@ -268,6 +268,17 @@ async def pull_unconfirmed_incoming() -> list[asyncpg.Record]:
     )
 
 
+async def get_recent_incoming_messages(user_id: int, limit: int = 10) -> list[asyncpg.Record]:
+    """Diagnostic: newest incoming_messages rows for one user, including
+    telegram_message_id/entry_date — for confirming handle_message_edit
+    (app/service.py) can actually find and tag the row it needs to."""
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM incoming_messages WHERE user_id = $1 ORDER BY id DESC LIMIT $2",
+        user_id, limit,
+    )
+
+
 async def ack_incoming_messages(ids: list[int]) -> None:
     if not ids:
         return

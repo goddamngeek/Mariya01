@@ -10,6 +10,7 @@ from app.db import (
     get_ezhednevnik_prompts_for_user,
     get_odysseus_session_id,
     get_open_activity_prompt,
+    get_recent_incoming_messages,
     get_recent_reminders,
     get_water_reminders_for_date,
     peek_logged_messages,
@@ -248,3 +249,20 @@ async def active_books():
     confirming it resolves the real КНИГИ note/readingStart/readingEnd
     labels correctly without going through the whole Telegram flow."""
     return await get_active_reading_books()
+
+
+@router.get("/recent_incoming", dependencies=[Depends(require_bearer)])
+async def recent_incoming(user_id: int):
+    """Diagnostic: newest incoming_messages rows for one user, including
+    telegram_message_id/entry_date — for debugging handle_message_edit
+    (app/service.py), e.g. confirming a given Telegram message actually got
+    tagged the way it should have."""
+    return [
+        {
+            "id": r["id"], "text": r["text"], "kind": r["kind"],
+            "telegram_message_id": r["telegram_message_id"],
+            "entry_date": r["entry_date"].isoformat() if r["entry_date"] else None,
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in await get_recent_incoming_messages(user_id)
+    ]

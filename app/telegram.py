@@ -101,7 +101,9 @@ async def set_bot_commands() -> None:
     no message sent to anyone)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
     commands = [
-        {"command": "start", "description": "Активировать бота"},
+        # /start itself still works (handled in app/main.py) — just left out
+        # of the visible menu since both real users are already registered
+        # and Telegram prompts /start on its own for any unstarted chat.
         {"command": "kanban", "description": "Показать канбан-доску задач"},
         {"command": "week", "description": "Сводка по ежедневнику за неделю"},
         {"command": "checkin", "description": "Повторить текущий вопрос ежедневника"},

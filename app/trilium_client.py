@@ -497,8 +497,14 @@ async def get_active_reading_books() -> list[dict]:
             child_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{child_id}")
             child_resp.raise_for_status()
             child = child_resp.json()
-            labels = {a["name"] for a in child.get("attributes", []) if a.get("type") == "label"}
-            if "readingStart" in labels and "readingEnd" not in labels:
+            # Value, not just presence — clearing a promoted date field in
+            # Trilium's UI leaves the readingEnd label attached with an
+            # empty string value rather than removing it outright
+            # (confirmed live), so a plain "not in labels" check missed it.
+            labels = {
+                a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
+            }
+            if labels.get("readingStart") and not labels.get("readingEnd"):
                 books.append({"note_id": child_id, "title": child.get("title") or "(без названия)"})
         return books
 

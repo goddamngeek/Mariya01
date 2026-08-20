@@ -24,6 +24,7 @@ from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
 from app.trilium_client import get_active_reading_books, get_note_content_by_title, list_all_books
+from app.service import start_quote_flow
 
 router = APIRouter(prefix="/sync")
 
@@ -281,3 +282,17 @@ async def recent_incoming(user_id: int):
         }
         for r in await get_recent_incoming_messages(user_id)
     ]
+
+
+@router.post("/trigger_quote_debug", dependencies=[Depends(require_bearer)])
+async def trigger_quote_debug(user_id: int):
+    """Diagnostic: runs start_quote_flow() directly and returns the full
+    traceback in the response if it raises — for debugging a /quote
+    command that produces no reply at all in Telegram (which normally
+    means an unhandled exception, silently 500ing the webhook)."""
+    import traceback
+    try:
+        await start_quote_flow(user_id)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": repr(exc), "traceback": traceback.format_exc()}

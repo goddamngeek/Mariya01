@@ -23,7 +23,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.trilium_client import get_active_reading_books
+from app.trilium_client import get_active_reading_books, get_note_content_by_title
 
 router = APIRouter(prefix="/sync")
 
@@ -249,6 +249,13 @@ async def active_books():
     confirming it resolves the real КНИГИ note/readingStart/readingEnd
     labels correctly without going through the whole Telegram flow."""
     return await get_active_reading_books()
+
+
+@router.get("/note_content", dependencies=[Depends(require_bearer)])
+async def note_content(title: str):
+    """Diagnostic: raw content of a note by exact title — used to inspect
+    _ШАБЛОН_КНИГА's real structure while building /addbook."""
+    return {"content": await get_note_content_by_title(title)}
 
 
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])

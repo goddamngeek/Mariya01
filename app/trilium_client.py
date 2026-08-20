@@ -411,6 +411,20 @@ async def add_book_review(book_title: str, review_text: str) -> None:
         await _put_content(client, note_id, existing + review_html)
 
 
+async def get_note_content_by_title(title: str) -> str:
+    """Diagnostic-only: raw HTML content of any note by exact title — used
+    once to inspect _ШАБЛОН_КНИГА's real structure while building the
+    /addbook flow (see app/sync.py's /note_content)."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_id = await _find_note_id(client, title)
+        if note_id is None:
+            raise TriliumNoteNotFoundError(f"No note titled '{title}' found.")
+        return await _get_content(client, note_id)
+
+
 async def get_active_reading_books() -> list[dict]:
     """Books currently being read — child notes of КНИГИ (see add_book) that
     have a readingStart label but no readingEnd one yet. Same

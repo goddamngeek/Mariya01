@@ -7,6 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import TIMEZONE, WATER_REMINDER_TEXTS, WATER_REMINDER_WINDOWS
 from app.db import (
     claim_reminder,
+    close_book_quote_prompt,
     close_stale_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
@@ -14,6 +15,7 @@ from app.db import (
     get_due_water_reminders,
     get_open_activity_prompt,
     get_registered_user_ids,
+    get_stale_book_quote_prompts,
     has_open_ezhednevnik,
     mark_water_reminder_sent,
     pop_due_message_deletions,
@@ -152,6 +154,20 @@ async def release_due_message_deletions() -> None:
         await delete_message(row["chat_id"], row["message_id"])
 
 
+async def release_stale_quote_prompts() -> None:
+    """Cleans up a /quote flow (see app/service.py's start_quote_flow) that
+    the person walked away from mid-conversation — 5 minutes since the last
+    step (get_stale_book_quote_prompts' updated_at cutoff), unlike
+    ежедневник/activity which just get silently closed on timeout, this
+    actually deletes every message the bot sent as part of that exchange
+    (message_ids), per request — a half-answered "Какую книгу?" shouldn't
+    just sit in the chat forever."""
+    for row in await get_stale_book_quote_prompts():
+        for message_id in row["message_ids"]:
+            await delete_message(row["user_id"], message_id)
+        await close_book_quote_prompt(row["id"])
+
+
 async def release_due_water_reminders() -> None:
     for row in await get_due_water_reminders():
         text = random.choice(WATER_REMINDER_TEXTS)
@@ -252,6 +268,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_due_message_deletions",
+    )
+    scheduler.add_job(
+        release_stale_quote_prompts,
+        trigger="interval",
+        seconds=60,
+        id="release_stale_quote_prompts",
     )
     scheduler.start()
     await ensure_today_water_reminders()

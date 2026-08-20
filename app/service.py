@@ -10,6 +10,7 @@ from app.db import (
     advance_activity_prompt_step,
     advance_book_quote_prompt_step,
     advance_ezhednevnik_step,
+    append_book_quote_prompt_message,
     close_activity_prompt,
     close_book_quote_prompt,
     close_ezhednevnik_prompt,
@@ -32,7 +33,12 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app.telegram import answer_callback_query, send_message, send_message_with_buttons
+from app.telegram import (
+    answer_callback_query,
+    send_message,
+    send_message_get_id,
+    send_message_with_buttons,
+)
 from app.trilium_client import (
     add_book_quote,
     extract_duration,
@@ -56,10 +62,14 @@ _SCORE_RE = re.compile(r"-?\d+")
 # of bug already fixed once for ежедневник (see close_stale_ezhednevnik_prompts).
 _ACTIVITY_PROMPT_TIMEOUT = timedelta(hours=3)
 
-# Same reasoning as _ACTIVITY_PROMPT_TIMEOUT — a book_quote_prompt has no
-# scheduled re-check either, so a forgotten reply (or an unanswered button
-# press) must not gate every future message from that person forever.
-_QUOTE_PROMPT_TIMEOUT = timedelta(hours=3)
+# Much shorter than ежедневник/activity, per request — this is a quick
+# on-the-spot action, not something meant to sit half-answered for hours.
+# The real cleanup (deleting the dangling messages, not just closing the
+# prompt) happens proactively in scheduler.py's release_stale_quote_prompts
+# (polled every 60s); this is only a same-value fallback so a reply that
+# slips in right at the boundary is never treated as answering a prompt
+# that's about to be wiped out from under it.
+_QUOTE_PROMPT_TIMEOUT = timedelta(minutes=5)
 
 _ACTIVITY_VERBS = (
     "позанимал", "занимал", "делал", "сделал", "провел", "провёл",
@@ -133,7 +143,7 @@ async def process_incoming_message(user_id: int, text: str, reply_to_text: str |
     # the button rather than being consumed as an answer.
     open_quote = await get_open_book_quote_prompt(user_id)
     if open_quote is not None:
-        if utcnow() - open_quote["sent_at"] > _QUOTE_PROMPT_TIMEOUT:
+        if utcnow() - open_quote["updated_at"] > _QUOTE_PROMPT_TIMEOUT:
             await close_book_quote_prompt(open_quote["id"])
             open_quote = None
     if open_quote is not None:
@@ -320,7 +330,9 @@ async def start_quote_flow(user_id: int, text: str = "цитата", reply_to_te
 
     prompt_id = await create_book_quote_prompt(user_id, books)
     buttons = [(book["title"], f"bq:{prompt_id}:{i}") for i, book in enumerate(books)]
-    await send_message_with_buttons(user_id, "Какую книгу?", buttons)
+    sent_id = await send_message_with_buttons(user_id, "Какую книгу?", buttons)
+    if sent_id is not None:
+        await append_book_quote_prompt_message(prompt_id, sent_id)
     await ack_incoming_messages([message_id])
 
 
@@ -351,7 +363,9 @@ async def handle_quote_book_selected(callback_query: dict) -> None:
     book = candidates[index]
     await set_book_quote_prompt_book(prompt_id, book["note_id"], book["title"])
     await answer_callback_query(query_id, f"Книга: {book['title']}")
-    await send_message(chat_id, quote_step_text(0))
+    sent_id = await send_message_get_id(chat_id, quote_step_text(0))
+    if sent_id is not None:
+        await append_book_quote_prompt_message(prompt_id, sent_id)
 
 
 async def _handle_quote_reply(
@@ -367,7 +381,9 @@ async def _handle_quote_reply(
     if step == 1:
         collected["quote"] = text.strip()
         await advance_book_quote_prompt_step(prompt["id"], 2, collected)
-        await send_message(user_id, quote_step_text(1))
+        sent_id = await send_message_get_id(user_id, quote_step_text(1))
+        if sent_id is not None:
+            await append_book_quote_prompt_message(prompt["id"], sent_id)
         await ack_incoming_messages([message_id])
         return
 

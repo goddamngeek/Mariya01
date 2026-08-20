@@ -88,16 +88,23 @@ CREATE TABLE IF NOT EXISTS activity_prompts (
 -- text steps (quote, then impression). collected holds {"candidates": [...]}
 -- while step 0 is still open (so the callback handler can resolve a button
 -- press back to a note_id/title without re-querying Trilium), then the
--- quote/impression answers once step advances past 0.
+-- quote/impression answers once step advances past 0. Short-lived by
+-- design (unlike ежедневник/activity) — updated_at tracks the last real
+-- step so release_stale_quote_prompts (scheduler.py) can delete the whole
+-- exchange (message_ids) and close it out 5 minutes after the person goes
+-- quiet, rather than leaving a half-answered "Какую книгу?" sitting in the
+-- chat forever.
 CREATE TABLE IF NOT EXISTS book_quote_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
     sent_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
     is_open BOOLEAN NOT NULL DEFAULT TRUE,
     step INTEGER NOT NULL DEFAULT 0,
     book_note_id TEXT,
     book_title TEXT,
-    collected JSONB NOT NULL DEFAULT '{}'::jsonb
+    collected JSONB NOT NULL DEFAULT '{}'::jsonb,
+    message_ids INTEGER[] NOT NULL DEFAULT '{}'
 );
 
 -- Every message sent to/from a chat, purely so the nightly cleanup job
@@ -387,26 +394,50 @@ async def get_book_quote_prompt(prompt_id: int) -> asyncpg.Record | None:
 
 async def create_book_quote_prompt(user_id: int, candidates: list[dict]) -> int:
     pool = await get_pool()
+    now = utcnow()
     return await pool.fetchval(
-        "INSERT INTO book_quote_prompts (user_id, sent_at, is_open, collected) "
-        "VALUES ($1, $2, TRUE, $3::jsonb) RETURNING id",
-        user_id, utcnow(), json.dumps({"candidates": candidates}),
+        "INSERT INTO book_quote_prompts (user_id, sent_at, updated_at, is_open, collected) "
+        "VALUES ($1, $2, $2, TRUE, $3::jsonb) RETURNING id",
+        user_id, now, json.dumps({"candidates": candidates}),
     )
 
 
 async def set_book_quote_prompt_book(prompt_id: int, note_id: str, title: str) -> None:
     pool = await get_pool()
     await pool.execute(
-        "UPDATE book_quote_prompts SET step = 1, book_note_id = $1, book_title = $2 WHERE id = $3",
-        note_id, title, prompt_id,
+        "UPDATE book_quote_prompts SET step = 1, book_note_id = $1, book_title = $2, updated_at = $3 "
+        "WHERE id = $4",
+        note_id, title, utcnow(), prompt_id,
     )
 
 
 async def advance_book_quote_prompt_step(prompt_id: int, step: int, collected: dict) -> None:
     pool = await get_pool()
     await pool.execute(
-        "UPDATE book_quote_prompts SET step = $1, collected = $2::jsonb WHERE id = $3",
-        step, json.dumps(collected), prompt_id,
+        "UPDATE book_quote_prompts SET step = $1, collected = $2::jsonb, updated_at = $3 WHERE id = $4",
+        step, json.dumps(collected), utcnow(), prompt_id,
+    )
+
+
+async def append_book_quote_prompt_message(prompt_id: int, message_id: int) -> None:
+    """Records a message sent as part of this flow (the book-choice buttons,
+    or one of the two follow-up questions) so release_stale_quote_prompts
+    (scheduler.py) can delete the whole exchange if the person goes quiet."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_quote_prompts SET message_ids = array_append(message_ids, $1) WHERE id = $2",
+        message_id, prompt_id,
+    )
+
+
+QUOTE_PROMPT_STALE_AFTER = timedelta(minutes=5)
+
+
+async def get_stale_book_quote_prompts() -> list[asyncpg.Record]:
+    pool = await get_pool()
+    return await pool.fetch(
+        "SELECT * FROM book_quote_prompts WHERE is_open = TRUE AND updated_at < $1",
+        utcnow() - QUOTE_PROMPT_STALE_AFTER,
     )
 
 

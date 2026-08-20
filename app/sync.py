@@ -22,6 +22,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
+from app.trilium_client import get_active_reading_books
 
 router = APIRouter(prefix="/sync")
 
@@ -238,3 +239,12 @@ async def trigger_chat_clear(body: TriggerChatClearRequest):
     a single chat; omit to clear everyone (same as the real cron call)."""
     await clear_chat_history(only_chat_id=body.user_id)
     return {"ok": True}
+
+
+@router.get("/active_books", dependencies=[Depends(require_bearer)])
+async def active_books():
+    """Diagnostic: books get_active_reading_books() (see /quote flow in
+    app/service.py) currently considers "in active reading" — for
+    confirming it resolves the real КНИГИ note/readingStart/readingEnd
+    labels correctly without going through the whole Telegram flow."""
+    return await get_active_reading_books()

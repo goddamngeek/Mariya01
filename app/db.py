@@ -136,6 +136,14 @@ CREATE TABLE IF NOT EXISTS pending_message_deletions (
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
+-- Lets an edited Telegram message ("я поторопился, дай поправлю") retroactively
+-- patch the one ЕЖЕДНЕВНИК cell it originally answered — see
+-- app/service.py's handle_message_edit. telegram_message_id is populated on
+-- every insert going forward; entry_date only on ezhednevnik_* answer rows
+-- (the day the question was SENT, same value fill_ezhednevnik already uses),
+-- since that's the only flow this supports. Both NULL for everything else.
+ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT;
+ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS entry_date DATE;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS anonymous BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE ezhednevnik_prompts DROP CONSTRAINT IF EXISTS ezhednevnik_prompts_slot_check;
 ALTER TABLE ezhednevnik_prompts ADD CONSTRAINT ezhednevnik_prompts_slot_check CHECK (slot IN ('am', 'pm', 'evening'));
@@ -227,13 +235,29 @@ async def set_odysseus_session_id(chat_id: int, session_id: str) -> None:
 
 async def insert_incoming_message(
     user_id: int, text: str, kind: str = "passive", reply_to_text: str | None = None,
+    telegram_message_id: int | None = None, entry_date=None,
 ) -> int:
     pool = await get_pool()
     return await pool.fetchval(
-        "INSERT INTO incoming_messages (user_id, text, created_at, kind, reply_to_text) "
-        "VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        user_id, text, utcnow(), kind, reply_to_text,
+        "INSERT INTO incoming_messages "
+        "(user_id, text, created_at, kind, reply_to_text, telegram_message_id, entry_date) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        user_id, text, utcnow(), kind, reply_to_text, telegram_message_id, entry_date,
     )
+
+
+async def get_incoming_message_by_telegram_id(user_id: int, telegram_message_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM incoming_messages WHERE user_id = $1 AND telegram_message_id = $2 "
+        "ORDER BY id DESC LIMIT 1",
+        user_id, telegram_message_id,
+    )
+
+
+async def update_incoming_message_text(message_id: int, new_text: str) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE incoming_messages SET text = $1 WHERE id = $2", new_text, message_id)
 
 
 async def pull_unconfirmed_incoming() -> list[asyncpg.Record]:

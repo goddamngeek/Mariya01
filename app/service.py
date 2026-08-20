@@ -17,11 +17,13 @@ from app.db import (
     create_activity_prompt,
     create_book_quote_prompt,
     get_book_quote_prompt,
+    get_incoming_message_by_telegram_id,
     get_open_activity_prompt,
     get_open_book_quote_prompt,
     get_open_ezhednevnik_prompt,
     insert_incoming_message,
     set_book_quote_prompt_book,
+    update_incoming_message_text,
     utcnow,
 )
 from app.ingest import TRILIUM_UNAVAILABLE_TEXT, handle_active_message
@@ -104,7 +106,9 @@ def _looks_like_activity_log(text: str) -> str | None:
     return None
 
 
-async def process_incoming_message(user_id: int, text: str, reply_to_text: str | None = None) -> None:
+async def process_incoming_message(
+    user_id: int, text: str, reply_to_text: str | None = None, telegram_message_id: int | None = None,
+) -> None:
     # A pending ежедневник check-in at arrival time means this message is
     # the answer to it, not a spontaneous message — see app/ingest.py for
     # how a spontaneous ("active") message is handled downstream. Every
@@ -114,7 +118,7 @@ async def process_incoming_message(user_id: int, text: str, reply_to_text: str |
     # known field with nothing left to interpret.
     open_ezhednevnik = await get_open_ezhednevnik_prompt(user_id)
     if open_ezhednevnik is not None:
-        await _handle_ezhednevnik_reply(user_id, text, reply_to_text, open_ezhednevnik)
+        await _handle_ezhednevnik_reply(user_id, text, reply_to_text, open_ezhednevnik, telegram_message_id)
         return
 
     # Same shape as ежедневник, but user-initiated (see _looks_like_activity_log
@@ -168,7 +172,7 @@ async def process_incoming_message(user_id: int, text: str, reply_to_text: str |
 
 
 async def _handle_ezhednevnik_reply(
-    user_id: int, text: str, reply_to_text: str | None, prompt,
+    user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None = None,
 ) -> None:
     """Advance one step in the current slot's question sequence. The reply
     just received answers `prompt["step"]`'s field — store it (a *_score
@@ -178,14 +182,29 @@ async def _handle_ezhednevnik_reply(
     Trilium via a direct non-LLM call and close the prompt out. Every
     message here still gets logged to incoming_messages for the audit
     trail, then immediately acked — this never enters handle_active_message()
-    at all."""
+    at all.
+
+    Tagged with telegram_message_id + entry_date so a later edit to this
+    exact Telegram message can retroactively patch just this one cell — see
+    handle_message_edit below."""
     slot = prompt["slot"]
     step = prompt["step"]
     steps = EZHEDNEVNIK_STEPS[slot]
     field = steps[step][2]
 
+    # Dated to when the question was actually SENT (its calendar day in
+    # Moscow time), not whenever the reply happens to land — confirmed
+    # live: a prompt left open overnight and answered the next morning was
+    # otherwise stamped with that morning's date, landing the previous
+    # day's retrospective in the wrong row entirely. Computed here (not just
+    # at the final step) so every step's row carries the same entry_date,
+    # needed for handle_message_edit to work on any step, not only the last.
+    entry_date = prompt["sent_at"].astimezone(TIMEZONE).date()
+
     kind = f"ezhednevnik_{slot}_{step}"
-    message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
+    message_id = await insert_incoming_message(
+        user_id, text, kind, reply_to_text, telegram_message_id, entry_date,
+    )
 
     collected = json.loads(prompt["collected"] or "{}")
     if field.endswith("_score"):
@@ -204,13 +223,7 @@ async def _handle_ezhednevnik_reply(
         return
 
     person_name = USER_NAMES.get(user_id, str(user_id))
-    # Dated to when the question was actually SENT (its calendar day in
-    # Moscow time), not whenever the reply happens to land — confirmed
-    # live: a prompt left open overnight and answered the next morning was
-    # otherwise stamped with that morning's date, landing the previous
-    # day's retrospective in the wrong row entirely.
-    entry_date = prompt["sent_at"].astimezone(TIMEZONE).date().isoformat()
-    fields = {"person_name": person_name, "slot": slot, "date": entry_date, **collected}
+    fields = {"person_name": person_name, "slot": slot, "date": entry_date.isoformat(), **collected}
 
     # Close only on SUCCESS — confirmed live (the odysseus.61d1.online DNS
     # outage, back when this went through Odysseus): closing unconditionally
@@ -403,5 +416,44 @@ async def _handle_quote_reply(
             "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
         )
     await ack_incoming_messages([message_id])
+
+
+async def handle_message_edit(user_id: int, telegram_message_id: int, new_text: str) -> None:
+    """Telegram's edited_message webhook update — see app/main.py. If the
+    edited message was a tracked ежедневник answer (has an entry_date, only
+    set by _handle_ezhednevnik_reply above), retroactively patch just that
+    one cell via fill_ezhednevnik's existing partial-update support (it
+    only overwrites the fields actually passed in, leaving the rest of that
+    day's row untouched). Anything else (an untracked message, an activity/
+    quote reply, a random passive message) is silently ignored — no
+    dedicated per-message-type support outside ежедневник, per request."""
+    row = await get_incoming_message_by_telegram_id(user_id, telegram_message_id)
+    if row is None or row["entry_date"] is None or not row["kind"].startswith("ezhednevnik_"):
+        return
+
+    _prefix, slot, step_str = row["kind"].split("_")
+    field = EZHEDNEVNIK_STEPS[slot][int(step_str)][2]
+
+    if field.endswith("_score"):
+        match = _SCORE_RE.search(new_text)
+        if not match:
+            await send_message(user_id, "Не расслышал число в правке — запись не обновил.")
+            return
+        value = max(0, min(100, int(match.group())))
+    else:
+        value = new_text.strip()
+
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    fields = {"person_name": person_name, "slot": slot, "date": row["entry_date"].isoformat(), field: value}
+    try:
+        await fill_ezhednevnik(fields)
+        await update_incoming_message_text(row["id"], new_text)
+        await send_message(user_id, "Обновил запись, спасибо.")
+    except Exception as exc:
+        print(f"handle_message_edit failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(
+            user_id, f"Не получилось обновить запись (Trilium недоступен): {type(exc).__name__}.",
+        )
 
 

@@ -25,7 +25,7 @@ from app.scheduler import (
     send_temporary_message,
     start_scheduler,
 )
-from app.service import process_incoming_message, start_quote_flow
+from app.service import handle_message_edit, process_incoming_message, start_quote_flow
 from app.sync import router as sync_router
 from app.telegram import close_client as close_telegram_client, send_message, set_bot_commands
 from app.trilium_client import get_week_summary
@@ -88,6 +88,20 @@ async def telegram_webhook(request: Request):
 
     if "callback_query" in update:
         await process_callback_query(update["callback_query"])
+        return {"ok": True}
+
+    if "edited_message" in update:
+        # "я поторопился, дай поправлю" — retroactively patches the one
+        # ежедневник cell that message originally answered, if any (see
+        # app/service.py's handle_message_edit); silently a no-op for
+        # anything else (untracked messages, activity/quote replies).
+        edited = update["edited_message"]
+        edited_chat_id = (edited.get("chat") or {}).get("id")
+        edited_message_id = edited.get("message_id")
+        edited_text = edited.get("text")
+        if edited_chat_id is not None and edited_message_id is not None and edited_text is not None:
+            if await is_registered(edited_chat_id):
+                await handle_message_edit(edited_chat_id, edited_message_id, edited_text)
         return {"ok": True}
 
     message = update.get("message")
@@ -180,7 +194,7 @@ async def telegram_webhook(request: Request):
     reply_to = message.get("reply_to_message") or {}
     reply_to_text = reply_to.get("text")
 
-    await process_incoming_message(chat_id, text, reply_to_text=reply_to_text)
+    await process_incoming_message(chat_id, text, reply_to_text=reply_to_text, telegram_message_id=message_id)
 
     return {"ok": True}
 

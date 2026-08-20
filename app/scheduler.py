@@ -7,6 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import TIMEZONE, WATER_REMINDER_TEXTS, WATER_REMINDER_WINDOWS
 from app.db import (
     claim_reminder,
+    close_book_add_prompt,
     close_book_quote_prompt,
     close_stale_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
@@ -171,15 +172,20 @@ async def release_stale_quote_prompts() -> None:
 
 
 async def release_due_book_add_notices() -> None:
-    """One-time courtesy notice for a /addbook flow (see app/service.py's
-    start_book_add_flow) — if 5 minutes pass with no reply to the "расскажи
-    подробнее" template, send "Добавил книгу" so the person isn't left
-    wondering whether it went through. Purely a notice: the row itself
-    (and the ability to reply later) is never touched — see
-    finalize_book_add_prompt/get_book_add_prompt_by_template_message."""
+    """Closes out the "normal dialogue" window for a /addbook flow (see
+    app/service.py's start_book_add_flow) — 5 minutes with no answer to the
+    "расскажи подробнее" template means the very-next-plain-message
+    auto-capture no longer applies (see finalize_book_add_prompt), so this
+    both sends a one-time "Добавил книгу" courtesy notice AND closes the
+    prompt (is_open=FALSE). template_message_id stays valid regardless —
+    get_book_add_prompt_by_template_message ignores is_open entirely — so a
+    reply to that same message still works any time after this, per the
+    original point of the reply mechanism: answering once the normal
+    window has already expired."""
     for row in await get_due_book_add_notices():
         await send_message(row["user_id"], "Добавил книгу")
         await mark_book_add_notified(row["id"])
+        await close_book_add_prompt(row["id"])
 
 
 async def release_due_water_reminders() -> None:

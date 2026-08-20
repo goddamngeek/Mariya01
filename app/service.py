@@ -192,15 +192,22 @@ async def process_incoming_message(
         await start_quote_flow(user_id, text, reply_to_text)
         return
 
-    # Same shape as activity — stage 1 only (title, then author); once the
-    # book note is created and the "расскажи подробнее" template is sent,
-    # the row is finalized (see finalize_book_add_prompt) and this branch
-    # never sees it again — a later reply to that template is matched
-    # separately in app/main.py's webhook (by reply-to message_id, not
-    # through this open-prompt check at all).
+    # Same shape as activity for steps 0/1 (title, then author). Step 2 is
+    # different: once the book note exists and the "расскажи подробнее"
+    # template is sent (finalize_book_add_prompt), the row STAYS open for a
+    # short window so the very next plain message is still auto-captured as
+    # the details answer — same "normal continuation" behavior as every
+    # other flow here. That window is 5 minutes, matching
+    # release_due_book_add_notices (scheduler.py), which closes it and
+    # sends a one-time "Добавил книгу" notice once it lapses; from then on
+    # only a reply to that exact template message still works (see
+    # app/main.py — that's the whole point of the reply mechanism, to
+    # answer after this normal window has expired), matched independently
+    # of is_open, so it's unaffected by the close here.
     open_book_add = await get_open_book_add_prompt(user_id)
     if open_book_add is not None:
-        if utcnow() - open_book_add["updated_at"] > _BOOK_ADD_PROMPT_TIMEOUT:
+        timeout = _QUOTE_PROMPT_TIMEOUT if open_book_add["step"] == 2 else _BOOK_ADD_PROMPT_TIMEOUT
+        if utcnow() - open_book_add["updated_at"] > timeout:
             await close_book_add_prompt(open_book_add["id"])
             open_book_add = None
     if open_book_add is not None:
@@ -519,14 +526,43 @@ async def start_book_add_flow(user_id: int, text: str, reply_to_text: str | None
     await ack_incoming_messages([message_id])
 
 
+async def _apply_book_details(user_id: int, note_id: str, text: str) -> None:
+    """Shared by both ways of answering the "расскажи подробнее" template —
+    the immediate plain-message continuation (step 2 in
+    _handle_book_add_reply below) and a later reply (handle_book_details_reply).
+    No header matching — text is just split into paragraphs (blank-line
+    separated), taken by POSITION in the same order as the template
+    (Об Авторе / Аннотация / Жанр / Похожие книги), since the answer always
+    mirrors that same paragraph structure. Each paragraph's own first line
+    is dropped (the echoed-back header) if it has more than one line."""
+    raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    paragraphs = []
+    for block in raw_paragraphs:
+        lines = block.split("\n")
+        paragraphs.append("\n".join(lines[1:]).strip() if len(lines) > 1 else lines[0].strip())
+    values = (paragraphs + [None, None, None, None])[:4]
+
+    try:
+        await fill_book_details(note_id, values)
+        await send_message(user_id, "Спасибо, добавил книгу!")
+    except Exception as exc:
+        print(f"fill_book_details failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(
+            user_id, f"Не получилось записать подробности (Trilium недоступен): {type(exc).__name__}.",
+        )
+
+
 async def _handle_book_add_reply(
     user_id: int, text: str, reply_to_text: str | None, prompt,
 ) -> None:
     """step 0 = awaiting title, step 1 = awaiting author (or a skip word
-    like "нет"/"не знаю" — author is optional). Once both are in, creates
-    the book note right away and sends the "расскажи подробнее" template —
-    the row then stays open-ended for a stage-2 reply (see
-    handle_book_details_reply), no further steps here."""
+    like "нет"/"не знаю" — author is optional). step 2 = the book already
+    exists and the "расскажи подробнее" template was just sent — this is
+    the IMMEDIATE-continuation path (the very next plain message, within
+    the 5-minute window — see process_incoming_message); a later reply to
+    that same template, after the window's closed, is handled separately
+    by handle_book_details_reply below."""
     step = prompt["step"]
     kind = f"book_add_{step}"
     message_id = await insert_incoming_message(user_id, text, kind, reply_to_text)
@@ -534,6 +570,12 @@ async def _handle_book_add_reply(
     if step == 0:
         await set_book_add_title(prompt["id"], text.strip())
         await send_message(user_id, book_add_step_text(1))
+        await ack_incoming_messages([message_id])
+        return
+
+    if step == 2:
+        await _apply_book_details(user_id, prompt["book_note_id"], text)
+        await close_book_add_prompt(prompt["id"])
         await ack_incoming_messages([message_id])
         return
 
@@ -566,15 +608,12 @@ async def handle_book_details_reply(
 ) -> bool:
     """A Telegram reply to a /addbook "расскажи подробнее" template — see
     app/main.py, checked before any other routing since it works no matter
-    how much time has passed (finalize_book_add_prompt never expires it).
-    Returns False (do nothing further here — let normal routing continue)
-    if this reply doesn't match any book_add_prompts row.
-
-    No header matching — text is just split into paragraphs (blank-line
-    separated), taken by POSITION in the same order as the template
-    (Об Авторе / Аннотация / Жанр / Похожие книги), since the reply always
-    mirrors that same paragraph structure. Each paragraph's own first line
-    is dropped (the echoed-back header) if it has more than one line."""
+    how much time has passed (get_book_add_prompt_by_template_message
+    ignores is_open entirely — this is the "answer after the normal
+    5-minute window expired" path; the immediate case is
+    _handle_book_add_reply's step==2 above). Returns False (do nothing
+    further — let normal routing continue) if this reply doesn't match any
+    book_add_prompts row."""
     prompt = await get_book_add_prompt_by_template_message(user_id, reply_to_message_id)
     if prompt is None or prompt["book_note_id"] is None:
         return False
@@ -582,23 +621,8 @@ async def handle_book_details_reply(
     message_id = await insert_incoming_message(
         user_id, text, "book_add_details", reply_to_text, telegram_message_id,
     )
-
-    raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
-    paragraphs = []
-    for block in raw_paragraphs:
-        lines = block.split("\n")
-        paragraphs.append("\n".join(lines[1:]).strip() if len(lines) > 1 else lines[0].strip())
-    values = (paragraphs + [None, None, None, None])[:4]
-
-    try:
-        await fill_book_details(prompt["book_note_id"], values)
-        await send_message(user_id, "Спасибо, добавил книгу!")
-    except Exception as exc:
-        print(f"fill_book_details failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id, f"Не получилось записать подробности (Trilium недоступен): {type(exc).__name__}.",
-        )
+    await _apply_book_details(user_id, prompt["book_note_id"], text)
+    await close_book_add_prompt(prompt["id"])
     await ack_incoming_messages([message_id])
     return True
 

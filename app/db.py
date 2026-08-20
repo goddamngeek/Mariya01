@@ -544,13 +544,19 @@ async def close_book_add_prompt(prompt_id: int) -> None:
 async def finalize_book_add_prompt(
     prompt_id: int, author: str, book_note_id: str, template_message_id: int,
 ) -> None:
-    """Marks stage 1 done (book note created, template sent) — but unlike
-    close_book_add_prompt, this keeps the row fully addressable forever via
-    template_message_id, for a stage-2 reply to find whenever it comes."""
+    """Marks stage 1 done (book note created, template sent) and advances to
+    step 2 — LEAVES is_open TRUE, so the very next plain message is still
+    auto-captured as the details answer, same as every other flow's normal
+    continuation (see app/service.py's process_incoming_message). That
+    immediate window closes 5 minutes later (release_due_book_add_notices,
+    scheduler.py, which also calls close_book_add_prompt) — after that,
+    only a reply to this exact template_message_id still works (see
+    get_book_add_prompt_by_template_message, which ignores is_open
+    entirely) — that's the "answer after the normal window expired" case."""
     pool = await get_pool()
     now = utcnow()
     await pool.execute(
-        "UPDATE book_add_prompts SET is_open = FALSE, author = $1, book_note_id = $2, "
+        "UPDATE book_add_prompts SET step = 2, author = $1, book_note_id = $2, "
         "template_message_id = $3, template_sent_at = $4, updated_at = $4 WHERE id = $5",
         author, book_note_id, template_message_id, now, prompt_id,
     )

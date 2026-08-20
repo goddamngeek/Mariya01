@@ -175,14 +175,14 @@ async def release_stale_quote_prompts() -> None:
 
 
 async def release_stale_book_review_prompts() -> None:
-    """Same cleanup as release_stale_quote_prompts, for an abandoned
-    "Я дочитал" rating/review dialogue. Note the book itself stays marked
-    finished — readingEnd is stamped at button press, well before this
-    (see app/service.py's handle_book_finished); only the unfinished
-    review conversation is cleared away."""
+    """Closes out an abandoned "Я дочитал" rating/review dialogue so it
+    stops swallowing the person's next unrelated message. Deleting its
+    messages is NOT this job's business — they belong to the /reading
+    thread that spawned it, which clears them itself (see
+    release_stale_message_threads / handle_message_reaction). The book
+    itself stays marked finished either way: readingEnd is stamped at
+    button press, well before any of this."""
     for row in await get_stale_book_review_prompts():
-        for message_id in row["message_ids"]:
-            await delete_message(row["user_id"], message_id)
         await close_book_review_prompt(row["id"])
 
 

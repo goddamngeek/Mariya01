@@ -13,7 +13,6 @@ from app.db import (
     advance_ezhednevnik_step,
     append_book_add_prompt_message,
     append_book_quote_prompt_message,
-    append_book_review_prompt_message,
     append_thread_message,
     close_activity_prompt,
     close_book_add_prompt,
@@ -873,18 +872,17 @@ async def handle_book_finished(callback_query: dict) -> None:
         return
 
     thread_id = thread["id"] if thread is not None else None
-    prompt_id = await create_book_review_prompt(chat_id, note_id, title, thread_id)
+    await create_book_review_prompt(chat_id, note_id, title, thread_id)
     sent_id = await send_message_get_id(chat_id, book_review_step_text(0))
     if sent_id is not None:
-        await _track_review_message(prompt_id, thread_id, sent_id)
+        await _track_thread_message(thread_id, sent_id)
 
 
-async def _track_review_message(prompt_id: int, thread_id: int | None, message_id: int) -> None:
-    """Review-flow messages are tracked twice over: on the prompt itself
-    (so release_stale_book_review_prompts can clean up a review started
-    outside a thread) and on the thread when there is one (so a reaction
-    wipes the entire /reading conversation, review included)."""
-    await append_book_review_prompt_message(prompt_id, message_id)
+async def _track_thread_message(thread_id: int | None, message_id: int) -> None:
+    """Add one message to its /reading thread, so it disappears with the
+    rest of that conversation. A None thread_id (only possible if the
+    thread was already dismissed between the button press and this call)
+    just means the message isn't tracked — harmless."""
     if thread_id is not None:
         await append_thread_message(thread_id, message_id)
 
@@ -901,7 +899,7 @@ async def _handle_book_review_reply(
         user_id, text, f"book_review_{step}", reply_to_text, telegram_message_id,
     )
     if telegram_message_id is not None:
-        await _track_review_message(prompt["id"], thread_id, telegram_message_id)
+        await _track_thread_message(thread_id, telegram_message_id)
 
     if step == 0:
         match = _SCORE_RE.search(text)
@@ -911,13 +909,13 @@ async def _handle_book_review_reply(
                 user_id, "Нужно число от 1 до 10 — " + book_review_step_text(0),
             )
             if sent_id is not None:
-                await _track_review_message(prompt["id"], thread_id, sent_id)
+                await _track_thread_message(thread_id, sent_id)
             await ack_incoming_messages([message_id])
             return
         await set_book_review_rating(prompt["id"], rating)
         sent_id = await send_message_get_id(user_id, book_review_step_text(1))
         if sent_id is not None:
-            await _track_review_message(prompt["id"], thread_id, sent_id)
+            await _track_thread_message(thread_id, sent_id)
         await ack_incoming_messages([message_id])
         return
 
@@ -929,7 +927,7 @@ async def _handle_book_review_reply(
         await close_book_review_prompt(prompt["id"])
         sent_id = await send_message_get_id(user_id, "Спасибо, записал отзыв!")
         if sent_id is not None:
-            await _track_review_message(prompt["id"], thread_id, sent_id)
+            await _track_thread_message(thread_id, sent_id)
     except Exception as exc:
         print(f"create_book_review_note failed for user={user_id}:", flush=True)
         traceback.print_exc()

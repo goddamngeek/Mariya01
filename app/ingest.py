@@ -39,7 +39,6 @@ from app.scheduler import send_temporary_message
 from app.telegram import send_message
 from app.trilium_client import (
     KANBAN_COLUMNS,
-    TriliumNoteNotFoundError,
     add_chinese_word,
     add_kanban_card,
     log_reminder_to_calendar,

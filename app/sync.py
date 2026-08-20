@@ -23,8 +23,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.trilium_client import get_active_reading_books, get_note_content_by_title, list_all_books
-from app.service import start_quote_flow
+from app.trilium_client import get_active_reading_books
 
 router = APIRouter(prefix="/sync")
 
@@ -252,21 +251,6 @@ async def active_books():
     return await get_active_reading_books()
 
 
-@router.get("/note_content", dependencies=[Depends(require_bearer)])
-async def note_content(title: str):
-    """Diagnostic: raw content of a note by exact title — used to inspect
-    _ШАБЛОН_КНИГА's real structure while building /addbook."""
-    return {"content": await get_note_content_by_title(title)}
-
-
-@router.get("/all_books", dependencies=[Depends(require_bearer)])
-async def all_books():
-    """Diagnostic: every book under КНИГИ with its full label set,
-    unfiltered — for debugging why a specific book doesn't show up in
-    /active_books (e.g. missing readingStart)."""
-    return await list_all_books()
-
-
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])
 async def recent_incoming(user_id: int):
     """Diagnostic: newest incoming_messages rows for one user, including
@@ -283,16 +267,3 @@ async def recent_incoming(user_id: int):
         for r in await get_recent_incoming_messages(user_id)
     ]
 
-
-@router.post("/trigger_quote_debug", dependencies=[Depends(require_bearer)])
-async def trigger_quote_debug(user_id: int):
-    """Diagnostic: runs start_quote_flow() directly and returns the full
-    traceback in the response if it raises — for debugging a /quote
-    command that produces no reply at all in Telegram (which normally
-    means an unhandled exception, silently 500ing the webhook)."""
-    import traceback
-    try:
-        await start_quote_flow(user_id)
-        return {"ok": True}
-    except Exception as exc:
-        return {"ok": False, "error": repr(exc), "traceback": traceback.format_exc()}

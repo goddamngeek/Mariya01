@@ -139,7 +139,6 @@ CREATE TABLE IF NOT EXISTS book_review_prompts (
     is_open BOOLEAN NOT NULL DEFAULT TRUE,
     step INTEGER NOT NULL DEFAULT 0,
     rating INTEGER,
-    message_ids INTEGER[] NOT NULL DEFAULT '{}',
     thread_id INTEGER
 );
 
@@ -234,6 +233,9 @@ UPDATE book_quote_prompts SET updated_at = sent_at WHERE updated_at IS NULL;
 ALTER TABLE book_quote_prompts ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE book_quote_prompts ADD COLUMN IF NOT EXISTS message_ids INTEGER[] NOT NULL DEFAULT '{}';
 ALTER TABLE book_review_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
+-- Review-flow messages are tracked on the /reading thread that spawned
+-- them (message_threads), which was double-counting them here.
+ALTER TABLE book_review_prompts DROP COLUMN IF EXISTS message_ids;
 -- Flashcard feature removed entirely (unused, per explicit confirmation
 -- there was nothing worth keeping in it) — drops the tables outright
 -- rather than leaving them as dead weight nothing references anymore.
@@ -695,14 +697,6 @@ async def set_book_review_rating(prompt_id: int, rating: int) -> None:
 async def close_book_review_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE book_review_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
-
-
-async def append_book_review_prompt_message(prompt_id: int, message_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE book_review_prompts SET message_ids = array_append(message_ids, $1) WHERE id = $2",
-        message_id, prompt_id,
-    )
 
 
 async def get_book_review_prompt(prompt_id: int) -> asyncpg.Record | None:

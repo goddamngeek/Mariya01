@@ -558,20 +558,6 @@ async def create_book_review_note(
         await _create_attribute(client, note_id, "label", "owner", person_name)
 
 
-async def get_note_content_by_title(title: str) -> str:
-    """Diagnostic-only: raw HTML content of any note by exact title — used
-    once to inspect _ШАБЛОН_КНИГА's real structure while building the
-    /addbook flow (see app/sync.py's /note_content)."""
-    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
-        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
-    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
-    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
-        note_id = await _find_note_id(client, title)
-        if note_id is None:
-            raise TriliumNoteNotFoundError(f"No note titled '{title}' found.")
-        return await _get_content(client, note_id)
-
-
 async def _list_books(finished: bool) -> list[dict]:
     """Child notes of КНИГИ (see add_book), split by whether readingEnd is
     filled in. Same fetch-every-child-then-inspect-its-labels approach as
@@ -619,33 +605,6 @@ async def get_active_reading_books() -> list[dict]:
 async def get_finished_books() -> list[dict]:
     """Books already read through — both readingStart and readingEnd set."""
     return await _list_books(finished=True)
-
-
-async def list_all_books() -> list[dict]:
-    """Diagnostic-only: every child of КНИГИ with its full label set,
-    unfiltered — for debugging get_active_reading_books/add_book when a
-    book doesn't show up where expected (see app/sync.py's /all_books)."""
-    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
-        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
-    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
-    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
-        knigi_id = await _find_note_id(client, "КНИГИ")
-        if knigi_id is None:
-            raise TriliumNoteNotFoundError("Could not find the КНИГИ note.")
-        knigi_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{knigi_id}")
-        knigi_resp.raise_for_status()
-        child_ids = knigi_resp.json().get("childNoteIds") or []
-
-        books = []
-        for child_id in child_ids:
-            child_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{child_id}")
-            child_resp.raise_for_status()
-            child = child_resp.json()
-            labels = {
-                a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
-            }
-            books.append({"note_id": child_id, "title": child.get("title"), "labels": labels})
-        return books
 
 
 async def add_book_quote(note_id: str, quote_text: str, impression: str) -> None:

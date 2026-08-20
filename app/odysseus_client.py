@@ -6,7 +6,6 @@ by hand since the sync (mac_sync) and async (bot) versions can't share code
 without adding a shared package neither side otherwise needs.
 """
 
-import asyncio
 import time
 
 import httpx

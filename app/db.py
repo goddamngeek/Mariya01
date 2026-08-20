@@ -183,6 +183,20 @@ ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NUL
 -- — cleared once both stages finish successfully, see
 -- app/service.py's _apply_book_details.
 ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS message_ids INTEGER[] NOT NULL DEFAULT '{}';
+-- book_quote_prompts.updated_at/message_ids were added straight into the
+-- CREATE TABLE above (for the 5-minute-timeout-with-deletion redesign),
+-- but the table already existed live at that point, so CREATE TABLE IF NOT
+-- EXISTS silently never added them — confirmed live: every /quote attempt
+-- since that deploy 500'd on "column updated_at does not exist" with no
+-- reply ever reaching the person, since create_book_quote_prompt is the
+-- very first write in the flow. message_ids has a DEFAULT so it backfills
+-- on its own; updated_at doesn't, so it's backfilled from sent_at (a
+-- reasonable stand-in — these rows are short-lived anyway) before being
+-- made NOT NULL.
+ALTER TABLE book_quote_prompts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+UPDATE book_quote_prompts SET updated_at = sent_at WHERE updated_at IS NULL;
+ALTER TABLE book_quote_prompts ALTER COLUMN updated_at SET NOT NULL;
+ALTER TABLE book_quote_prompts ADD COLUMN IF NOT EXISTS message_ids INTEGER[] NOT NULL DEFAULT '{}';
 -- Flashcard feature removed entirely (unused, per explicit confirmation
 -- there was nothing worth keeping in it) — drops the tables outright
 -- rather than leaving them as dead weight nothing references anymore.

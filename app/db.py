@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS activity_prompts (
     user_id BIGINT NOT NULL,
     activity TEXT NOT NULL CHECK (activity IN ('yoga', 'chinese', 'trading')),
     sent_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
     is_open BOOLEAN NOT NULL DEFAULT TRUE,
     step INTEGER NOT NULL DEFAULT 0,
     collected JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -241,6 +242,12 @@ ALTER TABLE book_review_prompts DROP COLUMN IF EXISTS message_ids;
 ALTER TABLE message_threads ADD COLUMN IF NOT EXISTS ttl_minutes INTEGER NOT NULL DEFAULT 5;
 ALTER TABLE message_threads ADD COLUMN IF NOT EXISTS closing_text TEXT;
 ALTER TABLE activity_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
+-- Was timing out from sent_at, i.e. from when the dialogue STARTED, so a
+-- slow answer could be judged stale while the person was still typing it —
+-- every other flow (and the thread's own TTL) measures from the last step.
+ALTER TABLE activity_prompts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+UPDATE activity_prompts SET updated_at = sent_at WHERE updated_at IS NULL;
+ALTER TABLE activity_prompts ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE book_quote_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
 ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
 ALTER TABLE book_quote_prompts DROP COLUMN IF EXISTS message_ids;
@@ -487,18 +494,19 @@ async def get_open_activity_prompt(user_id: int) -> asyncpg.Record | None:
 
 async def create_activity_prompt(user_id: int, activity: str, thread_id: int | None = None) -> int:
     pool = await get_pool()
+    now = utcnow()
     return await pool.fetchval(
-        "INSERT INTO activity_prompts (user_id, activity, sent_at, is_open, thread_id) "
-        "VALUES ($1, $2, $3, TRUE, $4) RETURNING id",
-        user_id, activity, utcnow(), thread_id,
+        "INSERT INTO activity_prompts (user_id, activity, sent_at, updated_at, is_open, thread_id) "
+        "VALUES ($1, $2, $3, $3, TRUE, $4) RETURNING id",
+        user_id, activity, now, thread_id,
     )
 
 
 async def advance_activity_prompt_step(prompt_id: int, step: int, collected: dict) -> None:
     pool = await get_pool()
     await pool.execute(
-        "UPDATE activity_prompts SET step = $1, collected = $2::jsonb WHERE id = $3",
-        step, json.dumps(collected), prompt_id,
+        "UPDATE activity_prompts SET step = $1, collected = $2::jsonb, updated_at = $3 WHERE id = $4",
+        step, json.dumps(collected), utcnow(), prompt_id,
     )
 
 
@@ -660,6 +668,60 @@ async def close_book_review_prompt(prompt_id: int) -> None:
 async def get_book_review_prompt(prompt_id: int) -> asyncpg.Record | None:
     pool = await get_pool()
     return await pool.fetchrow("SELECT * FROM book_review_prompts WHERE id = $1", prompt_id)
+
+
+# --- open prompts (one lookup across every dialogue kind) -------------------
+
+# The five one-question-at-a-time dialogues all answer the same question on
+# every incoming message — "is this a reply to something I asked?" — and at
+# most one of them can be open at a time. Asking each table separately meant
+# five round trips per message to learn there was nothing open at all, which
+# is the common case.
+_PROMPT_TABLES = {
+    "ezhednevnik": "ezhednevnik_prompts",
+    "activity": "activity_prompts",
+    "quote": "book_quote_prompts",
+    "review": "book_review_prompts",
+    "book_add": "book_add_prompts",
+}
+
+# ежедневник outranks everything (priority 0): it's the one scheduled
+# check-in, and a command can open another dialogue on top of it without
+# ever passing through the reply routing. Among the rest, most recently
+# active wins — if you started something a moment ago, your next message
+# is answering THAT, not whatever was left hanging earlier.
+_OPEN_PROMPT_QUERY = """
+SELECT 'ezhednevnik' AS kind, id, sent_at AS updated_at, 0 AS priority
+    FROM ezhednevnik_prompts WHERE user_id = $1 AND is_open
+UNION ALL
+SELECT 'activity', id, updated_at, 1 FROM activity_prompts WHERE user_id = $1 AND is_open
+UNION ALL
+SELECT 'quote', id, updated_at, 1 FROM book_quote_prompts WHERE user_id = $1 AND is_open
+UNION ALL
+SELECT 'review', id, updated_at, 1 FROM book_review_prompts WHERE user_id = $1 AND is_open
+UNION ALL
+SELECT 'book_add', id, updated_at, 1 FROM book_add_prompts WHERE user_id = $1 AND is_open
+ORDER BY priority, updated_at DESC
+LIMIT 1
+"""
+
+
+async def get_open_prompt(user_id: int) -> asyncpg.Record | None:
+    """Which dialogue, if any, this person's next message is answering —
+    returns just kind/id/updated_at; the caller fetches the full row with
+    get_prompt() only once it knows there is one to handle."""
+    pool = await get_pool()
+    return await pool.fetchrow(_OPEN_PROMPT_QUERY, user_id)
+
+
+async def get_prompt(kind: str, prompt_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow(f"SELECT * FROM {_PROMPT_TABLES[kind]} WHERE id = $1", prompt_id)
+
+
+async def close_prompt(kind: str, prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute(f"UPDATE {_PROMPT_TABLES[kind]} SET is_open = FALSE WHERE id = $1", prompt_id)
 
 
 # --- message threads (/reading & /finished conversations) --------------------

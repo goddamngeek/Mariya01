@@ -18,8 +18,8 @@ from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
 from app.people import USER_NAMES
 from app.prompts import ezhednevnik_step_text
-from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app import threads
+from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app.service import (
     handle_book_details_reply,
     handle_message_edit,

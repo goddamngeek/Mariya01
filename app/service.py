@@ -16,6 +16,7 @@ from app.db import (
     close_book_quote_prompt,
     close_book_review_prompt,
     close_ezhednevnik_prompt,
+    close_prompt,
     create_activity_prompt,
     create_book_add_prompt,
     create_book_quote_prompt,
@@ -25,11 +26,8 @@ from app.db import (
     get_book_quote_prompt,
     get_incoming_message_by_telegram_id,
     get_message_thread,
-    get_open_activity_prompt,
-    get_open_book_add_prompt,
-    get_open_book_quote_prompt,
-    get_open_book_review_prompt,
-    get_open_ezhednevnik_prompt,
+    get_open_prompt,
+    get_prompt,
     insert_incoming_message,
     set_book_add_title,
     set_book_quote_prompt_book,
@@ -49,8 +47,8 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app.telegram import answer_callback_query, clear_reply_markup, send_message
 from app import threads
+from app.telegram import answer_callback_query, clear_reply_markup, send_message
 from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
     add_book,
@@ -143,52 +141,33 @@ def _looks_like_activity_log(text: str) -> str | None:
 async def process_incoming_message(
     user_id: int, text: str, reply_to_text: str | None = None, telegram_message_id: int | None = None,
 ) -> None:
-    # A pending ежедневник check-in at arrival time means this message is
-    # the answer to it, not a spontaneous message — see app/ingest.py for
-    # how a spontaneous ("active") message is handled downstream. Every
-    # ежедневник slot is a strict one-question-at-a-time sequence (see
-    # EZHEDNEVNIK_STEPS in prompts.py) — entirely deterministic, never
-    # touches Odysseus/the LLM at all, since each reply maps to exactly one
-    # known field with nothing left to interpret.
-    open_ezhednevnik = await get_open_ezhednevnik_prompt(user_id)
-    if open_ezhednevnik is not None:
-        await _handle_ezhednevnik_reply(user_id, text, reply_to_text, open_ezhednevnik, telegram_message_id)
-        return
-
-    # Same shape as ежедневник, but user-initiated (see _looks_like_activity_log
-    # below) instead of scheduled — an open prompt here means this message
-    # is the answer to "как тебе?"/"чему научился?"/"баллы", not a new
-    # spontaneous message.
-    open_activity = await get_open_activity_prompt(user_id)
-    if open_activity is not None:
-        if utcnow() - open_activity["sent_at"] > _PROMPT_TIMEOUT:
-            await close_activity_prompt(open_activity["id"])
-            open_activity = None
-    if open_activity is not None:
-        await _handle_activity_reply(user_id, text, reply_to_text, open_activity, telegram_message_id)
-        return
+    # At most one dialogue can be open at a time, so this is a single
+    # lookup across all five kinds rather than one query per kind (see
+    # get_open_prompt) — the common case, nothing open at all, used to cost
+    # five round trips to establish.
+    #
+    # An open dialogue always wins over a trigger word: typing "позанималась
+    # йогой" while a /quote question is pending answers the question rather
+    # than abandoning it half-finished.
+    open_prompt = await get_open_prompt(user_id)
+    if open_prompt is not None:
+        kind = open_prompt["kind"]
+        # ежедневник has no inline timeout — it's the one scheduled flow,
+        # re-checked at each AM/PM/evening tick (close_stale_ezhednevnik_prompts)
+        # and otherwise meant to stay answerable all day.
+        if kind != "ezhednevnik" and utcnow() - open_prompt["updated_at"] > _PROMPT_TIMEOUT:
+            await close_prompt(kind, open_prompt["id"])
+        else:
+            prompt = await get_prompt(kind, open_prompt["id"])
+            if prompt is not None:
+                await _PROMPT_HANDLERS[kind](
+                    user_id, text, reply_to_text, prompt, telegram_message_id,
+                )
+                return
 
     activity = _looks_like_activity_log(text)
     if activity is not None:
         await _start_activity_flow(user_id, text, reply_to_text, activity, telegram_message_id)
-        return
-
-    # Same shape again — an open book_quote_prompt with step >= 1 means this
-    # message answers the quote or the impression question. Step 0 (book not
-    # picked yet) is driven by a button press instead (see
-    # handle_quote_book_selected below, called from app/callbacks.py), so a
-    # stray text message while step 0 is still open just gets a nudge to use
-    # the button rather than being consumed as an answer.
-    open_quote = await get_open_book_quote_prompt(user_id)
-    if open_quote is not None:
-        if utcnow() - open_quote["updated_at"] > _PROMPT_TIMEOUT:
-            await close_book_quote_prompt(open_quote["id"])
-            open_quote = None
-    if open_quote is not None:
-        if open_quote["step"] == 0:
-            await send_message(user_id, "Выбери книгу, нажав на кнопку в сообщении выше.")
-            return
-        await _handle_quote_reply(user_id, text, reply_to_text, open_quote, telegram_message_id)
         return
 
     if _looks_like_quote_request(text):
@@ -201,39 +180,6 @@ async def process_incoming_message(
 
     if _looks_like_finished_books(text):
         await show_finished_books(user_id, telegram_message_id)
-        return
-
-    # "Я дочитал" — started by a button under a book's description (see
-    # handle_book_finished), then two plain steps: rating, then free text.
-    # Same 5-minute staleness rule as /quote.
-    open_review = await get_open_book_review_prompt(user_id)
-    if open_review is not None:
-        if utcnow() - open_review["updated_at"] > _PROMPT_TIMEOUT:
-            await close_book_review_prompt(open_review["id"])
-            open_review = None
-    if open_review is not None:
-        await _handle_book_review_reply(user_id, text, reply_to_text, open_review, telegram_message_id)
-        return
-
-    # Same shape as activity for steps 0/1 (title, then author). Step 2 is
-    # different: once the book note exists and the "расскажи подробнее"
-    # template is sent (finalize_book_add_prompt), the row STAYS open for a
-    # short window so the very next plain message is still auto-captured as
-    # the details answer — same "normal continuation" behavior as every
-    # other flow here. That window is 5 minutes, matching
-    # release_due_book_add_notices (scheduler.py), which closes it and
-    # sends a one-time "Добавил книгу" notice once it lapses; from then on
-    # only a reply to that exact template message still works (see
-    # app/main.py — that's the whole point of the reply mechanism, to
-    # answer after this normal window has expired), matched independently
-    # of is_open, so it's unaffected by the close here.
-    open_book_add = await get_open_book_add_prompt(user_id)
-    if open_book_add is not None:
-        if utcnow() - open_book_add["updated_at"] > _PROMPT_TIMEOUT:
-            await close_book_add_prompt(open_book_add["id"])
-            open_book_add = None
-    if open_book_add is not None:
-        await _handle_book_add_reply(user_id, text, reply_to_text, open_book_add, telegram_message_id)
         return
 
     if _looks_like_book_add(text):
@@ -477,6 +423,11 @@ async def _handle_quote_reply(
     same shape as _handle_activity_reply."""
     step = prompt["step"]
     thread_id = prompt["thread_id"]
+    if step == 0:
+        # Step 0 is answered by a button, not by typing (see
+        # handle_quote_book_selected) — nudge rather than swallow the text.
+        await send_message(user_id, "Выбери книгу, нажав на кнопку в сообщении выше.")
+        return
     kind = f"quote_{step}"
     message_id = await insert_incoming_message(user_id, text, kind, reply_to_text, telegram_message_id)
     await threads.track(thread_id, telegram_message_id)
@@ -879,3 +830,14 @@ async def _handle_book_review_reply(
     await ack_incoming_messages([message_id])
 
 
+# Filled in down here because every handler has to be defined first. They
+# share one signature — (user_id, text, reply_to_text, prompt,
+# telegram_message_id) — so process_incoming_message can dispatch on kind
+# without knowing anything else about the flow.
+_PROMPT_HANDLERS = {
+    "ezhednevnik": _handle_ezhednevnik_reply,
+    "activity": _handle_activity_reply,
+    "quote": _handle_quote_reply,
+    "review": _handle_book_review_reply,
+    "book_add": _handle_book_add_reply,
+}

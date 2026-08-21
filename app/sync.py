@@ -9,7 +9,7 @@ from app.db import (
     ack_incoming_messages,
     get_ezhednevnik_prompts_for_user,
     get_odysseus_session_id,
-    get_open_activity_prompt,
+    get_open_prompt,
     get_recent_incoming_messages,
     get_recent_reminders,
     get_water_reminders_for_date,
@@ -188,20 +188,17 @@ async def reprocess_active(body: ReprocessActiveRequest):
     return {"ok": True}
 
 
-@router.get("/activity_state", dependencies=[Depends(require_bearer)])
-async def activity_state():
-    """Diagnostic: currently open activity_prompts (yoga/chinese/trading)
-    per known user, if any."""
+@router.get("/open_prompt", dependencies=[Depends(require_bearer)])
+async def open_prompt():
+    """Diagnostic: which dialogue, if any, each person's next message would
+    be answering — the same single lookup process_incoming_message uses
+    (get_open_prompt), across all five kinds rather than just one."""
     result = {}
     for name, uid in NAME_TO_USER_ID.items():
-        prompt = await get_open_activity_prompt(uid)
+        row = await get_open_prompt(uid)
         result[name] = (
-            {
-                "id": prompt["id"], "activity": prompt["activity"],
-                "sent_at": prompt["sent_at"].isoformat(), "step": prompt["step"],
-                "collected": prompt["collected"],
-            }
-            if prompt is not None else None
+            {"kind": row["kind"], "id": row["id"], "updated_at": row["updated_at"].isoformat()}
+            if row is not None else None
         )
     return result
 

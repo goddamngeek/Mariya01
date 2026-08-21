@@ -47,7 +47,7 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app import threads
+from app import threads, triggers
 from app.telegram import answer_callback_query, clear_reply_markup, send_message
 from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
@@ -77,67 +77,6 @@ _SCORE_RE = re.compile(r"-?\d+")
 # answering a prompt that is about to be wiped out from under it.
 _PROMPT_TIMEOUT = timedelta(minutes=threads.TTL_DIALOG)
 
-_ACTIVITY_VERBS = (
-    "позанимал", "занимал", "делал", "сделал", "провел", "провёл",
-    "отработал", "потрейдил", "затрейдил",
-)
-_ACTIVITY_KEYWORDS = {
-    "yoga": ("йог",),
-    "chinese": ("китайск",),
-    "trading": ("трейдинг", "трейд"),
-}
-
-
-def _looks_like_quote_request(text: str) -> bool:
-    """Matches any Russian word-form of "цитата" (цитату, цитаты, цитате,
-    ...) — they all share the "цитат" stem, so a plain substring check
-    covers every inflection without needing a word list."""
-    return "цитат" in text.lower()
-
-
-def _looks_like_reading_status(text: str) -> bool:
-    """"что я сейчас читаю" / "что читаю" — present tense only ("читаю"),
-    so it never collides with _looks_like_book_add's "начал читать"/"хочу
-    почитать" (infinitive forms)."""
-    return "читаю" in text.lower()
-
-
-def _looks_like_finished_books(text: str) -> bool:
-    """"прочитанные" / "прочитанных книг" — the "прочитанн" stem covers
-    every inflection and doesn't overlap with "читаю" (_looks_like_reading_status)
-    or the infinitive forms _looks_like_book_add matches."""
-    return "прочитанн" in text.lower()
-
-
-def _looks_like_book_add(text: str) -> bool:
-    """"добавь книгу ..." / "хочу почитать ..." / "начал читать ..." —
-    ported from the old (now removed) ingest.py heuristic of the same name,
-    just moved here now that adding a book is a deterministic 2-question
-    flow (title, then author) instead of a single narrow LLM extraction.
-    "добавь"/"добавить" need "книг" alongside them (too generic alone —
-    collides with the plain note-request "добавь"), but "хочу почитать X"/
-    "начал читать X" are distinctive enough to stand alone."""
-    lowered = text.lower()
-    if "книг" in lowered and any(kw in lowered for kw in ("добавь", "добавить")):
-        return True
-    return any(kw in lowered for kw in ("хочу почитать", "буду читать", "начал читать", "начала читать"))
-
-
-def _looks_like_activity_log(text: str) -> str | None:
-    """"позанималась йогой" / "позанимался китайским" / "потрейдил
-    сегодня" — self-initiated, no schedule involved (unlike ежедневник).
-    Requires both an activity keyword AND a completion-signal verb, a bit
-    stricter than most other loose keyword heuristics in this codebase,
-    since a false positive here starts a real multi-step conversation
-    (asking "как тебе?"/"чему научился?") rather than just costing an
-    unneeded retry."""
-    lowered = text.lower()
-    for activity, keywords in _ACTIVITY_KEYWORDS.items():
-        if any(kw in lowered for kw in keywords) and any(v in lowered for v in _ACTIVITY_VERBS):
-            return activity
-    return None
-
-
 async def process_incoming_message(
     user_id: int, text: str, reply_to_text: str | None = None, telegram_message_id: int | None = None,
 ) -> None:
@@ -165,24 +104,25 @@ async def process_incoming_message(
                 )
                 return
 
-    activity = _looks_like_activity_log(text)
-    if activity is not None:
+    # Which of the dialogue starters this is, if any — precedence across
+    # every trigger in the bot lives in app/triggers.py, not here. Anything
+    # this stage doesn't own falls through to handle_active_message below,
+    # which handles the rest of the names classify() can return.
+    trigger = triggers.classify(text)
+    if trigger == "activity":
+        activity = triggers.activity_kind(text)
         await _start_activity_flow(user_id, text, reply_to_text, activity, telegram_message_id)
         return
-
-    if _looks_like_quote_request(text):
+    if trigger == "quote":
         await start_quote_flow(user_id, text, reply_to_text, telegram_message_id)
         return
-
-    if _looks_like_reading_status(text):
+    if trigger == "reading_status":
         await show_reading_status(user_id, telegram_message_id)
         return
-
-    if _looks_like_finished_books(text):
+    if trigger == "finished_books":
         await show_finished_books(user_id, telegram_message_id)
         return
-
-    if _looks_like_book_add(text):
+    if trigger == "book_add":
         await start_book_add_flow(user_id, text, reply_to_text, telegram_message_id)
         return
 
@@ -504,7 +444,7 @@ _SKIP_AUTHOR_WORDS = ("нет", "не знаю", "неизвестно", "не �
 async def start_book_add_flow(
     user_id: int, text: str, reply_to_text: str | None = None, telegram_message_id: int | None = None,
 ) -> None:
-    """Shared by the free-text trigger (_looks_like_book_add above) and the
+    """Shared by the free-text trigger (triggers.is_book_add) and the
     /addbook command (app/main.py). Every message belonging to this
     exchange (starting with the trigger itself) is tracked via
     append_book_add_prompt_message, so it can all be deleted in one shot

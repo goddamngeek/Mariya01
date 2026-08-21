@@ -34,7 +34,7 @@ from app.odysseus_client import (
 from app.people import NAME_TO_USER_ID, USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.reminder_time import parse_reminder_time
-from app import threads
+from app import threads, triggers
 from app.reminders import schedule_reminder
 from app.telegram import send_message
 from app.trilium_client import (
@@ -65,22 +65,6 @@ def _tag_message(
 def _build_prompt(user_id: int, kind: str) -> str:
     name = USER_NAMES.get(user_id, str(user_id))
     return INGEST_PROMPT_TEMPLATE.replace("__NAME__", name).replace("__KIND__", kind)
-
-
-_RELAY_OR_REMINDER_KEYWORDS = ("передай", "передать", "скажи", "напомни")
-
-
-def _looks_like_relay_or_reminder(text: str) -> bool:
-    """Lightweight heuristic gate for require_tool on ACTIVE messages —
-    unlike passive messages (always require trilium_notes), active covers
-    general Q&A too, so this can't be unconditional. Confirmed live: a real
-    relay request ("передай Остапу...") silently failed to reach him because
-    the model's schedule_send attempt came out malformed in a different,
-    unparseable way each time. A false positive here just costs an unneeded
-    retry/fallback message; a false negative silently drops a real relay —
-    the keyword check is intentionally loose in the risk-accepting direction."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _RELAY_OR_REMINDER_KEYWORDS)
 
 
 # Same stem prefixes as the person-name canonicalization this used to rely
@@ -239,98 +223,6 @@ async def _handle_kanban_add(message_id: int, user_id: int, text: str) -> None:
     await ack_incoming_messages([message_id])
 
 
-_NOTE_REQUEST_KEYWORDS = ("запиши", "зафиксируй", "запомни", "занеси")
-
-
-def _looks_like_note_request(text: str) -> bool:
-    """"запиши в заметку...", "зафиксируй что...", "запомни это" — an ACTIVE
-    request to log something to Trilium (see prompts.py's "зафиксировать/
-    записать/запомнить" instruction). Active messages had NO require_tool
-    coverage for this at all until now: confirmed live, asked
-    to log credit-card principles to his journal, the model replied "Готово,
-    заметка... добавлена" with 0 native calls / 0 tool blocks — a pure
-    hallucinated confirmation, and since require_tool_type was never set for
-    this message shape, there was no retry and no fallback to catch it. Kept
-    narrow (explicit "добавь" needs "заметк"/"журнал" alongside it) so it
-    doesn't collide with other "добавь"-shaped intents (chinese word, book)."""
-    lowered = text.lower()
-    if any(kw in lowered for kw in _NOTE_REQUEST_KEYWORDS):
-        return True
-    return "добавь" in lowered and any(kw in lowered for kw in ("заметк", "журнал"))
-
-
-_MONEY_KEYWORDS = (
-    "потратил", "потратила", "заработал", "заработала", "купил", "купила",
-    "₽", "руб", "доллар", "евро", "€", "цена", "стоит", "стоимост",
-)
-
-
-def _looks_like_finance(text: str) -> bool:
-    """Whether a note request (see _looks_like_note_request above) is
-    money-related — decides target_note ("ФИНАНСЫ // FINANCE" vs the
-    person's own Журнал), per the new "Наша жизнь" Trilium architecture
-    where finances get their own branch. Only ever checked alongside an
-    explicit log-request verb, same as the plain journal path — a bare
-    mention of money in general chat doesn't get auto-logged, matching how
-    active messages have always required an explicit "запиши"/"зафиксируй"
-    to log anything at all (unlike passive replies to the daily question,
-    which log unconditionally)."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _MONEY_KEYWORDS)
-
-
-_KANBAN_KEYWORDS = ("канбан", "бэклог", "в работе", "будущие задачи")
-
-
-def _looks_like_kanban_status(text: str) -> bool:
-    """"что в канбане?" / "что в работе?" / "покажи бэклог" — a pure,
-    judgment-free read (see read_kanban_status's own docstring on why board
-    membership can't be inferred from the note tree), so this is answered
-    directly via app/trilium_client.py before ever reaching an LLM."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _KANBAN_KEYWORDS)
-
-
-_KANBAN_ADD_VERBS = ("добавь", "добавить", "закинь", "закинуть", "создай", "создать", "занеси")
-
-
-def _looks_like_kanban_add(text: str) -> bool:
-    """"добавь в канбан купить молоко" / "закинь задачу..." — checked
-    BEFORE _looks_like_kanban_status (both share "канбан"/"бэклог" as
-    context words), same most-specific-first precedence used throughout.
-    "задач" alone (without "канбан" itself) also counts, since "добавь
-    задачу X" is a very natural phrasing that never says the board's name."""
-    lowered = text.lower()
-    has_kanban_context = any(kw in lowered for kw in _KANBAN_KEYWORDS) or "задач" in lowered
-    if not has_kanban_context:
-        return False
-    return any(v in lowered for v in _KANBAN_ADD_VERBS)
-
-
-_CHINESE_WORD_VERBS = ("добавь", "запиши", "выучил", "выучила", "новое слово", "занеси")
-
-
-def _looks_like_chinese_word(text: str) -> bool:
-    """"добавь иероглиф ..." / "запиши новое китайское слово ..." — adding to
-    Ostap's Chinese-vocabulary board. Requires an explicit add-type verb
-    alongside the Chinese context, not just any mention of "иероглиф" — a
-    plain "покажи иероглифы" (unimplemented read path) falls through to
-    general Q&A instead of misfiring an add call."""
-    lowered = text.lower()
-    if "иероглиф" not in lowered and "китайск" not in lowered:
-        return False
-    return any(v in lowered for v in _CHINESE_WORD_VERBS)
-
-
-_SALE_KEYWORDS = ("продал", "продала", "продажа", "выручил", "выручила")
-
-
-def _looks_like_sale(text: str) -> bool:
-    """"продал куртку за 3000" — logging a sale on the ПРОДАЖИ board."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _SALE_KEYWORDS)
-
-
 async def _chat_with_session(
     user_id: int, message: str, base_url: str, model: str, system_prompt: str,
     require_tool: bool = False, require_tool_type: str | None = None,
@@ -388,14 +280,19 @@ async def handle_active_message(
     try:
         # Checked before the read, since both share "канбан"/"бэклог" as
         # context words — an explicit add verb wins the ambiguity.
-        if _looks_like_kanban_add(text):
+        # Precedence across every trigger in the bot is decided in one
+        # place (app/triggers.py); by the time a message reaches here,
+        # app/service.py has already taken the dialogue starters it owns.
+        trigger = triggers.classify(text)
+
+        if trigger == "kanban_add":
             await _handle_kanban_add(message_id, user_id, text)
             return
 
         # Kanban is a pure read with zero content judgment, so it's handled
         # entirely before ever reaching Odysseus/an LLM — same reasoning as
         # the ежедневник flow, see app/trilium_client.py.
-        if _looks_like_kanban_status(text):
+        if trigger == "kanban_status":
             try:
                 answer = await read_kanban_status()
             except Exception:
@@ -411,7 +308,7 @@ async def handle_active_message(
         # all decided by lightweight keyword rules with no real judgment
         # needed, so this never reaches Odysseus except for a narrow,
         # single-shot time-parsing fallback (see _handle_relay_or_reminder).
-        if _looks_like_relay_or_reminder(text):
+        if trigger == "relay_or_reminder":
             await _handle_relay_or_reminder(message_id, user_id, text)
             return
 
@@ -419,10 +316,10 @@ async def handle_active_message(
         # only ever a single narrow extraction — never the full agent loop,
         # sessions, or Odysseus's require_tool retry dance (see
         # extract_fields_via_llm).
-        if _looks_like_chinese_word(text):
+        if trigger == "chinese_word":
             await _handle_chinese_word(message_id, user_id, text)
             return
-        if _looks_like_sale(text):
+        if trigger == "sale":
             await _handle_sale(message_id, user_id, text)
             return
 
@@ -430,8 +327,8 @@ async def handle_active_message(
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")
 
-        note_intent = _looks_like_note_request(text)
-        finance_intent = note_intent and _looks_like_finance(text)
+        note_intent = trigger == "note_request"
+        finance_intent = note_intent and triggers.is_finance(text)
 
         # require_tool_type is now ALSO how Odysseus scopes which tools the
         # model is even offered (see _TOOLS_BY_REQUIRE_TYPE in

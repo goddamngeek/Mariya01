@@ -17,14 +17,15 @@ from app.db import (
 from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
 from app.odysseus_client import close_client as close_odysseus_client
 from app.people import USER_NAMES
-from app.prompts import ezhednevnik_step_text
 from app import threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app.service import (
     handle_book_details_reply,
+    handle_ezhednevnik_question_reply,
     handle_message_edit,
     handle_message_reaction,
     process_incoming_message,
+    resend_ezhednevnik_question,
     show_finished_books,
     show_reading_status,
     start_book_add_flow,
@@ -179,14 +180,8 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/checkin":
-        open_prompt = await get_open_ezhednevnik_prompt(chat_id)
-        if open_prompt is None:
+        if not await resend_ezhednevnik_question(chat_id):
             await send_message(chat_id, "Сейчас нет открытого чек-ина ежедневника.")
-        else:
-            # A "pool"-kind step (see EZHEDNEVNIK_STEPS) picks fresh each
-            # call rather than re-showing the exact original wording, which
-            # isn't stored anywhere — functionally equivalent either way.
-            await send_message(chat_id, ezhednevnik_step_text(open_prompt["slot"], open_prompt["step"]))
         return {"ok": True}
 
     if text.strip() == "/clear":
@@ -240,6 +235,15 @@ async def telegram_webhook(request: Request):
     # just falls through to normal handling below.
     if reply_to_message_id is not None and message_id is not None:
         handled = await handle_book_details_reply(
+            chat_id, message_id, reply_to_message_id, text, reply_to_text,
+        )
+        if handled:
+            return {"ok": True}
+
+        # Replying to a check-in question resumes that check-in, even one
+        # closed days ago (see handle_ezhednevnik_question_reply) — the
+        # counterpart to each slot closing the previous one.
+        handled = await handle_ezhednevnik_question_reply(
             chat_id, message_id, reply_to_message_id, text, reply_to_text,
         )
         if handled:

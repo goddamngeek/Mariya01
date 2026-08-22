@@ -49,13 +49,26 @@ CREATE TABLE IF NOT EXISTS water_reminders (
     UNIQUE (user_id, window_index, for_date)
 );
 
--- Replaces the old random-pool daily question (see scheduler.py) — three
--- fixed check-ins per day (am ~12:30 / pm ~18:00 / evening ~21:30) instead
--- of one random question, each a strict one-question-at-a-time sequence
--- (see app/prompts.py's EZHEDNEVNIK_STEPS) — step is the 0-based index into
--- that slot's step list, collected holds every answer gathered so far this
--- round as {field_name: value}. is_open gates "don't send a second one
--- while the first is still unanswered".
+-- Three fixed check-ins per day (am ~12:30 / pm ~18:00 / evening ~21:30),
+-- each a strict one-question-at-a-time sequence (see app/prompts.py's
+-- EZHEDNEVNIK_STEPS) — step is the 0-based index into that slot's step
+-- list, and equals len(steps) once the whole slot is filled in; collected
+-- holds every answer gathered.
+--
+-- is_open means "this is the slot a plain message answers", nothing more.
+-- Each new slot closes the previous one whether or not it was finished,
+-- because the old rule — skip the new slot while an old one is unanswered —
+-- silently cost whole check-ins: one unanswered pm on 21.08 meant the
+-- evening retrospective (six fields, the richest slot of the day) was never
+-- asked at all.
+--
+-- Nothing is lost by closing early, because question_message_ids keeps
+-- every question the bot asked for this prompt: replying to any of them
+-- (Telegram's native reply) resumes that check-in at whatever step it
+-- stopped on, no matter how long ago or whether it's still "open" — see
+-- app/service.py's handle_ezhednevnik_question_reply. So a plain message
+-- answers the current slot, a reply answers the slot you replied to, and
+-- editing a past answer patches the cell it already wrote.
 CREATE TABLE IF NOT EXISTS ezhednevnik_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -63,7 +76,8 @@ CREATE TABLE IF NOT EXISTS ezhednevnik_prompts (
     sent_at TIMESTAMPTZ NOT NULL,
     is_open BOOLEAN NOT NULL DEFAULT TRUE,
     step INTEGER NOT NULL DEFAULT 0,
-    collected JSONB NOT NULL DEFAULT '{}'::jsonb
+    collected JSONB NOT NULL DEFAULT '{}'::jsonb,
+    question_message_ids INTEGER[] NOT NULL DEFAULT '{}'
 );
 
 -- User-initiated activity logging (yoga / китайский / трейдинг) — same
@@ -213,6 +227,7 @@ ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS stage;
 ALTER TABLE ezhednevnik_prompts DROP COLUMN IF EXISTS pending_text;
 ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS step INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE ezhednevnik_prompts ADD COLUMN IF NOT EXISTS question_message_ids INTEGER[] NOT NULL DEFAULT '{}';
 -- Every message belonging to a /addbook exchange (trigger, both questions
 -- and answers, the template, the details answer, the final confirmation)
 -- — cleared once both stages finish successfully, see
@@ -403,24 +418,43 @@ async def has_open_ezhednevnik(user_id: int) -> bool:
     return row is not None
 
 
-async def close_stale_ezhednevnik_prompts(user_id: int, before: datetime) -> int:
-    """Auto-recovery: an open prompt nobody ever answers must not block
-    every future check-in forever. Confirmed live: a PM prompt sent
-    2026-08-03 stayed open (unanswered) and silently blocked every single
-    AM/PM send for that user for the next two days, since has_open_
-    ezhednevnik only checks "is ANY row open", with no expiry at all —
-    unlike card sessions (10min idle timeout) or the old daily question
-    (deferral with eventual reset). Closes anything still open from before
-    `before` (start of today) — the person can still reply to it if they
-    want (it just won't be "the open one" get_open_ezhednevnik_prompt picks
-    up anymore), it just stops blocking new ones. Returns how many closed."""
+async def close_open_ezhednevnik_prompts(user_id: int) -> int:
+    """Called by each slot tick before it sends: whatever was open stops
+    being "the slot a plain message answers", so the new slot can take over.
+    Age doesn't matter — an unanswered pm from three hours ago blocks the
+    evening retrospective just as badly as one from last week did.
+
+    The closed check-in stays resumable: see question_message_ids and
+    handle_ezhednevnik_question_reply. Returns how many were closed."""
     pool = await get_pool()
     result = await pool.execute(
-        "UPDATE ezhednevnik_prompts SET is_open = FALSE "
-        "WHERE user_id = $1 AND is_open = TRUE AND sent_at < $2",
-        user_id, before,
+        "UPDATE ezhednevnik_prompts SET is_open = FALSE WHERE user_id = $1 AND is_open = TRUE",
+        user_id,
     )
-    return int(result.split()[-1]) if result else 0
+    return int(result.split()[-1])
+
+
+async def append_ezhednevnik_question(prompt_id: int, message_id: int) -> None:
+    """Remember a question the bot just asked, so a reply to it can be
+    traced back to this check-in later."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE ezhednevnik_prompts SET question_message_ids = array_append(question_message_ids, $1) "
+        "WHERE id = $2",
+        message_id, prompt_id,
+    )
+
+
+async def get_ezhednevnik_prompt_by_question_message(
+    user_id: int, message_id: int,
+) -> asyncpg.Record | None:
+    """Deliberately ignores is_open — resuming a closed check-in by replying
+    to one of its questions is the whole point."""
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM ezhednevnik_prompts WHERE user_id = $1 AND $2 = ANY(question_message_ids)",
+        user_id, message_id,
+    )
 
 
 async def create_ezhednevnik_prompt(user_id: int, slot: str) -> int:

@@ -3,7 +3,7 @@ import html
 import json
 import re
 import traceback
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from app.config import TIMEZONE
 from app.db import (
@@ -11,6 +11,7 @@ from app.db import (
     advance_activity_prompt_step,
     advance_book_quote_prompt_step,
     advance_ezhednevnik_step,
+    append_ezhednevnik_question,
     close_activity_prompt,
     close_book_add_prompt,
     close_book_quote_prompt,
@@ -24,6 +25,8 @@ from app.db import (
     finalize_book_add_prompt,
     get_book_add_prompt_by_template_message,
     get_book_quote_prompt,
+    get_ezhednevnik_prompt_by_question_message,
+    get_open_ezhednevnik_prompt,
     get_incoming_message_by_telegram_id,
     get_message_thread,
     get_open_prompt,
@@ -48,7 +51,12 @@ from app.prompts import (
     quote_step_text,
 )
 from app import threads, triggers
-from app.telegram import answer_callback_query, clear_reply_markup, send_message
+from app.telegram import (
+    answer_callback_query,
+    clear_reply_markup,
+    send_message,
+    send_message_get_id,
+)
 from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
     add_book,
@@ -91,9 +99,9 @@ async def process_incoming_message(
     open_prompt = await get_open_prompt(user_id)
     if open_prompt is not None:
         kind = open_prompt["kind"]
-        # ежедневник has no inline timeout — it's the one scheduled flow,
-        # re-checked at each AM/PM/evening tick (close_stale_ezhednevnik_prompts)
-        # and otherwise meant to stay answerable all day.
+        # ежедневник has no inline timeout — the next slot tick closes it
+        # (close_open_ezhednevnik_prompts), and even then it stays resumable
+        # by replying to one of its questions.
         if kind != "ezhednevnik" and utcnow() - open_prompt["updated_at"] > _PROMPT_TIMEOUT:
             await close_prompt(kind, open_prompt["id"])
         else:
@@ -134,6 +142,23 @@ async def process_incoming_message(
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+_MONTHS_GENITIVE = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+
+def _recorded_text(entry_date) -> str:
+    """Names the day when it isn't today. A check-in answered the next
+    morning is filed under the day it was ASKED about, and a bare "Записал,
+    спасибо" gave no hint of that — confirmed live: an answer to the
+    previous evening's question looked like it had gone missing, when it
+    had simply landed in yesterday's row."""
+    if entry_date == datetime.now(TIMEZONE).date():
+        return "Записал, спасибо."
+    return f"Записал за {entry_date.day} {_MONTHS_GENITIVE[entry_date.month - 1]}."
 
 
 async def _handle_ezhednevnik_reply(
@@ -183,7 +208,11 @@ async def _handle_ezhednevnik_reply(
     next_step = step + 1
     if next_step < len(steps):
         await advance_ezhednevnik_step(prompt["id"], next_step, collected)
-        await send_message(user_id, ezhednevnik_step_text(slot, next_step))
+        question_id = await send_message_get_id(user_id, ezhednevnik_step_text(slot, next_step))
+        if question_id is not None:
+            # Tracked so a reply to this exact question can resume the
+            # check-in later — see handle_ezhednevnik_question_reply.
+            await append_ezhednevnik_question(prompt["id"], question_id)
         await ack_incoming_messages([message_id])
         return
 
@@ -199,8 +228,12 @@ async def _handle_ezhednevnik_reply(
     # every earlier answer intact either way.
     try:
         await fill_ezhednevnik(fields)
+        # step past the last index marks the slot as fully filled in — an
+        # abandoned check-in can otherwise sit at that same last index, and
+        # a later reply has to tell the two apart.
+        await advance_ezhednevnik_step(prompt["id"], len(steps), collected)
         await close_ezhednevnik_prompt(prompt["id"])
-        await send_message(user_id, "Записал, спасибо.")
+        await send_message(user_id, _recorded_text(entry_date))
     except Exception as exc:
         print(f"fill_ezhednevnik failed for user={user_id}:", flush=True)
         traceback.print_exc()
@@ -397,6 +430,50 @@ async def _handle_quote_reply(
             "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
         )
     await ack_incoming_messages([message_id])
+
+
+async def resend_ezhednevnik_question(user_id: int) -> bool:
+    """/checkin — re-ask the open check-in's current question, tracking the
+    new message so replying to it resumes the check-in like any other
+    question. Returns False when nothing is open."""
+    open_prompt = await get_open_ezhednevnik_prompt(user_id)
+    if open_prompt is None:
+        return False
+    # A "pool"-kind step (see EZHEDNEVNIK_STEPS) picks fresh wording each
+    # call rather than re-showing the exact original, which isn't stored
+    # anywhere — functionally equivalent either way.
+    message_id = await send_message_get_id(
+        user_id, ezhednevnik_step_text(open_prompt["slot"], open_prompt["step"]),
+    )
+    if message_id is not None:
+        await append_ezhednevnik_question(open_prompt["id"], message_id)
+    return True
+
+
+async def handle_ezhednevnik_question_reply(
+    user_id: int, telegram_message_id: int, reply_to_message_id: int,
+    text: str, reply_to_text: str | None,
+) -> bool:
+    """Replying to any question of a check-in resumes THAT check-in at
+    whatever step it stopped on, however long ago and whether or not it is
+    still the open one — which is what lets each slot close the previous one
+    without anything being lost (see app/db.py's close_open_ezhednevnik_prompts).
+
+    Unambiguous even for the six-step evening slot, because questions are
+    asked one at a time: at any moment exactly one of them is unanswered.
+
+    Returns False if this reply isn't to a check-in question at all, so
+    normal routing continues."""
+    prompt = await get_ezhednevnik_prompt_by_question_message(user_id, reply_to_message_id)
+    if prompt is None:
+        return False
+
+    if prompt["step"] >= len(EZHEDNEVNIK_STEPS[prompt["slot"]]):
+        await send_message(user_id, "Этот чек-ин уже заполнен.")
+        return True
+
+    await _handle_ezhednevnik_reply(user_id, text, reply_to_text, prompt, telegram_message_id)
+    return True
 
 
 async def handle_message_edit(user_id: int, telegram_message_id: int, new_text: str) -> None:

@@ -7,7 +7,8 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import TIMEZONE, WATER_REMINDER_TEXTS, WATER_REMINDER_WINDOWS
 from app.db import (
     claim_reminder,
-    close_stale_ezhednevnik_prompts,
+    append_ezhednevnik_question,
+    close_open_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
     get_due_reminders,
@@ -22,7 +23,7 @@ from app.db import (
 from app import threads
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
-from app.telegram import delete_message, send_message
+from app.telegram import delete_message, send_message, send_message_get_id
 
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
@@ -60,17 +61,22 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
     prompts.py) — this only ever sends the FIRST question; every step after
     that is driven entirely by app/service.py as replies come in."""
     text = ezhednevnik_step_text(slot, 0)
-    today_start = datetime.now(TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
     for user_id in await get_registered_user_ids():
-        closed = await close_stale_ezhednevnik_prompts(user_id, today_start)
+        # Whatever was open stops being the slot a plain message answers, so
+        # this one can take over. It is NOT skipped when something is still
+        # unanswered — that rule silently cost whole check-ins (an
+        # unanswered pm meant the evening retrospective was never asked at
+        # all). The closed one stays resumable by replying to any of its
+        # questions; see app/service.py's handle_ezhednevnik_question_reply.
+        closed = await close_open_ezhednevnik_prompts(user_id)
         if closed:
-            print(f"user={user_id}: auto-closed {closed} stale unanswered ezhednevnik prompt(s)", flush=True)
-        if await has_open_ezhednevnik(user_id):
-            print(f"user={user_id} already has an open ezhednevnik check-in, skipping {slot}", flush=True)
-            continue
-        await create_ezhednevnik_prompt(user_id, slot)
-        if not await send_message(user_id, text):
+            print(f"user={user_id}: closed {closed} unfinished ezhednevnik check-in(s) before {slot}", flush=True)
+        prompt_id = await create_ezhednevnik_prompt(user_id, slot)
+        message_id = await send_message_get_id(user_id, text)
+        if message_id is None:
             print(f"failed to send ezhednevnik {slot} prompt to user={user_id}", flush=True)
+            continue
+        await append_ezhednevnik_question(prompt_id, message_id)
 
 
 MARKET_REVIEW_TEXT = (

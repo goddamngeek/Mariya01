@@ -22,6 +22,7 @@ from typing import Optional
 import httpx
 
 from app.config import TIMEZONE, TRILIUM_ETAPI_TOKEN, TRILIUM_URL
+from app.db import cache_note_id, forget_note_id, get_cached_note_id
 
 _EZHEDNEVNIK_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
@@ -71,7 +72,38 @@ async def _create_attribute(client: httpx.AsyncClient, note_id: str, attr_type: 
     resp.raise_for_status()
 
 
-async def _find_note_id(client: httpx.AsyncClient, title: str) -> Optional[str]:
+async def _note_exists(client: httpx.AsyncClient, note_id: str) -> bool:
+    resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+    if resp.status_code == 404:
+        return False
+    resp.raise_for_status()
+    return True
+
+
+async def _resolve_note_id(client: httpx.AsyncClient, key: str, search) -> Optional[str]:
+    """Titles are what the bot knows a note by; noteIds are what Trilium
+    guarantees. Resolve once, remember the id, and a later rename in the UI
+    stops being able to break anything — the id keeps pointing at the same
+    note whatever it's now called.
+
+    A remembered id is confirmed to still exist before use (one cheap GET,
+    in place of the fuzzy search it replaces), so a note that was genuinely
+    deleted falls back to searching by title again instead of failing
+    forever on a stale id."""
+    cached = await get_cached_note_id(key)
+    if cached is not None:
+        if await _note_exists(client, cached):
+            return cached
+        await forget_note_id(key)
+        print(f"trilium: cached note id for {key!r} no longer exists, re-resolving", flush=True)
+
+    found = await search()
+    if found is not None:
+        await cache_note_id(key, found)
+    return found
+
+
+async def _search_note_id_by_title(client: httpx.AsyncClient, title: str) -> Optional[str]:
     """Exact-title lookup — Trilium's search is fuzzy/substring, so this
     always filters down to an exact match rather than trusting the first
     hit. Compares stripped titles: at least one real note in this vault
@@ -86,7 +118,11 @@ async def _find_note_id(client: httpx.AsyncClient, title: str) -> Optional[str]:
     )
 
 
-async def _find_ezhednevnik_note_id(client: httpx.AsyncClient, person_name: str) -> Optional[str]:
+async def _find_note_id(client: httpx.AsyncClient, title: str) -> Optional[str]:
+    return await _resolve_note_id(client, title, lambda: _search_note_id_by_title(client, title))
+
+
+async def _search_ezhednevnik_note_id(client: httpx.AsyncClient, person_name: str) -> Optional[str]:
     """Each person has their own ЕЖЕДНЕВНИК note (e.g. "ЕЖЕДНЕВНИК ОСТАП",
     "ЕЖЕДНЕВНИК  МАША" — the real titles turned out to be inconsistently
     spaced), so this matches on whitespace-collapsed comparison rather than
@@ -98,6 +134,13 @@ async def _find_ezhednevnik_note_id(client: httpx.AsyncClient, person_name: str)
         (n.get("noteId") for n in (resp.json().get("results") or [])
          if " ".join((n.get("title") or "").split()) == target),
         None,
+    )
+
+
+async def _find_ezhednevnik_note_id(client: httpx.AsyncClient, person_name: str) -> Optional[str]:
+    return await _resolve_note_id(
+        client, f"ЕЖЕДНЕВНИК {person_name}",
+        lambda: _search_ezhednevnik_note_id(client, person_name),
     )
 
 

@@ -210,6 +210,18 @@ CREATE TABLE IF NOT EXISTS chat_messages_log (
 );
 
 ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS odysseus_session_id TEXT;
+-- Trilium hands out stable noteIds that never change, but the bot has
+-- always looked notes up by their TITLE — which is user-editable in the
+-- UI, so renaming "КНИГИ" would silently break every book operation with
+-- nothing to point at. (Already bitten once: one real note's title turned
+-- out to have a double space in it.) Resolving a title to its noteId once
+-- and remembering it makes a later rename a non-event.
+CREATE TABLE IF NOT EXISTS trilium_note_ids (
+    lookup_key TEXT PRIMARY KEY,
+    note_id TEXT NOT NULL,
+    resolved_at TIMESTAMPTZ NOT NULL
+);
+
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'passive';
 ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
 -- Lets an edited Telegram message ("я поторопился, дай поправлю") retroactively
@@ -691,6 +703,31 @@ async def set_book_review_rating(prompt_id: int, rating: int) -> None:
 async def close_book_review_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE book_review_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+# --- Trilium note id cache --------------------------------------------------
+
+async def get_cached_note_id(lookup_key: str) -> str | None:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT note_id FROM trilium_note_ids WHERE lookup_key = $1", lookup_key
+    )
+
+
+async def cache_note_id(lookup_key: str, note_id: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO trilium_note_ids (lookup_key, note_id, resolved_at) VALUES ($1, $2, $3) "
+        "ON CONFLICT (lookup_key) DO UPDATE SET note_id = $2, resolved_at = $3",
+        lookup_key, note_id, utcnow(),
+    )
+
+
+async def forget_note_id(lookup_key: str) -> None:
+    """Drop a mapping whose note no longer exists, so the next lookup falls
+    back to searching by title again."""
+    pool = await get_pool()
+    await pool.execute("DELETE FROM trilium_note_ids WHERE lookup_key = $1", lookup_key)
 
 
 # --- open prompts (one lookup across every dialogue kind) -------------------

@@ -8,6 +8,7 @@ from app.config import TIMEZONE, WATER_REMINDER_TEXTS, WATER_REMINDER_WINDOWS
 from app.db import (
     claim_reminder,
     append_ezhednevnik_question,
+    close_ezhednevnik_prompt,
     close_open_ezhednevnik_prompts,
     create_ezhednevnik_prompt,
     ensure_water_reminder,
@@ -74,6 +75,11 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
         prompt_id = await create_ezhednevnik_prompt(user_id, slot)
         message_id = await send_message_get_id(user_id, text)
         if message_id is None:
+            # Close it again rather than leaving a check-in open whose
+            # question nobody ever saw — otherwise the person's next
+            # ordinary message gets swallowed as the answer to an invisible
+            # question.
+            await close_ezhednevnik_prompt(prompt_id)
             print(f"failed to send ezhednevnik {slot} prompt to user={user_id}", flush=True)
             continue
         await append_ezhednevnik_question(prompt_id, message_id)

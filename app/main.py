@@ -14,10 +14,9 @@ from app.db import (
     log_chat_message,
     register_user,
 )
-from app.ingest import TRILIUM_UNAVAILABLE_TEXT, send_kanban_status
+from app.ingest import send_kanban_status, send_week_summary
 from app.odysseus_client import close_client as close_odysseus_client
-from app.people import USER_NAMES
-from app import threads
+from app import background, threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app.service import (
     handle_book_details_reply,
@@ -38,7 +37,6 @@ from app.telegram import (
     send_message,
     set_bot_commands,
 )
-from app.trilium_client import get_week_summary
 
 LINKS_TEXT = (
     "Odysseus: https://odysseus.61d1.online\n"
@@ -163,20 +161,16 @@ async def telegram_webhook(request: Request):
     if not await is_registered(chat_id):
         return {"ok": True}
 
+    # Everything below that reaches Trilium is spawned rather than awaited:
+    # see app/background.py for why answering Telegram first matters.
     if text.strip() == "/kanban":
         # A guaranteed-reliable direct trigger — reads straight from
         # Trilium (see app/trilium_client.py), no LLM involved at all.
-        await send_kanban_status(chat_id, trigger_message_id=message_id)
+        background.spawn(send_kanban_status(chat_id, trigger_message_id=message_id), "/kanban")
         return {"ok": True}
 
     if text.strip() == "/week":
-        person_name = USER_NAMES.get(chat_id, str(chat_id))
-        try:
-            summary = await get_week_summary(person_name)
-        except Exception:
-            summary = TRILIUM_UNAVAILABLE_TEXT
-        thread_id = await threads.open_thread(chat_id, threads.TTL_INFO, message_id)
-        await threads.send(thread_id, chat_id, summary, parse_mode="HTML")
+        background.spawn(send_week_summary(chat_id, message_id), "/week")
         return {"ok": True}
 
     if text.strip() == "/checkin":
@@ -196,19 +190,25 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/quote":
-        await start_quote_flow(chat_id)
+        background.spawn(start_quote_flow(chat_id), "/quote")
         return {"ok": True}
 
     if text.strip() == "/addbook":
-        await start_book_add_flow(chat_id, text, telegram_message_id=message_id)
+        background.spawn(
+            start_book_add_flow(chat_id, text, telegram_message_id=message_id), "/addbook",
+        )
         return {"ok": True}
 
     if text.strip() == "/reading":
-        await show_reading_status(chat_id, trigger_message_id=message_id)
+        background.spawn(
+            show_reading_status(chat_id, trigger_message_id=message_id), "/reading",
+        )
         return {"ok": True}
 
     if text.strip() == "/finished":
-        await show_finished_books(chat_id, trigger_message_id=message_id)
+        background.spawn(
+            show_finished_books(chat_id, trigger_message_id=message_id), "/finished",
+        )
         return {"ok": True}
 
     if text.strip() == "/help":
@@ -249,7 +249,12 @@ async def telegram_webhook(request: Request):
         if handled:
             return {"ok": True}
 
-    await process_incoming_message(chat_id, text, reply_to_text=reply_to_text, telegram_message_id=message_id)
+    background.spawn(
+        process_incoming_message(
+            chat_id, text, reply_to_text=reply_to_text, telegram_message_id=message_id,
+        ),
+        "incoming",
+    )
 
     return {"ok": True}
 

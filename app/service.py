@@ -50,7 +50,7 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app import threads, triggers
+from app import humanize, threads, triggers
 from app.telegram import (
     answer_callback_query,
     clear_reply_markup,
@@ -144,12 +144,6 @@ async def process_incoming_message(
     task.add_done_callback(_background_tasks.discard)
 
 
-_MONTHS_GENITIVE = (
-    "января", "февраля", "марта", "апреля", "мая", "июня",
-    "июля", "августа", "сентября", "октября", "ноября", "декабря",
-)
-
-
 def _recorded_text(entry_date) -> str:
     """Names the day when it isn't today. A check-in answered the next
     morning is filed under the day it was ASKED about, and a bare "Записал,
@@ -158,7 +152,7 @@ def _recorded_text(entry_date) -> str:
     had simply landed in yesterday's row."""
     if entry_date == datetime.now(TIMEZONE).date():
         return "Записал, спасибо."
-    return f"Записал за {entry_date.day} {_MONTHS_GENITIVE[entry_date.month - 1]}."
+    return f"Записал за {humanize.format_date(entry_date)}."
 
 
 async def _handle_ezhednevnik_reply(
@@ -209,7 +203,10 @@ async def _handle_ezhednevnik_reply(
     if next_step < len(steps):
         await advance_ezhednevnik_step(prompt["id"], next_step, collected)
         question_id = await send_message_get_id(user_id, ezhednevnik_step_text(slot, next_step))
-        if question_id is not None:
+        if question_id is None:
+            await close_ezhednevnik_prompt(prompt["id"])
+            print(f"failed to send ezhednevnik {slot} step {next_step} to user={user_id}", flush=True)
+        else:
             # Tracked so a reply to this exact question can resume the
             # check-in later — see handle_ezhednevnik_question_reply.
             await append_ezhednevnik_question(prompt["id"], question_id)
@@ -254,8 +251,9 @@ async def _start_activity_flow(
     question."""
     message_id = await insert_incoming_message(user_id, text, f"activity_{activity}_start", reply_to_text)
     thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
-    await create_activity_prompt(user_id, activity, thread_id)
-    await threads.send(thread_id, user_id, activity_step_text(activity, 0))
+    prompt_id = await create_activity_prompt(user_id, activity, thread_id)
+    if await threads.send(thread_id, user_id, activity_step_text(activity, 0)) is None:
+        await close_activity_prompt(prompt_id)
     await ack_incoming_messages([message_id])
 
 
@@ -351,7 +349,8 @@ async def start_quote_flow(
     thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
     prompt_id = await create_book_quote_prompt(user_id, books, thread_id)
     buttons = [(book["title"], f"bq:{prompt_id}:{i}") for i, book in enumerate(books)]
-    await threads.send(thread_id, user_id, "Какую книгу?", buttons=buttons)
+    if await threads.send(thread_id, user_id, "Какую книгу?", buttons=buttons) is None:
+        await close_book_quote_prompt(prompt_id)
     await ack_incoming_messages([message_id])
 
 
@@ -533,8 +532,9 @@ async def start_book_add_flow(
     thread_id = await threads.open_thread(
         user_id, threads.TTL_DIALOG, telegram_message_id, closing_text="Добавил книгу",
     )
-    await create_book_add_prompt(user_id, thread_id)
-    await threads.send(thread_id, user_id, book_add_step_text(0))
+    prompt_id = await create_book_add_prompt(user_id, thread_id)
+    if await threads.send(thread_id, user_id, book_add_step_text(0)) is None:
+        await close_book_add_prompt(prompt_id)
     await ack_incoming_messages([message_id])
 
 
@@ -797,8 +797,9 @@ async def handle_book_finished(callback_query: dict) -> None:
         return
 
     thread_id = thread["id"] if thread is not None else None
-    await create_book_review_prompt(chat_id, note_id, title, thread_id)
-    await threads.send(thread_id, chat_id, book_review_step_text(0))
+    prompt_id = await create_book_review_prompt(chat_id, note_id, title, thread_id)
+    if await threads.send(thread_id, chat_id, book_review_step_text(0)) is None:
+        await close_book_review_prompt(prompt_id)
 
 
 async def _handle_book_review_reply(

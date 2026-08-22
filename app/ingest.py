@@ -15,7 +15,7 @@ one-question-at-a-time sequence.
 
 import re
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.config import TIMEZONE
 from app.db import (
@@ -34,13 +34,14 @@ from app.odysseus_client import (
 from app.people import NAME_TO_USER_ID, USER_NAMES
 from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.reminder_time import parse_reminder_time
-from app import threads, triggers
+from app import humanize, threads, triggers
 from app.reminders import schedule_reminder
 from app.telegram import send_message
 from app.trilium_client import (
     KANBAN_COLUMNS,
     add_chinese_word,
     add_kanban_card,
+    get_week_summary,
     log_reminder_to_calendar,
     log_sale,
     read_kanban_status,
@@ -132,6 +133,20 @@ async def _handle_relay_or_reminder(message_id: int, user_id: int, text: str) ->
 
     await schedule_reminder(sender_id, target_id, text, run_at, anonymous)
     await log_reminder_to_calendar(sender_name, target_name, text, run_at.astimezone(TIMEZONE))
+
+    # Confirm, or the request vanishes into silence: scheduling something
+    # for tomorrow used to produce no reply at all, leaving no way to tell
+    # whether it had been understood. (Nothing to confirm when it's due
+    # right now — schedule_reminder has already delivered it.)
+    if run_at > utcnow() + timedelta(seconds=30):
+        when = humanize.format_when(run_at)
+        if target_id == sender_id:
+            await send_message(user_id, f"Напомню {when}.")
+        else:
+            await send_message(user_id, f"Передам {target_name.capitalize()} {when}.")
+    elif target_id != sender_id:
+        await send_message(user_id, f"Передал {target_name.capitalize()}.")
+
     await ack_incoming_messages([message_id])
 
 
@@ -271,6 +286,22 @@ async def send_kanban_status(user_id: int, trigger_message_id: int | None = None
     await threads.send(thread_id, user_id, answer, parse_mode="HTML")
 
 
+async def send_week_summary(user_id: int, trigger_message_id: int | None = None) -> None:
+    """/week — sibling of send_kanban_status above: a pure Trilium read,
+    shown in a self-clearing info thread, wrapped so an outage can't turn
+    into silence."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    try:
+        summary = await get_week_summary(person_name)
+    except Exception:
+        print(f"send_week_summary failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        summary = TRILIUM_UNAVAILABLE_TEXT
+
+    thread_id = await threads.open_thread(user_id, threads.TTL_INFO, trigger_message_id)
+    await threads.send(thread_id, user_id, summary, parse_mode="HTML")
+
+
 async def handle_active_message(
     message_id: int, user_id: int, text: str, received_at: datetime,
     reply_to_text: str | None = None, telegram_message_id: int | None = None,
@@ -278,8 +309,6 @@ async def handle_active_message(
     """Answer a real question right away — called as a fire-and-forget task
     from app/service.py as soon as the webhook receives it."""
     try:
-        # Checked before the read, since both share "канбан"/"бэклог" as
-        # context words — an explicit add verb wins the ambiguity.
         # Precedence across every trigger in the bot is decided in one
         # place (app/triggers.py); by the time a message reaches here,
         # app/service.py has already taken the dialogue starters it owns.
@@ -349,15 +378,14 @@ async def handle_active_message(
         else:
             require_tool_type = "general"
 
-        forced_fallback_types = (
-            note_intent, finance_intent,
-        )
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
             require_tool=note_intent,
             require_tool_type=require_tool_type,
         )
-        if any(forced_fallback_types) and result.get("forced_fallback") is False:
+        # finance_intent can't be true without note_intent, so note_intent
+        # alone is the whole condition.
+        if note_intent and result.get("forced_fallback") is False:
             # Both the model and the deterministic fallback failed to act —
             # unlike passive messages there's no 60s retry poll for active
             # ones, so this is a real, visible loss, not just a delayed retry.

@@ -551,15 +551,6 @@ async def close_activity_prompt(prompt_id: int) -> None:
 
 # --- book quotes ("interesting moments") -------------------------------------
 
-async def get_open_book_quote_prompt(user_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow(
-        "SELECT * FROM book_quote_prompts WHERE user_id = $1 AND is_open = TRUE "
-        "ORDER BY sent_at DESC LIMIT 1",
-        user_id,
-    )
-
-
 async def get_book_quote_prompt(prompt_id: int) -> asyncpg.Record | None:
     pool = await get_pool()
     return await pool.fetchrow("SELECT * FROM book_quote_prompts WHERE id = $1", prompt_id)
@@ -600,15 +591,6 @@ async def close_book_quote_prompt(prompt_id: int) -> None:
 
 
 # --- /addbook -----------------------------------------------------------
-
-async def get_open_book_add_prompt(user_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow(
-        "SELECT * FROM book_add_prompts WHERE user_id = $1 AND is_open = TRUE "
-        "ORDER BY sent_at DESC LIMIT 1",
-        user_id,
-    )
-
 
 async def create_book_add_prompt(user_id: int, thread_id: int | None = None) -> int:
     pool = await get_pool()
@@ -664,15 +646,6 @@ async def get_book_add_prompt_by_template_message(user_id: int, template_message
 
 # --- book reviews ("я дочитал") ---------------------------------------------
 
-async def get_open_book_review_prompt(user_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow(
-        "SELECT * FROM book_review_prompts WHERE user_id = $1 AND is_open = TRUE "
-        "ORDER BY sent_at DESC LIMIT 1",
-        user_id,
-    )
-
-
 async def create_book_review_prompt(
     user_id: int, book_note_id: str, book_title: str, thread_id: int | None = None,
 ) -> int:
@@ -697,11 +670,6 @@ async def set_book_review_rating(prompt_id: int, rating: int) -> None:
 async def close_book_review_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE book_review_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
-
-
-async def get_book_review_prompt(prompt_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow("SELECT * FROM book_review_prompts WHERE id = $1", prompt_id)
 
 
 # --- open prompts (one lookup across every dialogue kind) -------------------

@@ -6,7 +6,10 @@ by hand since the sync (mac_sync) and async (bot) versions can't share code
 without adding a shared package neither side otherwise needs.
 """
 
+import json
+import re
 import time
+from datetime import datetime
 
 import httpx
 
@@ -162,9 +165,8 @@ async def parse_time_via_llm(text: str, now_iso: str) -> str | None:
     if not reply or reply.lower().startswith("none"):
         return None
 
-    from datetime import datetime as _dt
     try:
-        _dt.fromisoformat(reply)
+        datetime.fromisoformat(reply)
     except ValueError:
         print(f"parse_time_via_llm: unparseable reply {reply!r}", flush=True)
         return None
@@ -197,9 +199,6 @@ async def extract_fields_via_llm(text: str, instructions: str) -> dict | None:
     except httpx.HTTPError as exc:
         print(f"extract_fields_via_llm failed: {exc!r}", flush=True)
         return None
-
-    import json
-    import re
 
     # Models sometimes wrap the JSON in a ```json ... ``` fence despite
     # being told not to — strip that before parsing rather than failing on it.

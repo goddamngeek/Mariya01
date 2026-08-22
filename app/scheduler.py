@@ -59,6 +59,8 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
     fresh: 'am' ~12:30 (before-lunch feeling), 'pm' ~18:00 (after-lunch
     feeling, right as the work day ends), 'evening' ~21:30 (the full-day
     retrospective — needs the whole day to have actually happened first).
+    Those three are weekdays only; Saturday and Sunday get the evening
+    retrospective alone, at 23:00 (see start_scheduler).
     Each slot is a one-question-at-a-time sequence (EZHEDNEVNIK_STEPS in
     prompts.py) — this only ever sends the FIRST question; every step after
     that is driven entirely by app/service.py as replies come in."""
@@ -196,23 +198,34 @@ async def clear_chat_history(only_chat_id: int | None = None) -> None:
 
 
 async def start_scheduler() -> None:
+    # Weekdays keep all three slots at their work-shaped times. Weekends get
+    # the evening retrospective only, and later: asking "как проходит день"
+    # twice on a Saturday landed on people who were out and not looking at
+    # the phone, so the questions piled up unanswered and turned into debt
+    # by Monday.
     scheduler.add_job(
         send_ezhednevnik_prompts,
-        trigger=CronTrigger(hour=12, minute=30, timezone=TIMEZONE),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=12, minute=30, timezone=TIMEZONE),
         args=["am"],
         id="ezhednevnik_am",
     )
     scheduler.add_job(
         send_ezhednevnik_prompts,
-        trigger=CronTrigger(hour=18, minute=0, timezone=TIMEZONE),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=TIMEZONE),
         args=["pm"],
         id="ezhednevnik_pm",
     )
     scheduler.add_job(
         send_ezhednevnik_prompts,
-        trigger=CronTrigger(hour=21, minute=30, timezone=TIMEZONE),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=21, minute=30, timezone=TIMEZONE),
         args=["evening"],
         id="ezhednevnik_evening",
+    )
+    scheduler.add_job(
+        send_ezhednevnik_prompts,
+        trigger=CronTrigger(day_of_week="sat,sun", hour=23, minute=0, timezone=TIMEZONE),
+        args=["evening"],
+        id="ezhednevnik_evening_weekend",
     )
     scheduler.add_job(
         ensure_today_water_reminders,

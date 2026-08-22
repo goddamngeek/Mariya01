@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
@@ -269,6 +269,27 @@ ALTER TABLE book_quote_prompts DROP COLUMN IF EXISTS message_ids;
 ALTER TABLE book_add_prompts DROP COLUMN IF EXISTS message_ids;
 ALTER TABLE book_add_prompts DROP COLUMN IF EXISTS details_notified;
 DROP TABLE IF EXISTS pending_message_deletions;
+
+-- Indexes for the lookups that run per incoming message or per background
+-- tick. With two people the tables are tiny and a sequential scan is free,
+-- but incoming_messages is the one that only ever grows, and it's scanned
+-- on every message edit.
+CREATE INDEX IF NOT EXISTS incoming_messages_unconfirmed_idx
+    ON incoming_messages (id) WHERE confirmed_at IS NULL;
+CREATE INDEX IF NOT EXISTS incoming_messages_telegram_idx
+    ON incoming_messages (user_id, telegram_message_id);
+CREATE INDEX IF NOT EXISTS ezhednevnik_prompts_open_idx
+    ON ezhednevnik_prompts (user_id) WHERE is_open;
+CREATE INDEX IF NOT EXISTS ezhednevnik_prompts_questions_idx
+    ON ezhednevnik_prompts USING GIN (question_message_ids);
+CREATE INDEX IF NOT EXISTS activity_prompts_open_idx ON activity_prompts (user_id) WHERE is_open;
+CREATE INDEX IF NOT EXISTS book_quote_prompts_open_idx ON book_quote_prompts (user_id) WHERE is_open;
+CREATE INDEX IF NOT EXISTS book_review_prompts_open_idx ON book_review_prompts (user_id) WHERE is_open;
+CREATE INDEX IF NOT EXISTS book_add_prompts_open_idx ON book_add_prompts (user_id) WHERE is_open;
+CREATE INDEX IF NOT EXISTS book_add_prompts_template_idx ON book_add_prompts (template_message_id);
+CREATE INDEX IF NOT EXISTS message_threads_open_idx ON message_threads (user_id) WHERE is_open;
+CREATE INDEX IF NOT EXISTS message_threads_messages_idx ON message_threads USING GIN (message_ids);
+CREATE INDEX IF NOT EXISTS chat_messages_log_chat_idx ON chat_messages_log (chat_id);
 -- Flashcard feature removed entirely (unused, per explicit confirmation
 -- there was nothing worth keeping in it) — drops the tables outright
 -- rather than leaving them as dead weight nothing references anymore.
@@ -800,6 +821,21 @@ async def close_prompts_for_thread(thread_id: int) -> None:
 
 
 # --- chat message log (nightly cleanup) -------------------------------------
+
+# Telegram refuses deleteMessage for anything sent more than 48 hours ago,
+# so a log row older than that can never be acted on — it would only ever
+# produce a failed delete on the next /clear. Trimmed with a day of slack.
+CHAT_LOG_RETENTION_HOURS = 72
+
+
+async def trim_chat_message_log() -> int:
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM chat_messages_log WHERE created_at < $1",
+        utcnow() - timedelta(hours=CHAT_LOG_RETENTION_HOURS),
+    )
+    return int(result.split()[-1])
+
 
 async def log_chat_message(chat_id: int, message_id: int) -> None:
     pool = await get_pool()

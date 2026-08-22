@@ -41,6 +41,7 @@ from app.trilium_client import (
     KANBAN_COLUMNS,
     add_chinese_word,
     add_kanban_card,
+    get_day_summary,
     get_week_summary,
     log_reminder_to_calendar,
     log_sale,
@@ -295,6 +296,21 @@ async def send_week_summary(user_id: int, trigger_message_id: int | None = None)
         summary = await get_week_summary(person_name)
     except Exception:
         print(f"send_week_summary failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        summary = TRILIUM_UNAVAILABLE_TEXT
+
+    thread_id = await threads.open_thread(user_id, threads.TTL_INFO, trigger_message_id)
+    await threads.send(thread_id, user_id, summary, parse_mode="HTML")
+
+
+async def send_day_summary(user_id: int, trigger_message_id: int | None = None) -> None:
+    """/today — the same shape as send_week_summary, but one day's own row
+    rather than the week's aggregates."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    try:
+        summary = await get_day_summary(person_name)
+    except Exception:
+        print(f"send_day_summary failed for user={user_id}:", flush=True)
         traceback.print_exc()
         summary = TRILIUM_UNAVAILABLE_TEXT
 

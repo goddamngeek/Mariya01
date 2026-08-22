@@ -158,6 +158,7 @@ async def set_bot_commands() -> None:
         # of the visible menu since both real users are already registered
         # and Telegram prompts /start on its own for any unstarted chat.
         {"command": "kanban", "description": "Показать канбан-доску задач"},
+        {"command": "today", "description": "Что записано в ежедневник за сегодня"},
         {"command": "week", "description": "Сводка по ежедневнику за неделю"},
         {"command": "checkin", "description": "Повторить текущий вопрос ежедневника"},
         {"command": "links", "description": "Ссылки на Odysseus и Trilium"},

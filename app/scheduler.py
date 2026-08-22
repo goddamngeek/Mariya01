@@ -20,6 +20,7 @@ from app.db import (
     has_open_ezhednevnik,
     mark_water_reminder_sent,
     pop_logged_messages_except,
+    trim_chat_message_log,
 )
 from app import threads
 from app.prompts import ezhednevnik_step_text
@@ -132,6 +133,15 @@ async def ensure_today_water_reminders() -> None:
             await ensure_water_reminder(user_id, i, today, due_at)
 
 
+async def trim_logs() -> None:
+    """Hourly housekeeping: drop chat-log rows Telegram would refuse to
+    delete anyway (see CHAT_LOG_RETENTION_HOURS) — otherwise the table only
+    ever grows, and /clear spends its time on messages too old to remove."""
+    trimmed = await trim_chat_message_log()
+    if trimmed:
+        print(f"trimmed {trimmed} chat-log row(s) past Telegram's delete window", flush=True)
+
+
 async def release_stale_message_threads() -> None:
     """The timeout path into a thread's terminal state — nothing has
     happened in it for its ttl_minutes, so it gets torn down. The other two
@@ -225,6 +235,12 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_due_water_reminders",
+    )
+    scheduler.add_job(
+        trim_logs,
+        trigger="interval",
+        hours=1,
+        id="trim_logs",
     )
     scheduler.add_job(
         release_stale_message_threads,

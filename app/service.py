@@ -68,6 +68,7 @@ from app.trilium_client import (
     get_active_reading_books,
     get_book_details,
     get_finished_books,
+    get_note_labels,
     log_activity,
     set_reading_end,
 )
@@ -784,9 +785,10 @@ async def handle_book_finished(callback_query: dict) -> None:
         thread = await threads.thread_for_message(chat_id, description_message_id)
 
     try:
-        books = await get_active_reading_books()
-        title = next((b["title"] for b in books if b["note_id"] == note_id), None)
-        if title is None:
+        # One fetch of this exact note, not a listing of every active book
+        # just to find its title in the result.
+        title, labels = await get_note_labels(note_id)
+        if labels.get("readingEnd"):
             await send_message(chat_id, "Эта книга уже отмечена как прочитанная.")
             return
         await set_reading_end(note_id)

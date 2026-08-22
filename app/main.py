@@ -14,7 +14,7 @@ from app.db import (
     log_chat_message,
     register_user,
 )
-from app.ingest import send_kanban_status, send_week_summary
+from app.ingest import send_day_summary, send_kanban_status, send_week_summary
 from app.odysseus_client import close_client as close_odysseus_client
 from app import background, threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
@@ -46,6 +46,7 @@ LINKS_TEXT = (
 HELP_TEXT = (
     "Команды:\n"
     "/kanban — показать канбан-доску задач\n"
+    "/today — что уже записано в ежедневник за сегодня\n"
     "/week — сводка по ежедневнику за текущую неделю\n"
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
     "/links — ссылки на Odysseus и Trilium\n"
@@ -64,7 +65,14 @@ HELP_TEXT = (
     "— цитата — добавлю интересный момент из книги, которую сейчас читаешь\n"
     "— что я сейчас читаю — покажу активные книги и их описание\n"
     "  (там же кнопка «Я дочитал» — спрошу оценку и отзыв)\n"
-    "— прочитанные — покажу книги, которые уже прочитал"
+    "— прочитанные — покажу книги, которые уже прочитал\n"
+    "\n"
+    "Жесты:\n"
+    "— ответить (reply) на вопрос ежедневника — вернёт тебя в тот чек-ин, "
+    "даже если он был вчера\n"
+    "— отредактировать свой ответ — поправит уже записанное в Trilium\n"
+    "— поставить реакцию на сообщение — свернёт всю эту ветку сразу, "
+    "не дожидаясь таймера"
 )
 
 
@@ -167,6 +175,10 @@ async def telegram_webhook(request: Request):
         # A guaranteed-reliable direct trigger — reads straight from
         # Trilium (see app/trilium_client.py), no LLM involved at all.
         background.spawn(send_kanban_status(chat_id, trigger_message_id=message_id), "/kanban")
+        return {"ok": True}
+
+    if text.strip() == "/today":
+        background.spawn(send_day_summary(chat_id, message_id), "/today")
         return {"ok": True}
 
     if text.strip() == "/week":

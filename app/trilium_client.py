@@ -597,6 +597,23 @@ async def _list_books(finished: bool) -> list[dict]:
         return books
 
 
+async def get_note_labels(note_id: str) -> tuple[str, dict[str, str]]:
+    """One note's title and label values — for the cases that already know
+    which note they mean and only need to check its state, instead of
+    listing every book just to find one of them in the list."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+        resp.raise_for_status()
+        note = resp.json()
+        labels = {
+            a["name"]: a["value"] for a in note.get("attributes", []) if a.get("type") == "label"
+        }
+        return note.get("title") or "(без названия)", labels
+
+
 async def get_active_reading_books() -> list[dict]:
     """Books currently being read — readingStart set, readingEnd not."""
     return await _list_books(finished=False)
@@ -624,6 +641,57 @@ async def add_book_quote(note_id: str, quote_text: str, impression: str) -> None
             f"<p>{html.escape(impression)}</p>"
         )
         await _put_content(client, note_id, existing + entry_html)
+
+
+# Every ЕЖЕДНЕВНИК field with a human name, in the order the day fills
+# them in — the same columns fill_ezhednevnik writes to, read back.
+_EZHEDNEVNIK_DAY_VIEW = (
+    ("3", "Как дела (день)"), ("4", "Балл"),
+    ("5", "Как дела (вечер)"), ("6", "Балл"),
+    ("2", "Заметное событие"),
+    ("8", "Заметил в себе"), ("9", "Заметил на рынке"), ("10", "Заметил в новостях"),
+    ("12", "Чему научился"), ("14", "Ошибки"),
+)
+
+
+async def get_day_summary(person_name: str, day: Optional[_date] = None) -> str:
+    """One day's row read back out of ЕЖЕДНЕВНИК — what's filled in and
+    what's still blank. /week only ever showed aggregates over the week,
+    so there was no way to see whether today's own check-ins had actually
+    landed."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    day = day or datetime.now(TIMEZONE).date()
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_id = await _find_ezhednevnik_note_id(client, person_name)
+        if note_id is None:
+            raise TriliumNoteNotFoundError(f"Could not find the ЕЖЕДНЕВНИК note for {person_name}.")
+        raw = await _get_content(client, note_id)
+
+    cell_data = json.loads(raw)["workbook"]["sheets"]
+    cell_data = next(iter(cell_data.values()))["cellData"]
+    serial = (day - _date(1899, 12, 30)).days
+
+    row = next(
+        (r for k, r in cell_data.items()
+         if k != "0" and r and _cell_value(r, "0") == serial
+         and _cell_value(r, "15") == person_name),
+        None,
+    )
+    header = f"<b>Ежедневник за {day.strftime('%d.%m')}:</b>"
+    if row is None:
+        return f"{header}\n\nЗа этот день ещё ничего не записано."
+
+    lines = []
+    for col, label in _EZHEDNEVNIK_DAY_VIEW:
+        value = _cell_value(row, col)
+        if value not in (None, ""):
+            lines.append(f"<b>{label}:</b> {html.escape(str(value))}")
+    if not lines:
+        return f"{header}\n\nЗа этот день ещё ничего не записано."
+    return header + "\n\n" + "\n".join(lines)
 
 
 async def get_week_summary(person_name: str) -> str:

@@ -22,7 +22,7 @@ from app.db import (
     pop_logged_messages_except,
     trim_chat_message_log,
 )
-from app import threads
+from app import parables, threads
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
 from app.telegram import delete_message, send_message, send_message_get_id
@@ -86,6 +86,20 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
             print(f"failed to send ezhednevnik {slot} prompt to user={user_id}", flush=True)
             continue
         await append_ezhednevnik_question(prompt_id, message_id)
+
+
+async def send_thought_of_the_day() -> None:
+    """Мысль дня из «Круга чтения» — see app/parables.py. Both people get
+    the same text, so it's something they can talk about; it lives in a
+    thread with a day-long TTL, so yesterday's clears itself right as
+    today's arrives."""
+    thought = parables.compose_for(datetime.now(TIMEZONE).date())
+    if thought is None:
+        print("thought of the day: nothing for today, skipping", flush=True)
+        return
+    for user_id in await get_registered_user_ids():
+        thread_id = await threads.open_thread(user_id, threads.TTL_DAY)
+        await threads.send(thread_id, user_id, thought, parse_mode="HTML")
 
 
 MARKET_REVIEW_TEXT = (
@@ -226,6 +240,11 @@ async def start_scheduler() -> None:
         trigger=CronTrigger(day_of_week="sat,sun", hour=23, minute=0, timezone=TIMEZONE),
         args=["evening"],
         id="ezhednevnik_evening_weekend",
+    )
+    scheduler.add_job(
+        send_thought_of_the_day,
+        trigger=CronTrigger(hour=9, minute=0, timezone=TIMEZONE),
+        id="thought_of_the_day",
     )
     scheduler.add_job(
         ensure_today_water_reminders,

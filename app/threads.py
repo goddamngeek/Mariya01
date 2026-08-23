@@ -42,6 +42,9 @@ from app.telegram import delete_message, send_message_get_id, send_message_with_
 TTL_WATER = 2
 TTL_INFO = 3
 TTL_DIALOG = 5
+# A day exactly: the morning thought is meant to be there all day and gone
+# by the time the next one arrives.
+TTL_DAY = 24 * 60
 
 
 async def open_thread(

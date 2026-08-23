@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, Request
 
 from app.callbacks import process_callback_query
-from app.config import MAX_REGISTERED_USERS
+from app.config import MAX_REGISTERED_USERS, TIMEZONE
 from app.db import (
     close_pool,
     count_registered,
@@ -16,7 +17,7 @@ from app.db import (
 )
 from app.ingest import send_day_summary, send_kanban_status, send_week_summary
 from app.odysseus_client import close_client as close_odysseus_client
-from app import background, threads
+from app import background, parables, threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app.service import (
     handle_book_details_reply,
@@ -46,6 +47,7 @@ LINKS_TEXT = (
 HELP_TEXT = (
     "Команды:\n"
     "/kanban — показать канбан-доску задач\n"
+    "/thought — мысль дня из «Круга чтения» Толстого\n"
     "/today — что уже записано в ежедневник за сегодня\n"
     "/week — сводка по ежедневнику за текущую неделю\n"
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
@@ -175,6 +177,15 @@ async def telegram_webhook(request: Request):
         # A guaranteed-reliable direct trigger — reads straight from
         # Trilium (see app/trilium_client.py), no LLM involved at all.
         background.spawn(send_kanban_status(chat_id, trigger_message_id=message_id), "/kanban")
+        return {"ok": True}
+
+    if text.strip() == "/thought":
+        # Reads a local data file, not Trilium, so this one is fast enough
+        # to answer inline. Same day-long thread as the 9:00 job, so asking
+        # twice doesn't leave two copies lying around.
+        thought = parables.compose_for(datetime.now(TIMEZONE).date())
+        thread_id = await threads.open_thread(chat_id, threads.TTL_DAY, message_id)
+        await threads.send(thread_id, chat_id, thought, parse_mode="HTML")
         return {"ok": True}
 
     if text.strip() == "/today":

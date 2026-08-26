@@ -102,6 +102,19 @@ async def send_thought_of_the_day() -> None:
         await threads.send(thread_id, user_id, thought, parse_mode="HTML")
 
 
+GRANDMA_CALL_TEXT = "Позвони бабушкам — они ждут звонка."
+
+
+async def send_grandma_reminder() -> None:
+    """Weekly nudge, Sunday midday — the kind of thing that slips not
+    because it's hard but because nothing ever asks. No reply expected;
+    lives a day and clears itself, so an unanswered one doesn't sit in the
+    chat as a reproach."""
+    for user_id in await get_registered_user_ids():
+        thread_id = await threads.open_thread(user_id, threads.TTL_DAY)
+        await threads.send(thread_id, user_id, GRANDMA_CALL_TEXT)
+
+
 MARKET_REVIEW_TEXT = (
     "Привет, тебе необходимо проанализировать рынок и подготовиться к "
     "неделе, заполнив план-таблицу."
@@ -250,6 +263,11 @@ async def start_scheduler() -> None:
         ensure_today_water_reminders,
         trigger=CronTrigger(hour=0, minute=5, timezone=TIMEZONE),
         id="schedule_daily_water_reminders",
+    )
+    scheduler.add_job(
+        send_grandma_reminder,
+        trigger=CronTrigger(day_of_week="sun", hour=12, minute=0, timezone=TIMEZONE),
+        id="grandma_reminder",
     )
     scheduler.add_job(
         send_market_review_reminder,

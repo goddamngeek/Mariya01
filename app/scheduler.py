@@ -4,7 +4,12 @@ from datetime import datetime, time, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.config import TIMEZONE, WATER_REMINDER_TEXTS, WATER_REMINDER_WINDOWS
+from app.config import (
+    THOUGHT_CHANNEL,
+    TIMEZONE,
+    WATER_REMINDER_TEXTS,
+    WATER_REMINDER_WINDOWS,
+)
 from app.db import (
     claim_reminder,
     append_ezhednevnik_question,
@@ -100,6 +105,13 @@ async def send_thought_of_the_day() -> None:
     for user_id in await get_registered_user_ids():
         thread_id = await threads.open_thread(user_id, threads.TTL_DAY)
         await threads.send(thread_id, user_id, thought, parse_mode="HTML")
+
+    # В канал — тем же текстом, но НЕ в ветке и без записи в журнал чата:
+    # там смысл ровно обратный, посты должны копиться в архив, а не
+    # убираться через сутки вместе с копией в личке.
+    if THOUGHT_CHANNEL:
+        if not await send_message(THOUGHT_CHANNEL, thought, parse_mode="HTML", log=False):
+            print(f"failed to post thought of the day to {THOUGHT_CHANNEL}", flush=True)
 
 
 GRANDMA_CALL_TEXT = "Позвони бабушкам — они ждут звонка."

@@ -32,8 +32,16 @@ async def close_client() -> None:
         _client = None
 
 
-async def send_message(chat_id: int | str, text: str, parse_mode: str | None = None) -> bool:
-    """One attempt, no retries here — callers decide what happens on failure."""
+async def send_message(
+    chat_id: int | str, text: str, parse_mode: str | None = None, log: bool = True,
+) -> bool:
+    """One attempt, no retries here — callers decide what happens on failure.
+
+    log=False keeps the message out of chat_messages_log, and that matters
+    for exactly one caller: posts to the public channel. /clear deletes
+    everything the log holds for any chat that isn't a registered person's,
+    so a logged channel post would eventually be wiped along with the
+    chat — taking the archive with it."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
@@ -41,7 +49,8 @@ async def send_message(chat_id: int | str, text: str, parse_mode: str | None = N
     try:
         resp = await get_client().post(url, json=payload)
         resp.raise_for_status()
-        await _log_sent(chat_id, resp.json()["result"]["message_id"])
+        if log:
+            await _log_sent(chat_id, resp.json()["result"]["message_id"])
         return True
     except httpx.HTTPError as exc:
         print(f"telegram sendMessage failed: {exc}", flush=True)

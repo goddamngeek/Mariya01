@@ -30,6 +30,11 @@ WATER_REMINDER_TEXTS = [
 
 MAX_REGISTERED_USERS = 2
 
+# Публичный канал с «мыслью дня» из «Круга чтения» (see app/parables.py).
+# Не секрет — публичный юзернейм, поэтому здесь, а не в переменных окружения.
+# Пустая строка выключает публикацию.
+THOUGHT_CHANNEL = "@blessandbeblessed"
+
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/odysseus_queue_bot"
 )

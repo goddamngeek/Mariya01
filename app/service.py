@@ -4,6 +4,7 @@ import json
 import re
 import traceback
 from datetime import datetime, timedelta
+from typing import Optional
 
 from app.config import TIMEZONE
 from app.db import (
@@ -542,23 +543,81 @@ async def start_book_add_flow(
     await ack_incoming_messages([message_id])
 
 
+_DETAIL_HEADER_RE = re.compile(
+    r"^\s*[*_#>\-\s]*(Об\s+Авторе|Аннотация|Жанр|Похожие\s+книги)\s*:?\s*[*_]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_header(line: str) -> Optional[str]:
+    """Which of the four sections this line announces, if it is a bare
+    header line and nothing else. Tolerant of the shapes people and LLMs
+    actually produce around a heading — a trailing colon, **bold**, a
+    leading «#» or «-» — but deliberately not of a header with text on the
+    same line, which is content, not a boundary."""
+    match = _DETAIL_HEADER_RE.match(line)
+    if match is None:
+        return None
+    collapsed = re.sub(r"\s+", " ", match.group(1)).strip().lower()
+    return next(
+        (h for h in BOOK_DETAIL_HEADERS if h.lower() == collapsed), None,
+    )
+
+
+def split_book_details(text: str) -> list[Optional[str]]:
+    """The person's answer to the "расскажи подробнее" template, cut into
+    the four sections in template order.
+
+    Splitting on the headers comes first, and positional paragraphs are the
+    fallback. That ordering is the opposite of what it was, because the
+    original positional-only rule assumed the answer would arrive as four
+    blank-line-separated paragraphs — and in practice it doesn't. The
+    template itself lists its four headers on four consecutive lines with
+    no blank line between them, so that's the shape it invites back: bare
+    header lines with the text under each, single newlines throughout. Such
+    an answer is one paragraph, and the whole thing landed under «Об
+    Авторе» while the other three kept their placeholders.
+
+    Headers are only trusted as boundaries when at least two of them show
+    up on their own lines; one stray line matching a header word inside
+    otherwise free-form prose shouldn't get to restructure the answer. Below
+    that bar we fall back to the original behaviour exactly: paragraphs by
+    position, each one's echoed-back header line dropped."""
+    lines = text.strip().splitlines()
+    found = [(i, h) for i, line in enumerate(lines) if (h := _normalize_header(line))]
+
+    if len(found) >= 2:
+        sections: dict[str, str] = {}
+        for pos, (line_index, header) in enumerate(found):
+            end = found[pos + 1][0] if pos + 1 < len(found) else len(lines)
+            body = "\n".join(lines[line_index + 1:end]).strip()
+            # First header wins a duplicate: re-stating one usually means
+            # the answer wandered back to it, not that it should be replaced.
+            if body and header not in sections:
+                sections[header] = body
+        return [sections.get(header) for header in BOOK_DETAIL_HEADERS]
+
+    raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    paragraphs = []
+    for block in raw_paragraphs:
+        block_lines = block.split("\n")
+        # Drop the paragraph's own first line only when it's the echoed-back
+        # header — the old rule dropped it whenever a paragraph had more than
+        # one line, which silently ate the first line of any multi-line answer.
+        if len(block_lines) > 1 and _normalize_header(block_lines[0]):
+            paragraphs.append("\n".join(block_lines[1:]).strip())
+        else:
+            paragraphs.append(block.strip())
+    return (paragraphs + [None, None, None, None])[:4]
+
+
 async def _apply_book_details(user_id: int, thread_id: int | None, note_id: str, text: str) -> bool:
     """Shared by both ways of answering the "расскажи подробнее" template —
     the immediate plain-message continuation (step 2 in
     _handle_book_add_reply below) and a later reply (handle_book_details_reply).
-    No header matching — text is just split into paragraphs (blank-line
-    separated), taken by POSITION in the same order as the template
-    (Об Авторе / Аннотация / Жанр / Похожие книги), since the answer always
-    mirrors that same paragraph structure. Each paragraph's own first line
-    is dropped (the echoed-back header) if it has more than one line.
     Returns whether it succeeded — the caller only deletes the exchange's
     messages on True."""
-    raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
-    paragraphs = []
-    for block in raw_paragraphs:
-        lines = block.split("\n")
-        paragraphs.append("\n".join(lines[1:]).strip() if len(lines) > 1 else lines[0].strip())
-    values = (paragraphs + [None, None, None, None])[:4]
+    values = split_book_details(text)
 
     try:
         await fill_book_details(note_id, values)

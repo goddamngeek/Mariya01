@@ -17,6 +17,7 @@ from app.db import (
 )
 from app.ingest import send_day_summary, send_kanban_status, send_week_summary
 from app.odysseus_client import close_client as close_odysseus_client
+from app.trilium_client import close_client as close_trilium_client
 from app import background, parables, threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app.service import (
@@ -90,6 +91,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
     await close_telegram_client()
     await close_odysseus_client()
+    await close_trilium_client()
     await close_pool()
 
 
@@ -274,9 +276,10 @@ async def telegram_webhook(request: Request):
 
     # A reply to a /addbook "расскажи подробнее" template — checked before
     # any other routing, since it's identified purely by which message it
-    # replies to (see handle_book_details_reply) and works no matter how
-    # much time has passed. A no-match (any other reply, or none at all)
-    # just falls through to normal handling below.
+    # replies to (see handle_book_details_reply). That is what tells several
+    # outstanding templates apart when the clippings import has just added
+    # more than one book at once. A no-match (any other reply, or none at
+    # all) just falls through to normal handling below.
     if reply_to_message_id is not None and message_id is not None:
         handled = await handle_book_details_reply(
             chat_id, message_id, reply_to_message_id, text, reply_to_text,

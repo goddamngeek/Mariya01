@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 from app.config import TELEGRAM_BOT_TOKEN
@@ -32,74 +34,59 @@ async def close_client() -> None:
         _client = None
 
 
-async def send_message(
-    chat_id: int | str, text: str, parse_mode: str | None = None, log: bool = True,
-) -> bool:
-    """One attempt, no retries here — callers decide what happens on failure.
+async def _send(
+    chat_id: int | str, text: str, parse_mode: str | None = None,
+    buttons: list[tuple[str, str]] | None = None, log: bool = True,
+) -> int | None:
+    """The one sendMessage call — one attempt, no retries here; callers
+    decide what happens on failure. Returns the sent message_id, or None.
 
     log=False keeps the message out of chat_messages_log, and that matters
     for exactly one caller: posts to the public channel. /clear deletes
     everything the log holds for any chat that isn't a registered person's,
     so a logged channel post would eventually be wiped along with the
     chat — taking the archive with it."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+    payload: dict = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if buttons:
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons],
+        }
     try:
-        resp = await get_client().post(url, json=payload)
-        resp.raise_for_status()
-        if log:
-            await _log_sent(chat_id, resp.json()["result"]["message_id"])
-        return True
-    except httpx.HTTPError as exc:
-        print(f"telegram sendMessage failed: {exc}", flush=True)
-        return False
-
-
-async def send_message_get_id(chat_id: int | str, text: str, parse_mode: str | None = None) -> int | None:
-    """Same as send_message, but returns the sent message_id (or None on
-    failure) — for callers that need to act on this specific message later,
-    above all app/threads.py, which tracks it so the whole conversation can
-    be cleared at once."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    try:
-        resp = await get_client().post(url, json=payload)
+        resp = await get_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=payload,
+        )
         resp.raise_for_status()
         message_id = resp.json()["result"]["message_id"]
-        await _log_sent(chat_id, message_id)
+        if log:
+            await _log_sent(chat_id, message_id)
         return message_id
     except httpx.HTTPError as exc:
         print(f"telegram sendMessage failed: {exc}", flush=True)
         return None
+
+
+async def send_message(
+    chat_id: int | str, text: str, parse_mode: str | None = None, log: bool = True,
+) -> bool:
+    """Whether it went out — for callers with no use for the message id."""
+    return await _send(chat_id, text, parse_mode, log=log) is not None
+
+
+async def send_message_get_id(chat_id: int | str, text: str, parse_mode: str | None = None) -> int | None:
+    """The sent message_id (or None on failure) — for callers that need to
+    act on this specific message later, above all app/threads.py, which
+    tracks it so the whole conversation can be cleared at once."""
+    return await _send(chat_id, text, parse_mode)
 
 
 async def send_message_with_buttons(
     chat_id: int | str, text: str, buttons: list[tuple[str, str]], parse_mode: str | None = None,
 ) -> int | None:
-    """Send a message with an inline keyboard, one button per row —
-    buttons is [(label, callback_data), ...]. Returns the sent message_id
-    (or None on failure), same as send_message_get_id."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "reply_markup": {"inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons]},
-    }
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    try:
-        resp = await get_client().post(url, json=payload)
-        resp.raise_for_status()
-        message_id = resp.json()["result"]["message_id"]
-        await _log_sent(chat_id, message_id)
-        return message_id
-    except httpx.HTTPError as exc:
-        print(f"telegram sendMessage (with buttons) failed: {exc}", flush=True)
-        return None
+    """Same, plus an inline keyboard, one button per row — buttons is
+    [(label, callback_data), ...]."""
+    return await _send(chat_id, text, parse_mode, buttons=buttons)
 
 
 # Телеграм отдаёт боту файлы не больше 20 МБ, но «My Clippings.txt» — это
@@ -231,6 +218,24 @@ async def delete_message(chat_id: int | str, message_id: int) -> bool:
     except httpx.HTTPError as exc:
         print(f"telegram deleteMessage failed: {exc}", flush=True)
         return False
+
+
+# Telegram rate-limits a bot at roughly 30 calls a second and answers 429
+# past that, so a clear-out goes a few at a time rather than all at once.
+_MAX_PARALLEL_DELETES = 8
+
+
+async def delete_messages(entries: list[tuple[int | str, int]]) -> None:
+    """Delete many messages — (chat_id, message_id) pairs. One at a time
+    this was a full round trip each: clearing a chat holding a few hundred
+    logged messages spent minutes doing nothing but waiting."""
+    semaphore = asyncio.Semaphore(_MAX_PARALLEL_DELETES)
+
+    async def one(chat_id: int | str, message_id: int) -> None:
+        async with semaphore:
+            await delete_message(chat_id, message_id)
+
+    await asyncio.gather(*(one(chat_id, message_id) for chat_id, message_id in entries))
 
 
 async def answer_callback_query(callback_query_id: str, text: str | None = None) -> bool:

@@ -106,8 +106,9 @@ CREATE TABLE IF NOT EXISTS activity_prompts (
 -- press back to a note_id/title without re-querying Trilium), then the
 -- quote/impression answers once step advances past 0. Short-lived by
 -- design (unlike ежедневник/activity) — updated_at tracks the last real
--- step so release_stale_quote_prompts (scheduler.py) can delete the whole
--- exchange (message_ids) and close it out 5 minutes after the person goes
+-- step, and the thread this prompt hangs on (thread_id) is what actually
+-- clears it: release_stale_message_threads (scheduler.py) deletes the whole
+-- exchange and closes the prompt with it 5 minutes after the person goes
 -- quiet, rather than leaving a half-answered "Какую книгу?" sitting in the
 -- chat forever.
 CREATE TABLE IF NOT EXISTS book_quote_prompts (
@@ -170,17 +171,27 @@ CREATE TABLE IF NOT EXISTS book_review_prompts (
     thread_id INTEGER
 );
 
--- /addbook flow (title, then author — see app/service.py) — stage 1 is the
--- normal is_open/step shape, closed (is_open=FALSE) once the book note is
--- created and the "расскажи подробнее" template is sent. Unlike every other
--- prompt table, the row is never deleted or made unreachable after that:
--- template_message_id stays valid forever so a reply to that message —
--- Telegram's native reply, matched by its message_id — can be found and
--- applied at any later time (stage 2, filling in author/annotation/genre/
--- similar-books), even days later, per explicit request. template_sent_at +
--- details_notified only drive the one-time "Добавил книгу" courtesy
--- message if nothing comes back within 5 minutes — they don't gate or
--- expire the reply itself.
+-- /addbook flow (title, then author — see app/service.py). Stage 1 collects
+-- those two answers and creates the book note; stage 2 is the "расскажи
+-- подробнее" template and the answer to it, filling in author/annotation/
+-- genre/similar-books.
+--
+-- The row stays open (is_open=TRUE) once the template goes out, so the very
+-- next plain message is captured as the details answer, like any other
+-- flow's continuation. template_message_id makes a Telegram reply to the
+-- template work as well, and that is not a nicety: the clippings import can
+-- add several books at once and sends a template for each (see
+-- app/service.py's _offer_book_details), and with more than one prompt open
+-- the replied-to message_id is the ONLY thing saying which book is being
+-- answered — a plain message can only ever reach the most recently touched
+-- one.
+--
+-- Both paths live exactly as long as the template is still in the chat: the
+-- thread owning this exchange (thread_id) tears it down 5 minutes after the
+-- person goes quiet, deleting the template and closing this row with it.
+-- Replying days later used to work and no longer does — the unification of
+-- message teardown onto threads took the template along with everything
+-- else, and there is nothing left to reply to.
 CREATE TABLE IF NOT EXISTS book_add_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -192,7 +203,6 @@ CREATE TABLE IF NOT EXISTS book_add_prompts (
     author TEXT,
     book_note_id TEXT,
     template_message_id BIGINT,
-    template_sent_at TIMESTAMPTZ,
     thread_id INTEGER
 );
 
@@ -289,6 +299,9 @@ ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
 ALTER TABLE book_quote_prompts DROP COLUMN IF EXISTS message_ids;
 ALTER TABLE book_add_prompts DROP COLUMN IF EXISTS message_ids;
 ALTER TABLE book_add_prompts DROP COLUMN IF EXISTS details_notified;
+-- Only ever written, never read: it dated the template for a courtesy
+-- message the thread's own closing_text replaced long ago.
+ALTER TABLE book_add_prompts DROP COLUMN IF EXISTS template_sent_at;
 DROP TABLE IF EXISTS pending_message_deletions;
 
 -- Indexes for the lookups that run per incoming message or per background
@@ -663,22 +676,26 @@ async def finalize_book_add_prompt(
     """Marks stage 1 done (book note created, template sent) and advances to
     step 2 — LEAVES is_open TRUE, so the very next plain message is still
     auto-captured as the details answer, same as every other flow's normal
-    continuation (see app/service.py's process_incoming_message). That
-    immediate window closes 5 minutes later (release_due_book_add_notices,
-    scheduler.py, which also calls close_book_add_prompt) — after that,
-    only a reply to this exact template_message_id still works (see
-    get_book_add_prompt_by_template_message, which ignores is_open
-    entirely) — that's the "answer after the normal window expired" case."""
+    continuation (see app/service.py's process_incoming_message).
+
+    That window, and the reply-to-the-template one alongside it, both close
+    5 minutes after the last activity, when release_stale_message_threads
+    (scheduler.py) tears the thread down: the template is deleted and
+    close_prompts_for_thread closes this row."""
     pool = await get_pool()
     now = utcnow()
     await pool.execute(
         "UPDATE book_add_prompts SET step = 2, author = $1, book_note_id = $2, "
-        "template_message_id = $3, template_sent_at = $4, updated_at = $4 WHERE id = $5",
+        "template_message_id = $3, updated_at = $4 WHERE id = $5",
         author, book_note_id, template_message_id, now, prompt_id,
     )
 
 
 async def get_book_add_prompt_by_template_message(user_id: int, template_message_id: int) -> asyncpg.Record | None:
+    """Deliberately ignores is_open, which still earns its keep even though
+    the row no longer outlives its thread: a details write that failed closes
+    this row without dismissing the thread, so the template is still sitting
+    in the chat and replying to it again retries the write."""
     pool = await get_pool()
     return await pool.fetchrow(
         "SELECT * FROM book_add_prompts WHERE user_id = $1 AND template_message_id = $2",

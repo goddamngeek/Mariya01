@@ -30,7 +30,7 @@ from app.db import (
 from app import parables, threads
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
-from app.telegram import delete_message, send_message, send_message_get_id
+from app.telegram import delete_messages, send_message, send_message_get_id
 
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
@@ -232,8 +232,7 @@ async def clear_chat_history(only_chat_id: int | None = None) -> None:
             skip_chat_ids.add(user_id)
 
     rows = await pop_logged_messages_except(skip_chat_ids)
-    for row in rows:
-        await delete_message(row["chat_id"], row["message_id"])
+    await delete_messages([(row["chat_id"], row["message_id"]) for row in rows])
 
 
 async def start_scheduler() -> None:

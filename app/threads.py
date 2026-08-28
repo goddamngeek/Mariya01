@@ -33,7 +33,7 @@ from app.db import (
     create_message_thread,
     get_thread_by_message,
 )
-from app.telegram import delete_message, send_message_get_id, send_message_with_buttons
+from app.telegram import delete_message, delete_messages, send_message_get_id, send_message_with_buttons
 
 # How long a thread survives with no activity, by what kind of thing it is.
 # A water reminder is a nudge you either act on or don't; an informational
@@ -106,7 +106,6 @@ async def dismiss(thread, send_closing: bool = False) -> None:
         if message_id is not None:
             await delete_message(thread["user_id"], message_id)
 
-    for message_id in thread["message_ids"]:
-        await delete_message(thread["user_id"], message_id)
+    await delete_messages([(thread["user_id"], mid) for mid in thread["message_ids"]])
     await close_prompts_for_thread(thread["id"])
     await close_message_thread(thread["id"])

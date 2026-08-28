@@ -1,4 +1,3 @@
-import asyncio
 import html
 import json
 import re
@@ -53,7 +52,7 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app import clippings, humanize, threads, triggers
+from app import background, clippings, humanize, threads, triggers
 from app.telegram import (
     answer_callback_query,
     clear_reply_markup,
@@ -64,24 +63,39 @@ from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
     add_book,
     add_book_quote,
+    add_book_quotes,
     create_book_review_note,
     extract_duration,
     fill_book_details,
     fill_ezhednevnik,
-    find_book_note_id,
     get_active_reading_books,
     get_book_details,
+    get_book_note_ids,
     get_book_quotes,
     get_finished_books,
     get_note_labels,
     log_activity,
+    normalize_book_title,
     set_reading_end,
 )
 
-# asyncio only holds a weak reference to a task with no other referrer, so an
-# unreferenced fire-and-forget task is eligible for GC before it completes
-# (documented asyncio behavior) — keep a strong reference here until it's done.
-_background_tasks: set[asyncio.Task] = set()
+_RETRY_HINT = " Напиши что-нибудь ещё раз чуть позже — я попробую снова."
+
+
+async def _report_failure(
+    user_id: int, label: str, text: str, exc: Exception, retry: bool = False,
+) -> None:
+    """Every flow fails the same way and used to say so in its own copy of
+    these four lines: the traceback goes to the log for us, the person gets
+    the plain reason it broke, and — where the prompt is still open, so
+    answering again really does retry the write — the hint that it will.
+
+    retry=False for the paths where nothing is left open to answer into: a
+    read that failed, or an edit that patches an already-closed entry."""
+    print(f"{label} failed for user={user_id}:", flush=True)
+    traceback.print_exc()
+    await send_message(user_id, f"{text}: {type(exc).__name__}." + (_RETRY_HINT if retry else ""))
+
 
 _SCORE_RE = re.compile(r"-?\d+")
 
@@ -143,11 +157,12 @@ async def process_incoming_message(
     received_at = utcnow()
     message_id = await insert_incoming_message(user_id, text, "active", reply_to_text)
 
-    task = asyncio.create_task(
-        handle_active_message(message_id, user_id, text, received_at, reply_to_text, telegram_message_id)
+    background.spawn(
+        handle_active_message(
+            message_id, user_id, text, received_at, reply_to_text, telegram_message_id,
+        ),
+        "active",
     )
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
 
 
 def _recorded_text(entry_date) -> str:
@@ -238,12 +253,9 @@ async def _handle_ezhednevnik_reply(
         await close_ezhednevnik_prompt(prompt["id"])
         await send_message(user_id, _recorded_text(entry_date))
     except Exception as exc:
-        print(f"fill_ezhednevnik failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id,
-            f"Не получилось записать (Trilium недоступен): {type(exc).__name__}. "
-            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        await _report_failure(
+            user_id, "fill_ezhednevnik",
+            "Не получилось записать (Trilium недоступен)", exc, retry=True,
         )
     await ack_incoming_messages([message_id])
 
@@ -318,12 +330,9 @@ async def _handle_activity_reply(
         await threads.send(thread_id, user_id, "Записал, спасибо.")
         await _dismiss_thread_by_id(thread_id)
     except Exception as exc:
-        print(f"log_activity failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id,
-            f"Не получилось записать (Trilium недоступен): {type(exc).__name__}. "
-            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        await _report_failure(
+            user_id, "log_activity",
+            "Не получилось записать (Trilium недоступен)", exc, retry=True,
         )
     await ack_incoming_messages([message_id])
 
@@ -427,12 +436,9 @@ async def _handle_quote_reply(
         await threads.send(thread_id, user_id, "Записал, спасибо.")
         await _dismiss_thread_by_id(thread_id)
     except Exception as exc:
-        print(f"add_book_quote failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id,
-            f"Не получилось записать (Trilium недоступен): {type(exc).__name__}. "
-            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        await _report_failure(
+            user_id, "add_book_quote",
+            "Не получилось записать (Trilium недоступен)", exc, retry=True,
         )
     await ack_incoming_messages([message_id])
 
@@ -513,10 +519,9 @@ async def handle_message_edit(user_id: int, telegram_message_id: int, new_text: 
         await update_incoming_message_text(row["id"], new_text)
         await send_message(user_id, "Обновил запись, спасибо.")
     except Exception as exc:
-        print(f"handle_message_edit failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id, f"Не получилось обновить запись (Trilium недоступен): {type(exc).__name__}.",
+        await _report_failure(
+            user_id, "handle_message_edit",
+            "Не получилось обновить запись (Trilium недоступен)", exc,
         )
 
 
@@ -528,9 +533,9 @@ async def start_book_add_flow(
 ) -> None:
     """Shared by the free-text trigger (triggers.is_book_add) and the
     /addbook command (app/main.py). Every message belonging to this
-    exchange (starting with the trigger itself) is tracked via
-    append_book_add_prompt_message, so it can all be deleted in one shot
-    once both stages finish successfully — see _cleanup_book_add_messages."""
+    exchange (starting with the trigger itself) is tracked on its thread
+    (app/threads.py), so it all goes away in one shot when the thread
+    reaches its terminal state."""
     message_id = await insert_incoming_message(user_id, text, "book_add_start", reply_to_text)
     # closing_text: if the "расскажи подробнее" template goes unanswered,
     # the thread signs off with this before tearing itself down, so the
@@ -614,8 +619,8 @@ def split_book_details(text: str) -> list[Optional[str]]:
 
 async def _apply_book_details(user_id: int, thread_id: int | None, note_id: str, text: str) -> bool:
     """Shared by both ways of answering the "расскажи подробнее" template —
-    the immediate plain-message continuation (step 2 in
-    _handle_book_add_reply below) and a later reply (handle_book_details_reply).
+    the plain-message continuation (step 2 in _handle_book_add_reply below)
+    and a reply to the template itself (handle_book_details_reply).
     Returns whether it succeeded — the caller only deletes the exchange's
     messages on True."""
     values = split_book_details(text)
@@ -626,10 +631,9 @@ async def _apply_book_details(user_id: int, thread_id: int | None, note_id: str,
         await _dismiss_thread_by_id(thread_id)
         return True
     except Exception as exc:
-        print(f"fill_book_details failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id, f"Не получилось записать подробности (Trilium недоступен): {type(exc).__name__}.",
+        await _report_failure(
+            user_id, "fill_book_details",
+            "Не получилось записать подробности (Trilium недоступен)", exc,
         )
         return False
 
@@ -641,9 +645,9 @@ async def _handle_book_add_reply(
     like "нет"/"не знаю" — author is optional). step 2 = the book already
     exists and the "расскажи подробнее" template was just sent — this is
     the IMMEDIATE-continuation path (the very next plain message, within
-    the 5-minute window — see process_incoming_message); a later reply to
-    that same template, after the window's closed, is handled separately
-    by handle_book_details_reply below."""
+    the 5-minute window — see process_incoming_message); a Telegram reply to
+    that same template goes through handle_book_details_reply below instead,
+    which is what keeps several outstanding templates apart."""
     step = prompt["step"]
     thread_id = prompt["thread_id"]
     kind = f"book_add_{step}"
@@ -675,12 +679,9 @@ async def _handle_book_add_reply(
         else:
             await close_book_add_prompt(prompt["id"])
     except Exception as exc:
-        print(f"add_book failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id,
-            f"Не получилось добавить книгу (Trilium недоступен): {type(exc).__name__}. "
-            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        await _report_failure(
+            user_id, "add_book",
+            "Не получилось добавить книгу (Trilium недоступен)", exc, retry=True,
         )
     await ack_incoming_messages([message_id])
 
@@ -690,13 +691,22 @@ async def handle_book_details_reply(
     text: str, reply_to_text: str | None,
 ) -> bool:
     """A Telegram reply to a /addbook "расскажи подробнее" template — see
-    app/main.py, checked before any other routing since it works no matter
-    how much time has passed (get_book_add_prompt_by_template_message
-    ignores is_open entirely — this is the "answer after the normal
-    5-minute window expired" path; the immediate case is
-    _handle_book_add_reply's step==2 above). Returns False (do nothing
-    further — let normal routing continue) if this reply doesn't match any
-    book_add_prompts row."""
+    app/main.py, checked before any other routing.
+
+    What this path is FOR, now that the thread deletes the template after
+    five minutes: telling several outstanding templates apart. The clippings
+    import can add a few books at once and sends a template for each (see
+    _offer_book_details), and a plain message only ever answers the most
+    recently touched prompt — the replied-to message_id is what says which
+    book is meant. With a single book open it is just a longer way round to
+    _handle_book_add_reply's step==2.
+
+    get_book_add_prompt_by_template_message ignores is_open, which still
+    earns its keep: a details write that failed closes the row without
+    dismissing the thread, so replying to the template again retries it.
+
+    Returns False (do nothing further — let normal routing continue) if this
+    reply doesn't match any book_add_prompts row."""
     prompt = await get_book_add_prompt_by_template_message(user_id, reply_to_message_id)
     if prompt is None or prompt["book_note_id"] is None:
         return False
@@ -781,9 +791,7 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     try:
         title, details, quotes = await get_book_details(note_id)
     except Exception as exc:
-        print(f"get_book_details failed for user={chat_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(chat_id, f"Не получилось прочитать описание: {type(exc).__name__}.")
+        await _report_failure(chat_id, "get_book_details", "Не получилось прочитать описание", exc)
         return
 
     sections = "\n\n".join(
@@ -847,9 +855,10 @@ async def handle_book_quotes_selected(callback_query: dict) -> None:
     try:
         quotes = await get_book_quotes(note_id)
     except Exception as exc:
-        print(f"get_book_quotes failed for user={chat_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(chat_id, f"Не получилось прочитать интересные моменты: {type(exc).__name__}.")
+        await _report_failure(
+            chat_id, "get_book_quotes",
+            "Не получилось прочитать интересные моменты", exc,
+        )
         return
 
     if not quotes:
@@ -925,9 +934,7 @@ async def handle_book_finished(callback_query: dict) -> None:
             return
         await set_reading_end(note_id)
     except Exception as exc:
-        print(f"set_reading_end failed for user={chat_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(chat_id, f"Не получилось отметить книгу: {type(exc).__name__}.")
+        await _report_failure(chat_id, "set_reading_end", "Не получилось отметить книгу", exc)
         return
 
     thread_id = thread["id"] if thread is not None else None
@@ -972,12 +979,9 @@ async def _handle_book_review_reply(
         await threads.send(thread_id, user_id, "Спасибо, записал отзыв!")
         await _dismiss_thread_by_id(thread_id)
     except Exception as exc:
-        print(f"create_book_review_note failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(
-            user_id,
-            f"Не получилось записать отзыв (Trilium недоступен): {type(exc).__name__}. "
-            "Напиши что-нибудь ещё раз чуть позже — я попробую снова.",
+        await _report_failure(
+            user_id, "create_book_review_note",
+            "Не получилось записать отзыв (Trilium недоступен)", exc, retry=True,
         )
     await ack_incoming_messages([message_id])
 
@@ -1039,16 +1043,31 @@ async def handle_clippings_file(user_id: int, raw: str) -> None:
     person_name = USER_NAMES.get(user_id, str(user_id))
     imported, per_book, created_books, failed = [], [], [], []
 
+    # Вся библиотека одним запросом, а не поиск на каждую книгу из файла:
+    # раньше каждый find_book_note_id обходил всех детей КНИГИ заново.
+    try:
+        known_books = await get_book_note_ids()
+    except Exception:
+        print(f"clippings import: cannot read КНИГИ for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+
     for (title, author), group in by_book.items():
         try:
-            note_id = await find_book_note_id(title)
+            note_id = known_books.get(normalize_book_title(title))
             is_new_book = note_id is None
             if is_new_book:
                 note_id = await add_book(person_name, title, author)
+                # Чтобы вторая группа с тем же названием (другой автор в
+                # метаданных) попала в только что созданную заметку, а не
+                # завела ещё одну — так же, как делал поиск по названию.
+                known_books[normalize_book_title(title)] = note_id
 
-            for c in group:
-                await add_book_quote(note_id, c.text, location=c.location)
-                imported.append((clippings.fingerprint(c), title))
+            # Все цитаты книги одной перезаписью заметки: по одной это было
+            # чтение и запись всего содержимого на каждую цитату.
+            await add_book_quotes(note_id, [(c.text, "", c.location) for c in group])
+            imported.extend((clippings.fingerprint(c), title) for c in group)
 
             per_book.append(f"«{title}» — {len(group)}")
             if is_new_book:
@@ -1060,6 +1079,8 @@ async def handle_clippings_file(user_id: int, raw: str) -> None:
 
     # Отмечаем только то, что реально доехало до Trilium: упавшая книга
     # должна приехать снова при следующей отправке файла, а не потеряться.
+    # Теперь это вся книга целиком — раз запись одна на книгу, то и «доехало»
+    # у неё одно на всех, а не по цитате.
     await mark_clippings_imported(imported)
 
     lines = []

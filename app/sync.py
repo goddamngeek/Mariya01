@@ -22,7 +22,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.trilium_client import get_active_reading_books
+from app.trilium_client import get_active_reading_books, inspect_note
 
 router = APIRouter(prefix="/sync")
 
@@ -235,6 +235,13 @@ async def active_books():
     confirming it resolves the real КНИГИ note/readingStart/readingEnd
     labels correctly without going through the whole Telegram flow."""
     return await get_active_reading_books()
+
+
+@router.get("/note", dependencies=[Depends(require_bearer)])
+async def note(title: str):
+    """Диагностика: что реально лежит в заметке — заголовок, лейблы и
+    содержимое. Для проверки того, что бот записал."""
+    return await inspect_note(title)
 
 
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])

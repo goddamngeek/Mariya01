@@ -644,6 +644,29 @@ def _normalize_title(title: str) -> str:
     return " ".join(title.split()).strip().lower()
 
 
+async def inspect_note(title: str) -> dict:
+    """Заголовок, лейблы и содержимое заметки по названию — чтобы можно
+    было проверить, что именно бот записал в Trilium, не открывая его.
+    Нужно всякий раз, когда «записалось не то»."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_id = await _find_note_id(client, title)
+        if note_id is None:
+            raise TriliumNoteNotFoundError(f"No note titled '{title}' found.")
+        resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+        resp.raise_for_status()
+        note = resp.json()
+        return {
+            "note_id": note_id,
+            "title": note.get("title"),
+            "labels": {a["name"]: a["value"] for a in note.get("attributes", [])
+                       if a.get("type") == "label"},
+            "content": await _get_content(client, note_id),
+        }
+
+
 async def find_book_note_id(title: str) -> Optional[str]:
     """Заметка книги под КНИГИ по названию — для сопоставления с тем, что
     пришло из «My Clippings.txt». Сверка по схлопнутым пробелам и регистру:

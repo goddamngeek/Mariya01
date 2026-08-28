@@ -640,6 +640,35 @@ async def _list_books(finished: bool) -> list[dict]:
         return books
 
 
+def _normalize_title(title: str) -> str:
+    return " ".join(title.split()).strip().lower()
+
+
+async def find_book_note_id(title: str) -> Optional[str]:
+    """Заметка книги под КНИГИ по названию — для сопоставления с тем, что
+    пришло из «My Clippings.txt». Сверка по схлопнутым пробелам и регистру:
+    устройство берёт название из метаданных EPUB, и оно почти совпадает с
+    заголовком заметки, но не побайтово. Ищет среди ВСЕХ книг, а не только
+    читаемых сейчас, — выделения приходят и из уже дочитанных."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    target = _normalize_title(title)
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        knigi_id = await _find_note_id(client, "КНИГИ")
+        if knigi_id is None:
+            raise TriliumNoteNotFoundError("Could not find the КНИГИ note.")
+        resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{knigi_id}")
+        resp.raise_for_status()
+        for child_id in resp.json().get("childNoteIds") or []:
+            child_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{child_id}")
+            child_resp.raise_for_status()
+            if _normalize_title(child_resp.json().get("title") or "") == target:
+                return child_id
+    return None
+
+
 async def get_note_labels(note_id: str) -> tuple[str, dict[str, str]]:
     """One note's title and label values — for the cases that already know
     which note they mean and only need to check its state, instead of
@@ -667,22 +696,30 @@ async def get_finished_books() -> list[dict]:
     return await _list_books(finished=True)
 
 
-async def add_book_quote(note_id: str, quote_text: str, impression: str) -> None:
+async def add_book_quote(
+    note_id: str, quote_text: str, impression: str = "", location: str = "",
+) -> None:
     """Append one 'interesting moment' entry straight into the book's own
     note content (not a separate child note, per explicit request) — a
     divider, then the quote verbatim wrapped in quotation marks, then the
-    person's own answer about what they liked about it."""
+    person's own answer about what they liked about it.
+
+    location («с. 31, II МОНАШЕСКИЕ ПОДВИГИ») goes inside the quote's own
+    paragraph, so a passage imported from the reader can be found again in
+    the book. impression is optional: a highlight imported in bulk has
+    nobody to comment on it at import time."""
     if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
         raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
 
     headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
     async with httpx.AsyncClient(timeout=15, headers=headers) as client:
         existing = await _get_content(client, note_id)
-        entry_html = (
-            "<hr>"
-            f"<p>«{html.escape(quote_text)}»</p>"
-            f"<p>{html.escape(impression)}</p>"
-        )
+        quoted = f"«{html.escape(quote_text)}»"
+        if location:
+            quoted += f" <i>({html.escape(location)})</i>"
+        entry_html = "<hr>" + f"<p>{quoted}</p>"
+        if impression:
+            entry_html += f"<p>{html.escape(impression)}</p>"
         await _put_content(client, note_id, existing + entry_html)
 
 

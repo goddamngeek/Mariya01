@@ -196,6 +196,15 @@ CREATE TABLE IF NOT EXISTS book_add_prompts (
     thread_id INTEGER
 );
 
+-- Отпечатки уже разобранных выделений с читалки (см. app/clippings.py).
+-- «My Clippings.txt» копится вечно и никогда не чистится, так что файл
+-- можно присылать хоть каждый день: новым считается то, чего здесь нет.
+CREATE TABLE IF NOT EXISTS imported_clippings (
+    fingerprint TEXT PRIMARY KEY,
+    book_title TEXT NOT NULL,
+    imported_at TIMESTAMPTZ NOT NULL
+);
+
 -- Every message sent to/from a chat, purely so the nightly cleanup job
 -- (scheduler.py's clear_chat_history) knows which Telegram message_ids to
 -- delete. Telegram gives bots no "list messages in this chat" API — the
@@ -703,6 +712,34 @@ async def set_book_review_rating(prompt_id: int, rating: int) -> None:
 async def close_book_review_prompt(prompt_id: int) -> None:
     pool = await get_pool()
     await pool.execute("UPDATE book_review_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+# --- выделения с читалки ------------------------------------------------
+
+async def filter_new_clippings(fingerprints: list[str]) -> set[str]:
+    """Какие из этих отпечатков ещё не импортированы."""
+    if not fingerprints:
+        return set()
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT fingerprint FROM imported_clippings WHERE fingerprint = ANY($1::text[])",
+        fingerprints,
+    )
+    seen = {r["fingerprint"] for r in rows}
+    return {f for f in fingerprints if f not in seen}
+
+
+async def mark_clippings_imported(items: list[tuple[str, str]]) -> None:
+    """items — пары (отпечаток, название книги)."""
+    if not items:
+        return
+    pool = await get_pool()
+    now = utcnow()
+    await pool.executemany(
+        "INSERT INTO imported_clippings (fingerprint, book_title, imported_at) "
+        "VALUES ($1, $2, $3) ON CONFLICT (fingerprint) DO NOTHING",
+        [(fp, title, now) for fp, title in items],
+    )
 
 
 # --- Trilium note id cache --------------------------------------------------

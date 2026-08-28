@@ -22,16 +22,18 @@ from app.db import (
     create_book_add_prompt,
     create_book_quote_prompt,
     create_book_review_prompt,
+    filter_new_clippings,
     finalize_book_add_prompt,
     get_book_add_prompt_by_template_message,
     get_book_quote_prompt,
     get_ezhednevnik_prompt_by_question_message,
-    get_open_ezhednevnik_prompt,
     get_incoming_message_by_telegram_id,
+    get_open_ezhednevnik_prompt,
     get_message_thread,
     get_open_prompt,
     get_prompt,
     insert_incoming_message,
+    mark_clippings_imported,
     set_book_add_title,
     set_book_quote_prompt_book,
     set_book_review_rating,
@@ -50,7 +52,7 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app import humanize, threads, triggers
+from app import clippings, humanize, threads, triggers
 from app.telegram import (
     answer_callback_query,
     clear_reply_markup,
@@ -65,6 +67,7 @@ from app.trilium_client import (
     extract_duration,
     fill_book_details,
     fill_ezhednevnik,
+    find_book_note_id,
     get_active_reading_books,
     get_book_details,
     get_finished_books,
@@ -861,3 +864,85 @@ _PROMPT_HANDLERS = {
     "review": _handle_book_review_reply,
     "book_add": _handle_book_add_reply,
 }
+
+
+async def _offer_book_details(user_id: int, note_id: str, title: str, author: str) -> None:
+    """Книга только что заведена по данным из «My Clippings.txt» — шлём тот
+    же шаблон «расскажи подробнее», что и /addbook, и подключаем его к той
+    же машинерии, чтобы ответ разложился по разделам заметки как обычно."""
+    thread_id = await threads.open_thread(
+        user_id, threads.TTL_DIALOG, closing_text="Добавил книгу",
+    )
+    prompt_id = await create_book_add_prompt(user_id, thread_id)
+    template_message_id = await threads.send(
+        thread_id, user_id, BOOK_DETAILS_TEMPLATE.format(title=title, author=author),
+    )
+    if template_message_id is not None:
+        await finalize_book_add_prompt(prompt_id, author, note_id, template_message_id)
+    else:
+        await close_book_add_prompt(prompt_id)
+
+
+async def handle_clippings_file(user_id: int, raw: str) -> None:
+    """«My Clippings.txt» с читалки: разобрать, отбросить уже
+    импортированное, разложить по книгам в Trilium.
+
+    Комментарий («что понравилось в этом моменте») здесь не спрашивается —
+    за один файл приезжает и десяток выделений сразу, и допрос на десять
+    сообщений превратил бы удобство в повинность. Прокомментировать
+    отдельную цитату всегда можно через /quote."""
+    items = clippings.parse(raw)
+    if not items:
+        await send_message(user_id, "Не нашёл в файле ни одного выделения.")
+        return
+
+    fingerprints = [clippings.fingerprint(c) for c in items]
+    fresh = await filter_new_clippings(fingerprints)
+    new_items = [c for c, fp in zip(items, fingerprints) if fp in fresh]
+    if not new_items:
+        await send_message(user_id, f"Все {len(items)} выделений уже добавлены.")
+        return
+
+    by_book: dict[tuple[str, str], list] = {}
+    for c in new_items:
+        by_book.setdefault((c.book_title, c.book_author), []).append(c)
+
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    imported, per_book, created_books, failed = [], [], [], []
+
+    for (title, author), group in by_book.items():
+        try:
+            note_id = await find_book_note_id(title)
+            is_new_book = note_id is None
+            if is_new_book:
+                note_id = await add_book(person_name, title, author)
+
+            for c in group:
+                await add_book_quote(note_id, c.text, location=c.location)
+                imported.append((clippings.fingerprint(c), title))
+
+            per_book.append(f"«{title}» — {len(group)}")
+            if is_new_book:
+                created_books.append((note_id, title, author))
+        except Exception as exc:
+            print(f"clippings import failed for {title!r}, user={user_id}:", flush=True)
+            traceback.print_exc()
+            failed.append(f"«{title}» ({type(exc).__name__})")
+
+    # Отмечаем только то, что реально доехало до Trilium: упавшая книга
+    # должна приехать снова при следующей отправке файла, а не потеряться.
+    await mark_clippings_imported(imported)
+
+    lines = []
+    if imported:
+        lines.append(f"Добавил {len(imported)} цитат:")
+        lines.extend(f"— {entry}" for entry in per_book)
+    if failed:
+        lines.append("Не получилось: " + "; ".join(failed))
+    if not lines:
+        lines.append("Ничего не добавил.")
+    await send_message(user_id, "\n".join(lines))
+
+    # Про новые книги спрашиваем подробности — по одной, после отчёта.
+    for note_id, title, author in created_books:
+        await _offer_book_details(user_id, note_id, title, author)

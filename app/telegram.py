@@ -102,6 +102,40 @@ async def send_message_with_buttons(
         return None
 
 
+# Телеграм отдаёт боту файлы не больше 20 МБ, но «My Clippings.txt» — это
+# десятки килобайт даже за годы чтения. Всё, что сильно больше, к делу не
+# относится и качать незачем.
+MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
+
+
+async def download_document(file_id: str) -> str | None:
+    """Содержимое присланного документа как текст, или None. Двухшаговый
+    путь: getFile отдаёт временный путь, файл забирается по нему."""
+    try:
+        info = await get_client().get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+        )
+        info.raise_for_status()
+        result = info.json().get("result") or {}
+        path = result.get("file_path")
+        if not path:
+            return None
+        if (result.get("file_size") or 0) > MAX_DOCUMENT_BYTES:
+            print(f"document too large to fetch: {result.get('file_size')} bytes", flush=True)
+            return None
+
+        resp = await get_client().get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{path}"
+        )
+        resp.raise_for_status()
+        # utf-8-sig: файл пишет устройство, и BOM в начале вполне вероятен.
+        return resp.content.decode("utf-8-sig", errors="replace")
+    except httpx.HTTPError as exc:
+        print(f"telegram getFile/download failed: {exc}", flush=True)
+        return None
+
+
 async def clear_reply_markup(chat_id: int | str, message_id: int) -> bool:
     """Strip the inline keyboard off an already-sent message, leaving its
     text alone — used right after a button is pressed so the same list

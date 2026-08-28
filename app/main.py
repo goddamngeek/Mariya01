@@ -21,6 +21,7 @@ from app import background, parables, threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app.service import (
     handle_book_details_reply,
+    handle_clippings_file,
     handle_ezhednevnik_question_reply,
     handle_message_edit,
     handle_message_reaction,
@@ -34,6 +35,7 @@ from app.service import (
 from app.sync import router as sync_router
 from app.telegram import (
     close_client as close_telegram_client,
+    download_document,
     ensure_webhook_allowed_updates,
     send_message,
     set_bot_commands,
@@ -108,6 +110,17 @@ async def handle_start(chat_id: int) -> None:
     await send_message(chat_id, "бот активен, ты зарегистрирован")
 
 
+async def import_clippings_document(chat_id: int, document: dict) -> None:
+    """Любой присланный документ пробуем прочитать как файл выделений.
+    Отдельной команды нет намеренно: файл с читалки узнаётся по
+    содержимому, и просить человека помнить команду ради этого незачем."""
+    raw = await download_document(document.get("file_id", ""))
+    if raw is None:
+        await send_message(chat_id, "Не смог скачать файл.")
+        return
+    await handle_clippings_file(chat_id, raw)
+
+
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     update = await request.json()
@@ -146,11 +159,12 @@ async def telegram_webhook(request: Request):
 
     message = update.get("message")
     text = message.get("text") if message else None
+    document = message.get("document") if message else None
     chat = message.get("chat") if message else None
     chat_id = chat.get("id") if chat else None
     message_id = message.get("message_id") if message else None
 
-    if text is None or chat_id is None:
+    if chat_id is None or (text is None and document is None):
         return {"ok": True}
 
     if message_id is not None:
@@ -164,11 +178,18 @@ async def telegram_webhook(request: Request):
         except Exception as exc:
             print(f"log_chat_message failed (non-fatal): {exc!r}", flush=True)
 
-    if text.strip() == "/start":
+    if text is not None and text.strip() == "/start":
         await handle_start(chat_id)
         return {"ok": True}
 
     if not await is_registered(chat_id):
+        return {"ok": True}
+
+    if document is not None:
+        # «My Clippings.txt» с читалки — выделения из книг (см.
+        # app/clippings.py). Скачивание и запись в Trilium уходят в фон:
+        # книг в файле может быть много, а Telegram ждёт ответа минуту.
+        background.spawn(import_clippings_document(chat_id, document), "clippings")
         return {"ok": True}
 
     # Everything below that reaches Trilium is spawned rather than awaited:

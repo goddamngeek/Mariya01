@@ -1,6 +1,7 @@
 from app.db import is_registered
 from app.service import (
     handle_book_finished,
+    handle_book_quotes_selected,
     handle_finished_book_selected,
     handle_quote_book_selected,
     handle_reading_book_selected,
@@ -13,7 +14,9 @@ async def process_callback_query(callback_query: dict) -> None:
     /quote flow, see app/service.py's start_quote_flow), "rb:{note_id}"
     (book choice for "что я сейчас читаю", see show_reading_status),
     "pb:{note_id}" (same for "прочитанные", see show_finished_books) and
-    "fd:{note_id}" ("Я дочитал", see handle_book_finished) — anything else
+    "fd:{note_id}" ("Я дочитал", see handle_book_finished) and
+    "im:{note_id}" ("Интересные моменты", see handle_book_quotes_selected)
+    — anything else
     just gets answered so the user's client doesn't show a spinner
     forever."""
     data = callback_query.get("data") or ""
@@ -31,6 +34,9 @@ async def process_callback_query(callback_query: dict) -> None:
             return
         if data.startswith("fd:"):
             await handle_book_finished(callback_query)
+            return
+        if data.startswith("im:"):
+            await handle_book_quotes_selected(callback_query)
             return
 
     await answer_callback_query(callback_query["id"])

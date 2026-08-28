@@ -511,7 +511,7 @@ def _strip_html(fragment: str) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
-async def get_book_details(note_id: str) -> tuple[str, dict[str, str]]:
+async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str]]:
     """Reverse of fill_book_details — reads back the note's title plus
     whatever's currently under each of the 4 template sections (see
     BOOK_DETAIL_HEADERS), for showing a book's description on demand (see
@@ -547,7 +547,16 @@ async def get_book_details(note_id: str) -> tuple[str, dict[str, str]]:
         if text in ("scifi / drama / romance", "…"):
             text = ""
         details[header] = text
-    return title, details
+    return title, details, _extract_quotes(content)
+
+
+async def get_book_quotes(note_id: str) -> list[str]:
+    """Just the interesting moments, for showing them on their own."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        return _extract_quotes(await _get_content(client, note_id))
 
 
 async def set_reading_end(note_id: str, when: Optional[_date] = None) -> None:
@@ -739,6 +748,37 @@ async def get_active_reading_books() -> list[dict]:
 async def get_finished_books() -> list[dict]:
     """Books already read through — both readingStart and readingEnd set."""
     return await _list_books(finished=True)
+
+
+_KEEP_TAGS = ("i", "b", "em", "strong", "code", "s", "u")
+_BLOCK_END_RE = re.compile(r"</(?:p|div|li|h[1-6])>", re.IGNORECASE)
+_ANY_TAG_RE = re.compile(r"</?([a-zA-Z0-9]+)[^>]*>")
+
+
+def _to_telegram_html(fragment: str) -> str:
+    """Trilium's stored HTML reduced to the handful of tags Telegram's HTML
+    parse mode accepts. Block ends become newlines; every other tag is
+    dropped but its text kept, so an unexpected <span> or <a> can't make
+    Telegram reject the whole message as malformed markup."""
+    text = _BLOCK_END_RE.sub("\n", fragment)
+
+    def keep_or_drop(match: re.Match) -> str:
+        return match.group(0) if match.group(1).lower() in _KEEP_TAGS else ""
+
+    text = _ANY_TAG_RE.sub(keep_or_drop, text)
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _extract_quotes(content: str) -> list[str]:
+    """The book's interesting moments, one string per entry, ready to send.
+
+    Entries are the <hr>-separated blocks after the «Интересные моменты»
+    heading (see add_book_quote). Falls back to splitting from the first
+    <hr> for a note the heading migration never reached."""
+    start = content.find(QUOTES_HEADING)
+    tail = content[start + len(QUOTES_HEADING):] if start != -1 else content[content.find("<hr>"):] if "<hr>" in content else ""
+    return [q for block in tail.split("<hr>") if (q := _to_telegram_html(block))]
 
 
 QUOTES_HEADING = "<h2>Интересные моменты</h2>"

@@ -71,6 +71,7 @@ from app.trilium_client import (
     find_book_note_id,
     get_active_reading_books,
     get_book_details,
+    get_book_quotes,
     get_finished_books,
     get_note_labels,
     log_activity,
@@ -778,7 +779,7 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     thread_id = thread["id"] if thread is not None else None
 
     try:
-        title, details = await get_book_details(note_id)
+        title, details, quotes = await get_book_details(note_id)
     except Exception as exc:
         print(f"get_book_details failed for user={chat_id}:", flush=True)
         traceback.print_exc()
@@ -797,8 +798,66 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     if len(body) > _TELEGRAM_TEXT_LIMIT:
         keep = body[:_TELEGRAM_TEXT_LIMIT - 40]
         body = keep[:keep.rfind("\n")] + "\n\n<i>…описание не поместилось целиком.</i>"
-    buttons = [("Я дочитал", f"fd:{note_id}")] if with_finish_button else None
-    await threads.send(thread_id, chat_id, body, parse_mode="HTML", buttons=buttons)
+    # The moments go behind a button rather than into this message: a book
+    # with a dozen highlights runs several times longer than its whole
+    # description, and burying the description under them helps nobody. The
+    # count is on the button so it's worth pressing knowingly.
+    buttons = []
+    if quotes:
+        buttons.append((f"Интересные моменты ({len(quotes)})", f"im:{note_id}"))
+    if with_finish_button:
+        buttons.append(("Я дочитал", f"fd:{note_id}"))
+    await threads.send(thread_id, chat_id, body, parse_mode="HTML", buttons=buttons or None)
+
+
+def _chunk(entries: list[str], header: str) -> list[str]:
+    """Entries packed into as few messages as fit under Telegram's limit,
+    never splitting an entry across two. The header leads the first one."""
+    messages, current = [], header
+    for entry in entries:
+        # A single highlight longer than a whole message can't be packed with
+        # anything — cut it, or the send fails and the moment vanishes.
+        if len(entry) > _TELEGRAM_TEXT_LIMIT - len(header) - 40:
+            entry = entry[:_TELEGRAM_TEXT_LIMIT - len(header) - 60].rstrip() + " <i>…</i>"
+        candidate = f"{current}\n\n{entry}" if current else entry
+        if len(candidate) > _TELEGRAM_TEXT_LIMIT and current:
+            messages.append(current)
+            current = entry
+        else:
+            current = candidate
+    if current:
+        messages.append(current)
+    return messages
+
+
+async def handle_book_quotes_selected(callback_query: dict) -> None:
+    """"Интересные моменты" under a book's description — sends everything
+    collected for that book, from /quote and from the reader import alike.
+    Stays in the same thread as the description, so one reaction still
+    clears the whole conversation."""
+    await answer_callback_query(callback_query["id"])
+    data = callback_query.get("data") or ""
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    note_id = data[len("im:"):]
+
+    thread = await threads.thread_for_message(chat_id, message.get("message_id"))
+    thread_id = thread["id"] if thread is not None else None
+
+    try:
+        quotes = await get_book_quotes(note_id)
+    except Exception as exc:
+        print(f"get_book_quotes failed for user={chat_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(chat_id, f"Не получилось прочитать интересные моменты: {type(exc).__name__}.")
+        return
+
+    if not quotes:
+        await threads.send(thread_id, chat_id, "Пока ничего не отмечено.")
+        return
+
+    for part in _chunk(quotes, "<b>Интересные моменты</b>"):
+        await threads.send(thread_id, chat_id, part, parse_mode="HTML")
 
 
 async def handle_reading_book_selected(callback_query: dict) -> None:

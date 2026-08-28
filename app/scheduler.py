@@ -93,14 +93,20 @@ async def send_ezhednevnik_prompts(slot: str) -> None:
         await append_ezhednevnik_question(prompt_id, message_id)
 
 
-async def send_thought_of_the_day() -> None:
-    """Мысль дня из «Круга чтения» — see app/parables.py. Both people get
-    the same text, so it's something they can talk about; it lives in a
-    thread with a day-long TTL, so yesterday's clears itself right as
-    today's arrives."""
-    thought = parables.compose_for(datetime.now(TIMEZONE).date())
+async def send_thought_of_the_day(part: int = 0) -> None:
+    """Мысль дня из «Круга чтения» — see app/parables.py. One day is sent in
+    three portions (9:00 / 14:00 / 20:00) that continue each other, rather
+    than one 900-character sample standing in for the whole day.
+
+    Both people get the same text, so it's something they can talk about,
+    and each portion lives in its own thread with a day-long TTL, so it
+    clears itself about when the next day's equivalent arrives.
+
+    A portion that isn't there is normal, not a failure: days differ in
+    size and a short one runs out before the evening slot."""
+    thought = parables.compose_for(datetime.now(TIMEZONE).date(), part)
     if thought is None:
-        print("thought of the day: nothing for today, skipping", flush=True)
+        print(f"thought of the day: nothing left for part {part} today, skipping", flush=True)
         return
     for user_id in await get_registered_user_ids():
         thread_id = await threads.open_thread(user_id, threads.TTL_DAY)
@@ -265,10 +271,26 @@ async def start_scheduler() -> None:
         args=["evening"],
         id="ezhednevnik_evening_weekend",
     )
+    # One day, three portions. 14:00 and 20:00 sit clear of the check-ins
+    # (12:30 / 18:00 / 21:30) on purpose: a thought landing on top of a
+    # question would push the question up out of sight.
     scheduler.add_job(
         send_thought_of_the_day,
         trigger=CronTrigger(hour=9, minute=0, timezone=TIMEZONE),
+        args=[0],
         id="thought_of_the_day",
+    )
+    scheduler.add_job(
+        send_thought_of_the_day,
+        trigger=CronTrigger(hour=14, minute=0, timezone=TIMEZONE),
+        args=[1],
+        id="thought_of_the_day_midday",
+    )
+    scheduler.add_job(
+        send_thought_of_the_day,
+        trigger=CronTrigger(hour=20, minute=0, timezone=TIMEZONE),
+        args=[2],
+        id="thought_of_the_day_evening",
     )
     scheduler.add_job(
         ensure_today_water_reminders,

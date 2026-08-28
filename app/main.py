@@ -207,6 +207,9 @@ async def telegram_webhook(request: Request):
         # to answer inline. Same day-long thread as the 9:00 job, so asking
         # twice doesn't leave two copies lying around.
         thought = parables.compose_for(datetime.now(TIMEZONE).date())
+        if thought is None:
+            await send_message(chat_id, "На сегодня в «Круге чтения» ничего нет.")
+            return {"ok": True}
         thread_id = await threads.open_thread(chat_id, threads.TTL_DAY, message_id)
         await threads.send(thread_id, chat_id, thought, parse_mode="HTML")
         return {"ok": True}

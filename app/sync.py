@@ -22,15 +22,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.trilium_client import (
-    BOOK_DETAIL_HEADERS,
-    append_note_html,
-    fill_book_details,
-    get_active_reading_books,
-    get_book_details,
-    inspect_note,
-)
-from app.service import split_book_details
+from app.trilium_client import get_active_reading_books, inspect_note
 
 router = APIRouter(prefix="/sync")
 
@@ -250,40 +242,6 @@ async def note(title: str):
     """Диагностика: что реально лежит в заметке — заголовок, лейблы и
     содержимое. Для проверки того, что бот записал."""
     return await inspect_note(title)
-
-
-class RepairBookRequest(BaseModel):
-    title: str
-
-
-@router.post("/repair_book_sections", dependencies=[Depends(require_bearer)])
-async def repair_book_sections(body: RepairBookRequest):
-    """Одноразовый ремонт книги, заполненной до исправления разбора: весь
-    ответ тогда уезжал в «Об Авторе» одним куском, а три остальных раздела
-    оставались с заглушками шаблона. Читает этот кусок обратно, прогоняет
-    через нынешний split_book_details и раскладывает как надо. Безопасно
-    повторять: на уже правильной заметке заголовков внутри текста нет,
-    разбор вернёт её же содержимое в первый раздел."""
-    note = await inspect_note(body.title)
-    _title, sections = await get_book_details(note["note_id"])
-    stuck = sections.get(BOOK_DETAIL_HEADERS[0], "")
-    values = split_book_details(f"{BOOK_DETAIL_HEADERS[0]}\n{stuck}")
-    await fill_book_details(note["note_id"], values)
-    return {"ok": True, "filled": {h: bool(v) for h, v in zip(BOOK_DETAIL_HEADERS, values)}}
-
-
-class AppendHtmlRequest(BaseModel):
-    title: str
-    html: str
-
-
-@router.post("/append_note_html", dependencies=[Depends(require_bearer)])
-async def append_note_html_endpoint(body: AppendHtmlRequest):
-    """Одноразовое восстановление: дописать в конец заметки готовый кусок
-    HTML ровно как есть."""
-    note = await inspect_note(body.title)
-    await append_note_html(note["note_id"], body.html)
-    return {"ok": True}
 
 
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])

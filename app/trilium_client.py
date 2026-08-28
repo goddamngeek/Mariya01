@@ -531,8 +531,14 @@ async def get_book_details(note_id: str) -> tuple[str, dict[str, str]]:
 
     details = {}
     for header in BOOK_DETAIL_HEADERS:
+        # Stops at the first <hr> as well as the next <h2>, for the same
+        # reason fill_book_details does: quotes live after the last section
+        # with no heading of their own. Without it «Похожие книги» read back
+        # every quote in the note as part of the section, and a book with a
+        # few of them pushed the description past Telegram's 4096-character
+        # limit — the send just failed and tapping the book did nothing.
         match = re.search(
-            r"<h2>" + re.escape(header) + r"</h2>(.*?)(?=<h2>|$)", content, re.DOTALL,
+            r"<h2>" + re.escape(header) + r"</h2>(.*?)(?=<h2>|<hr>|$)", content, re.DOTALL,
         )
         text = _strip_html(match.group(1)) if match else ""
         # The un-filled template placeholders aren't real content — never

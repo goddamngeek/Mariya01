@@ -710,6 +710,10 @@ async def handle_book_details_reply(
     return True
 
 
+# Telegram rejects a sendMessage over this many characters outright.
+_TELEGRAM_TEXT_LIMIT = 4096
+
+
 async def _show_book_list(
     user_id: int, fetch, prefix: str, empty_text: str, trigger_message_id: int | None,
 ) -> None:
@@ -786,6 +790,13 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
         for header in BOOK_DETAIL_HEADERS
     )
     body = f"<b>{html.escape(title)}</b>\n\n{sections}"
+    # Sections are free text someone typed, so nothing bounds their length.
+    # Over Telegram's limit the send fails outright and the button press
+    # looks like it did nothing at all; a visibly cut description is the
+    # better failure. Cut on a line boundary so no HTML tag is split in half.
+    if len(body) > _TELEGRAM_TEXT_LIMIT:
+        keep = body[:_TELEGRAM_TEXT_LIMIT - 40]
+        body = keep[:keep.rfind("\n")] + "\n\n<i>…описание не поместилось целиком.</i>"
     buttons = [("Я дочитал", f"fd:{note_id}")] if with_finish_button else None
     await threads.send(thread_id, chat_id, body, parse_mode="HTML", buttons=buttons)
 

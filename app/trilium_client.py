@@ -473,14 +473,30 @@ async def fill_book_details(note_id: str, values: list[Optional[str]]) -> None:
         for header, value in zip(BOOK_DETAIL_HEADERS, values):
             if not value:
                 continue
+            # Stop at the next <h2> *or* at the first <hr>: quotes added by
+            # /quote and by the clippings import live after the last section
+            # with no <h2> of their own, so a plain "up to the next heading"
+            # rule made filling in «Похожие книги» swallow every quote in the
+            # note (it did, once, and they had to be restored from a copy).
             pattern = re.compile(
-                r"(<h2>" + re.escape(header) + r"</h2>).*?(?=<h2>|$)", re.DOTALL,
+                r"(<h2>" + re.escape(header) + r"</h2>).*?(?=<h2>|<hr>|$)", re.DOTALL,
             )
             replacement = r"\1" + f"<p>{html.escape(value)}</p>"
             content, count = pattern.subn(replacement, content, count=1)
             if count == 0:
                 print(f"fill_book_details: header '{header}' not found in note {note_id}, skipped", flush=True)
         await _put_content(client, note_id, content)
+
+
+async def append_note_html(note_id: str, fragment: str) -> None:
+    """Append a ready-made HTML fragment to a note, untouched. Used to put
+    back content that was lost, where re-deriving it would risk changing it."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        content = await _get_content(client, note_id)
+        await _put_content(client, note_id, content + fragment)
 
 
 _TAG_RE = re.compile(r"<[^>]+>")

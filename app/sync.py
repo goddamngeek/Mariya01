@@ -24,6 +24,7 @@ from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
 from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
+    append_note_html,
     fill_book_details,
     get_active_reading_books,
     get_book_details,
@@ -269,6 +270,20 @@ async def repair_book_sections(body: RepairBookRequest):
     values = split_book_details(f"{BOOK_DETAIL_HEADERS[0]}\n{stuck}")
     await fill_book_details(note["note_id"], values)
     return {"ok": True, "filled": {h: bool(v) for h, v in zip(BOOK_DETAIL_HEADERS, values)}}
+
+
+class AppendHtmlRequest(BaseModel):
+    title: str
+    html: str
+
+
+@router.post("/append_note_html", dependencies=[Depends(require_bearer)])
+async def append_note_html_endpoint(body: AppendHtmlRequest):
+    """Одноразовое восстановление: дописать в конец заметки готовый кусок
+    HTML ровно как есть."""
+    note = await inspect_note(body.title)
+    await append_note_html(note["note_id"], body.html)
+    return {"ok": True}
 
 
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])

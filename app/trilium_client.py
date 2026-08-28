@@ -741,6 +741,30 @@ async def get_finished_books() -> list[dict]:
     return await _list_books(finished=True)
 
 
+QUOTES_HEADING = "<h2>Интересные моменты</h2>"
+
+
+def _with_quotes_heading(content: str) -> str:
+    """Content with the «Интересные моменты» heading guaranteed present,
+    sitting right after «Похожие книги» and before the first quote.
+
+    Quotes used to be appended bare, with nothing separating them from the
+    last template section — which is also why reading that section back
+    swallowed them. The heading makes the boundary explicit in the note
+    itself, so Trilium's own outline shows it too.
+
+    Inserted before the first <hr> when there are already quotes, appended
+    otherwise. Called on every append as well as by the one-off migration,
+    so a note that somehow missed the migration heals itself the next time
+    a quote lands in it."""
+    if QUOTES_HEADING in content:
+        return content
+    divider = content.find("<hr>")
+    if divider == -1:
+        return content + QUOTES_HEADING
+    return content[:divider] + QUOTES_HEADING + content[divider:]
+
+
 async def add_book_quote(
     note_id: str, quote_text: str, impression: str = "", location: str = "",
 ) -> None:
@@ -758,7 +782,7 @@ async def add_book_quote(
 
     headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
     async with httpx.AsyncClient(timeout=15, headers=headers) as client:
-        existing = await _get_content(client, note_id)
+        existing = _with_quotes_heading(await _get_content(client, note_id))
         quoted = f"«{html.escape(quote_text)}»"
         if location:
             quoted += f" <i>({html.escape(location)})</i>"
@@ -766,6 +790,39 @@ async def add_book_quote(
         if impression:
             entry_html += f"<p>{html.escape(impression)}</p>"
         await _put_content(client, note_id, existing + entry_html)
+
+
+async def ensure_quotes_heading_everywhere() -> dict:
+    """One-off: put «Интересные моменты» into _ШАБЛОН_КНИГА and every book
+    already under КНИГИ. Idempotent — a note that already has the heading is
+    left untouched and reported as skipped."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+        knigi_id = await _find_note_id(client, "КНИГИ")
+        template_id = await _find_note_id(client, "_ШАБЛОН_КНИГА")
+        if knigi_id is None or template_id is None:
+            raise TriliumNoteNotFoundError("Could not find КНИГИ or _ШАБЛОН_КНИГА.")
+
+        knigi_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{knigi_id}")
+        knigi_resp.raise_for_status()
+        note_ids = [template_id] + (knigi_resp.json().get("childNoteIds") or [])
+
+        updated, skipped = [], []
+        for note_id in note_ids:
+            resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+            resp.raise_for_status()
+            title = resp.json().get("title") or note_id
+            content = await _get_content(client, note_id)
+            patched = _with_quotes_heading(content)
+            if patched == content:
+                skipped.append(title)
+                continue
+            await _put_content(client, note_id, patched)
+            updated.append(title)
+        return {"updated": updated, "skipped": skipped}
 
 
 # Every ЕЖЕДНЕВНИК field with a human name, in the order the day fills

@@ -44,7 +44,10 @@ from app.telegram import (
 
 LINKS_TEXT = (
     "Odysseus: https://odysseus.61d1.online\n"
-    "Trilium: https://trilium.61d1.online"
+    "Trilium: https://trilium.61d1.online\n"
+    "DNS: https://dash.cloudflare.com/d051286606bac5ce0bc2c9d97a945762/61d1.online\n"
+    "Хост бота: https://northflank.com\n"
+    "Домены: https://www.reg.ru"
 )
 
 HELP_TEXT = (

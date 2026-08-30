@@ -22,7 +22,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.trilium_client import get_active_reading_books, inspect_note
+from app.trilium_client import get_active_reading_books, get_links, inspect_note
 
 router = APIRouter(prefix="/sync")
 
@@ -242,6 +242,16 @@ async def note(title: str):
     """Диагностика: что реально лежит в заметке — заголовок, лейблы и
     содержимое. Для проверки того, что бот записал."""
     return await inspect_note(title)
+
+
+@router.get("/links_debug", dependencies=[Depends(require_bearer)])
+async def links_debug():
+    """Временно: тот же путь, что у /links в боте, но с трассировкой."""
+    import traceback as tb
+    try:
+        return {"ok": True, "links": await get_links()}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "traceback": tb.format_exc()}
 
 
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])

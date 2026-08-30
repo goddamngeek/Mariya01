@@ -98,26 +98,25 @@ async def send_thought_of_the_day(part: int = 0) -> None:
     three portions (9:00 / 14:00 / 20:00) that continue each other, rather
     than one 900-character sample standing in for the whole day.
 
-    Both people get the same text, so it's something they can talk about,
-    and each portion lives in its own thread with a day-long TTL, so it
-    clears itself about when the next day's equivalent arrives.
+    Уходит только в канал, в личку — нет. Раньше шло и туда, и туда, и в
+    личке это была третья за день рассылка, которую никто не просил; в
+    канале же посты копятся в архив и никому не мешают. Прочитать мысль в
+    личке по-прежнему можно, но по своей воле — командой /thought.
+
+    Не в ветке и без записи в журнал чата: смысл ровно обратный уборке,
+    посты должны остаться.
 
     A portion that isn't there is normal, not a failure: days differ in
     size and a short one runs out before the evening slot."""
+    if not THOUGHT_CHANNEL:
+        print("thought of the day: THOUGHT_CHANNEL not set, nothing to post to", flush=True)
+        return
     thought = parables.compose_for(datetime.now(TIMEZONE).date(), part)
     if thought is None:
         print(f"thought of the day: nothing left for part {part} today, skipping", flush=True)
         return
-    for user_id in await get_registered_user_ids():
-        thread_id = await threads.open_thread(user_id, threads.TTL_DAY)
-        await threads.send(thread_id, user_id, thought, parse_mode="HTML")
-
-    # В канал — тем же текстом, но НЕ в ветке и без записи в журнал чата:
-    # там смысл ровно обратный, посты должны копиться в архив, а не
-    # убираться через сутки вместе с копией в личке.
-    if THOUGHT_CHANNEL:
-        if not await send_message(THOUGHT_CHANNEL, thought, parse_mode="HTML", log=False):
-            print(f"failed to post thought of the day to {THOUGHT_CHANNEL}", flush=True)
+    if not await send_message(THOUGHT_CHANNEL, thought, parse_mode="HTML", log=False):
+        print(f"failed to post thought of the day to {THOUGHT_CHANNEL}", flush=True)
 
 
 GRANDMA_CALL_TEXT = "Позвони бабушкам — они ждут звонка."

@@ -827,10 +827,7 @@ _URL_RE = re.compile(r"https?://\S+")
 # the URL is cut out of the line: "DNS — https://…", "Хостинг: https://…".
 _DANGLING_RE = re.compile(r"^[\s\-–—:,|]+|[\s\-–—:,|]+$")
 
-ADDLINK_USAGE = (
-    "Пришли название и ссылку следующим сообщением, например:\n"
-    "Хостинг https://northflank.com"
-)
+ADDLINK_USAGE = "Пришли название и ссылку следующим сообщением."
 
 
 def parse_link(text: str) -> tuple[str, str] | None:
@@ -881,8 +878,7 @@ async def _write_link(user_id: int, thread_id: int | None, text: str) -> bool:
         await threads.send(thread_id, user_id, TRILIUM_UNAVAILABLE_TEXT)
         return True
     await threads.send(
-        thread_id, user_id,
-        f"Добавил: {label} — {url}" if added else f"Такая ссылка уже есть: {url}",
+        thread_id, user_id, "Записал" if added else f"Такая ссылка уже есть: {url}",
     )
     return True
 

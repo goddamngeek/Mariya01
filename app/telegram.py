@@ -183,22 +183,31 @@ async def set_bot_commands() -> None:
     re-calling on every restart is harmless (pure idempotent registration,
     no message sent to anyone)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
+    # Порядок и префиксы — единственная группировка, доступная в родном
+    # меню Telegram: setMyCommands принимает плоский список, без
+    # разделителей, заголовков и подменю. Поэтому группа выносится в текст
+    # описания, а команды стоят подряд внутри своей группы — по убыванию
+    # того, как часто их жмут.
     commands = [
-        # /start itself still works (handled in app/main.py) — just left out
-        # of the visible menu since both real users are already registered
-        # and Telegram prompts /start on its own for any unstarted chat.
-        {"command": "kanban", "description": "Показать канбан-доску задач"},
+        # /start сам по себе работает (см. app/main.py) — просто не показывается в
+        # меню: оба живых пользователя давно зарегистрированы, а незнакомому
+        # чату Telegram и так предлагает /start сам.
+        {"command": "today", "description": "Ежедневник · Что записано за сегодня"},
+        {"command": "week", "description": "Ежедневник · Сводка за неделю"},
+        {"command": "checkin", "description": "Ежедневник · Повторить текущий вопрос"},
+
+        {"command": "reading", "description": "Книги · Что я сейчас читаю"},
+        {"command": "quote", "description": "Книги · Добавить интересный момент"},
+        {"command": "addbook", "description": "Книги · Добавить новую"},
+        {"command": "finished", "description": "Книги · Прочитанные"},
+
+        {"command": "kanban", "description": "Задачи · Канбан-доска"},
+
+        {"command": "links", "description": "Ссылки · Сохранённые"},
+        {"command": "addlink", "description": "Ссылки · Добавить"},
+
         {"command": "thought", "description": "Мысль дня из «Круга чтения»"},
-        {"command": "today", "description": "Что записано в ежедневник за сегодня"},
-        {"command": "week", "description": "Сводка по ежедневнику за неделю"},
-        {"command": "checkin", "description": "Повторить текущий вопрос ежедневника"},
-        {"command": "links", "description": "Сохранённые ссылки"},
-        {"command": "addlink", "description": "Добавить ссылку"},
         {"command": "clear", "description": "Очистить историю чата"},
-        {"command": "quote", "description": "Добавить интересный момент из книги"},
-        {"command": "addbook", "description": "Добавить новую книгу"},
-        {"command": "reading", "description": "Что я сейчас читаю"},
-        {"command": "finished", "description": "Прочитанные книги"},
         {"command": "help", "description": "Что умеет бот"},
     ]
     try:

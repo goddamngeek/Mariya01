@@ -18,6 +18,7 @@ from app.db import (
     close_book_review_prompt,
     close_ezhednevnik_prompt,
     close_prompt,
+    open_link_add_prompt,
     create_activity_prompt,
     create_book_add_prompt,
     create_book_quote_prompt,
@@ -827,8 +828,8 @@ _URL_RE = re.compile(r"https?://\S+")
 _DANGLING_RE = re.compile(r"^[\s\-–—:,|]+|[\s\-–—:,|]+$")
 
 ADDLINK_USAGE = (
-    "Пришли название и ссылку одним сообщением, например:\n"
-    "/addlink Хостинг https://northflank.com"
+    "Пришли название и ссылку следующим сообщением, например:\n"
+    "Хостинг https://northflank.com"
 )
 
 
@@ -867,32 +868,55 @@ async def show_links(user_id: int, trigger_message_id: int | None = None) -> Non
     await threads.send(thread_id, user_id, text)
 
 
-async def add_link_from_command(
-    user_id: int, text: str, trigger_message_id: int | None = None,
-) -> None:
-    """/addlink Название https://… — one message, no follow-up questions.
-
-    A link is small enough that asking for the name and the address
-    separately would cost more than typing them together, so unlike
-    /addbook this keeps no half-finished state anywhere."""
-    thread_id = await threads.open_thread(user_id, threads.TTL_INFO, trigger_message_id)
-    parsed = parse_link(text[len("/addlink"):])
+async def _write_link(user_id: int, thread_id: int | None, text: str) -> bool:
+    """Разобрать и записать. False — если ссылки в тексте не нашлось."""
+    parsed = parse_link(text)
     if parsed is None:
-        await threads.send(thread_id, user_id, ADDLINK_USAGE)
-        return
-
+        return False
     label, url = parsed
     try:
         added = await add_link(label, url)
     except Exception:
         traceback.print_exc()
         await threads.send(thread_id, user_id, TRILIUM_UNAVAILABLE_TEXT)
-        return
-
+        return True
     await threads.send(
         thread_id, user_id,
         f"Добавил: {label} — {url}" if added else f"Такая ссылка уже есть: {url}",
     )
+    return True
+
+
+async def add_link_from_command(
+    user_id: int, text: str, trigger_message_id: int | None = None,
+) -> None:
+    """/addlink Название https://… — одним сообщением.
+
+    Без аргументов команда не отвечает подсказкой в пустоту, а начинает
+    ждать следующее сообщение: подсказка сама просит его прислать, и
+    отвечать на неё — ровно то, что человек делает. Раньше ожидания не
+    было, и присланное следом уходило в Odysseus и оседало заметкой в
+    журнале вместо списка ссылок."""
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
+    if await _write_link(user_id, thread_id, text[len("/addlink"):]):
+        await _dismiss_thread_by_id(thread_id)
+        return
+    await open_link_add_prompt(user_id, thread_id)
+    await threads.send(thread_id, user_id, ADDLINK_USAGE)
+
+
+async def _handle_link_add_reply(
+    user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None,
+) -> None:
+    """Ответ на подсказку /addlink. Ссылки в тексте нет — переспрашиваем, не
+    закрывая ожидание: человек мог просто промахнуться."""
+    thread_id = prompt["thread_id"]
+    await threads.track(thread_id, telegram_message_id)
+    if not await _write_link(user_id, thread_id, text):
+        await threads.send(thread_id, user_id, "Не вижу здесь ссылки. " + ADDLINK_USAGE)
+        return
+    await close_prompt("link_add", prompt["id"])
+    await _dismiss_thread_by_id(thread_id)
 
 
 def _chunk(entries: list[str], header: str) -> list[str]:
@@ -1073,6 +1097,7 @@ _PROMPT_HANDLERS = {
     "quote": _handle_quote_reply,
     "review": _handle_book_review_reply,
     "book_add": _handle_book_add_reply,
+    "link_add": _handle_link_add_reply,
 }
 
 

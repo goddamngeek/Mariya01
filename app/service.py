@@ -61,9 +61,11 @@ from app.telegram import (
 )
 from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
+    SEED_LINKS,
     add_book,
     add_book_quote,
     add_book_quotes,
+    add_link,
     create_book_review_note,
     extract_duration,
     fill_book_details,
@@ -73,6 +75,7 @@ from app.trilium_client import (
     get_book_note_ids,
     get_book_quotes,
     get_finished_books,
+    get_links,
     get_note_labels,
     log_activity,
     normalize_book_title,
@@ -816,6 +819,80 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     if with_finish_button:
         buttons.append(("Я дочитал", f"fd:{note_id}"))
     await threads.send(thread_id, chat_id, body, parse_mode="HTML", buttons=buttons or None)
+
+
+_URL_RE = re.compile(r"https?://\S+")
+# Separators people put between a name and its address, left dangling once
+# the URL is cut out of the line: "DNS — https://…", "Хостинг: https://…".
+_DANGLING_RE = re.compile(r"^[\s\-–—:,|]+|[\s\-–—:,|]+$")
+
+ADDLINK_USAGE = (
+    "Пришли название и ссылку одним сообщением, например:\n"
+    "/addlink Хостинг https://northflank.com"
+)
+
+
+def parse_link(text: str) -> tuple[str, str] | None:
+    """A name and a URL out of one line, in either order. The URL is found
+    by its scheme rather than by position, so «DNS — https://…» and
+    «https://… — DNS» both work and no separator needs agreeing on. Without
+    a name the host stands in for one, which is worth more than refusing."""
+    match = _URL_RE.search(text)
+    if match is None:
+        return None
+    url = match.group(0).rstrip(".,;)")
+    label = _DANGLING_RE.sub("", text.replace(match.group(0), " ")).strip()
+    if not label:
+        label = url.split("//", 1)[-1].split("/", 1)[0]
+    return label, url
+
+
+def _render_links(links) -> str:
+    return "\n".join(f"{label}: {url}" for label, url in links)
+
+
+async def show_links(user_id: int, trigger_message_id: int | None = None) -> None:
+    """/links — read out of the ССЫЛКИ note in Trilium.
+
+    Falls back to the seeded infrastructure links when Trilium can't be
+    reached, since the single most likely reason someone wants this list is
+    that Trilium is the thing that's broken."""
+    thread_id = await threads.open_thread(user_id, threads.TTL_INFO, trigger_message_id)
+    try:
+        links = await get_links()
+        text = _render_links(links) if links else "Пока ни одной ссылки. Добавить: /addlink"
+    except Exception:
+        traceback.print_exc()
+        text = "Trilium недоступен, показываю сохранённые:\n\n" + _render_links(SEED_LINKS)
+    await threads.send(thread_id, user_id, text)
+
+
+async def add_link_from_command(
+    user_id: int, text: str, trigger_message_id: int | None = None,
+) -> None:
+    """/addlink Название https://… — one message, no follow-up questions.
+
+    A link is small enough that asking for the name and the address
+    separately would cost more than typing them together, so unlike
+    /addbook this keeps no half-finished state anywhere."""
+    thread_id = await threads.open_thread(user_id, threads.TTL_INFO, trigger_message_id)
+    parsed = parse_link(text[len("/addlink"):])
+    if parsed is None:
+        await threads.send(thread_id, user_id, ADDLINK_USAGE)
+        return
+
+    label, url = parsed
+    try:
+        added = await add_link(label, url)
+    except Exception:
+        traceback.print_exc()
+        await threads.send(thread_id, user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+
+    await threads.send(
+        thread_id, user_id,
+        f"Добавил: {label} — {url}" if added else f"Такая ссылка уже есть: {url}",
+    )
 
 
 def _chunk(entries: list[str], header: str) -> list[str]:

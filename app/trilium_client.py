@@ -769,6 +769,79 @@ async def get_finished_books() -> list[dict]:
     return await _list_books(finished=True)
 
 
+LINKS_NOTE_TITLE = "ССЫЛКИ"
+
+# The links the note starts life with — infrastructure worth having at hand
+# exactly when something is broken. Only ever used to seed the note on first
+# creation; after that the note is the single source of truth and these are
+# the emergency fallback for when Trilium itself is the thing that's down.
+SEED_LINKS = (
+    ("Odysseus", "https://odysseus.61d1.online"),
+    ("Trilium", "https://trilium.61d1.online"),
+    ("DNS", "https://dash.cloudflare.com/d051286606bac5ce0bc2c9d97a945762/61d1.online"),
+    ("Хост бота", "https://northflank.com"),
+    ("Домены", "https://www.reg.ru"),
+)
+
+_LINK_RE = re.compile(r'<a[^>]*href="(?P<url>[^"]+)"[^>]*>(?P<label>.*?)</a>', re.DOTALL | re.IGNORECASE)
+
+
+def _link_html(label: str, url: str) -> str:
+    """One link as its own paragraph. A paragraph rather than a list item
+    because appending to a <ul> means splicing inside it, while paragraphs
+    just concatenate — and Trilium renders both the same way."""
+    return f'<p><a href="{html.escape(url, quote=True)}">{html.escape(label)}</a></p>'
+
+
+def _parse_links(content: str) -> list[tuple[str, str]]:
+    return [
+        (_strip_html(m.group("label")) or m.group("url"), m.group("url"))
+        for m in _LINK_RE.finditer(content)
+    ]
+
+
+async def _links_note_id(client: httpx.AsyncClient) -> str:
+    """The ССЫЛКИ note, created at the root of the tree seeded with
+    SEED_LINKS if it isn't there yet."""
+    note_id = await _find_note_id(client, LINKS_NOTE_TITLE)
+    if note_id is not None:
+        return note_id
+    resp = await client.post(
+        f"{TRILIUM_URL}/etapi/create-note",
+        json={
+            "parentNoteId": "root", "title": LINKS_NOTE_TITLE, "type": "text",
+            "content": "".join(_link_html(label, url) for label, url in SEED_LINKS),
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()["note"]["noteId"]
+
+
+async def get_links() -> list[tuple[str, str]]:
+    """Every link in the ССЫЛКИ note, in the order they appear there."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        return _parse_links(await _get_content(client, await _links_note_id(client)))
+
+
+async def add_link(label: str, url: str) -> bool:
+    """Append one link. Returns False without writing if that exact URL is
+    already there — re-adding a link you already saved is a slip, not a
+    request for a duplicate."""
+    if not TRILIUM_URL or not TRILIUM_ETAPI_TOKEN:
+        raise TriliumNotConfiguredError("TRILIUM_URL/TRILIUM_ETAPI_TOKEN not configured")
+    headers = {"Authorization": TRILIUM_ETAPI_TOKEN}
+    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+        note_id = await _links_note_id(client)
+        content = await _get_content(client, note_id)
+        if any(existing == url for _label, existing in _parse_links(content)):
+            return False
+        await _put_content(client, note_id, content + _link_html(label, url))
+        return True
+
+
 _KEEP_TAGS = ("i", "b", "em", "strong", "code", "s", "u")
 _BLOCK_END_RE = re.compile(r"</(?:p|div|li|h[1-6])>", re.IGNORECASE)
 _ANY_TAG_RE = re.compile(r"</?([a-zA-Z0-9]+)[^>]*>")

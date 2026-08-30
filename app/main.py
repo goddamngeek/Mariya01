@@ -26,9 +26,11 @@ from app.service import (
     handle_ezhednevnik_question_reply,
     handle_message_edit,
     handle_message_reaction,
+    add_link_from_command,
     process_incoming_message,
     resend_ezhednevnik_question,
     show_finished_books,
+    show_links,
     show_reading_status,
     start_book_add_flow,
     start_quote_flow,
@@ -42,13 +44,6 @@ from app.telegram import (
     set_bot_commands,
 )
 
-LINKS_TEXT = (
-    "Odysseus: https://odysseus.61d1.online\n"
-    "Trilium: https://trilium.61d1.online\n"
-    "DNS: https://dash.cloudflare.com/d051286606bac5ce0bc2c9d97a945762/61d1.online\n"
-    "Хост бота: https://northflank.com\n"
-    "Домены: https://www.reg.ru"
-)
 
 HELP_TEXT = (
     "Команды:\n"
@@ -57,7 +52,8 @@ HELP_TEXT = (
     "/today — что уже записано в ежедневник за сегодня\n"
     "/week — сводка по ежедневнику за текущую неделю\n"
     "/checkin — повторить текущий вопрос ежедневника, если он ещё открыт\n"
-    "/links — ссылки на Odysseus и Trilium\n"
+    "/links — сохранённые ссылки\n"
+    "/addlink Название https://… — добавить ссылку\n"
     "/clear — очистить историю чата\n"
     "/quote — добавить интересный момент из книги\n"
     "/addbook — добавить новую книгу\n"
@@ -268,8 +264,11 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() == "/links":
-        thread_id = await threads.open_thread(chat_id, threads.TTL_INFO, message_id)
-        await threads.send(thread_id, chat_id, LINKS_TEXT)
+        background.spawn(show_links(chat_id, message_id), "/links")
+        return {"ok": True}
+
+    if text.strip().startswith("/addlink"):
+        background.spawn(add_link_from_command(chat_id, text, message_id), "/addlink")
         return {"ok": True}
 
     # Telegram's native "reply" feature attaches the full replied-to message

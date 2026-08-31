@@ -15,23 +15,11 @@ one-question-at-a-time sequence.
 
 import re
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from app.config import TIMEZONE
-from app.db import (
-    ack_incoming_messages,
-    get_odysseus_session_id,
-    set_odysseus_session_id,
-    utcnow,
-)
-from app.odysseus_client import (
-    SessionNotFoundError,
-    agent_chat,
-    get_active_endpoint,
-    parse_time_via_llm,
-)
+from app.db import ack_incoming_messages, utcnow
 from app.people import NAME_TO_USER_ID, USER_NAMES
-from app.prompts import INGEST_PROMPT_TEMPLATE
 from app.reminder_time import parse_reminder_time
 from app import humanize, threads, triggers
 from app.reminders import schedule_reminder
@@ -43,27 +31,6 @@ from app.trilium_client import (
     log_reminder_to_calendar,
     read_kanban_status,
 )
-
-
-def _tag_message(
-    user_id: int, text: str, received_at: datetime, reply_to_text: str | None = None,
-) -> str:
-    name = USER_NAMES.get(user_id, str(user_id))
-    local_time = received_at.astimezone(TIMEZONE)
-    tag = f"[{name} {local_time.strftime('%d.%m.%Y %H:%M')} МСК]"
-    if reply_to_text:
-        # Telegram's native "reply" feature — without this, a reply like
-        # "напомни об этом Маше" loses which earlier message "этом" refers
-        # to entirely, since only the new text ever reached Odysseus.
-        quoted = reply_to_text.strip().replace("\n", " ")[:300]
-        return f'{tag} (в ответ на сообщение: "{quoted}") {text}'
-    return f"{tag} {text}"
-
-
-def _build_prompt(user_id: int, kind: str) -> str:
-    name = USER_NAMES.get(user_id, str(user_id))
-    return INGEST_PROMPT_TEMPLATE.replace("__NAME__", name).replace("__KIND__", kind)
-
 
 # Same stem prefixes as the person-name canonicalization this used to rely
 # on in Odysseus: "ОСТАП" covers all its declensions (Остапа/Остапу/...),
@@ -115,16 +82,11 @@ async def _handle_relay_or_reminder(message_id: int, user_id: int, text: str) ->
     target_id = NAME_TO_USER_ID.get(target_name, user_id)
     anonymous = _detect_anonymous(text)
 
-    run_at, needs_llm = parse_reminder_time(text)  # already UTC-aware, or None for "now"
-    if run_at is None and needs_llm:
-        now_iso = datetime.now(TIMEZONE).replace(microsecond=0).isoformat()
-        llm_result = await parse_time_via_llm(text, now_iso)
-        if llm_result:
-            try:
-                naive = datetime.fromisoformat(llm_result)
-                run_at = naive.replace(tzinfo=TIMEZONE).astimezone(timezone.utc)
-            except ValueError:
-                run_at = None
+    # Разбор времени — только регулярками (app/reminder_time.py). Запасной
+    # вызов модели убран вместе с Odysseus: фраза со словом-признаком
+    # времени, но не подошедшая ни под один шаблон, теперь просто означает
+    # «сейчас» — как и любая другая фраза без времени.
+    run_at, _needs_llm = parse_reminder_time(text)
     if run_at is None:
         run_at = utcnow()
 
@@ -165,31 +127,6 @@ async def _handle_kanban_add(message_id: int, user_id: int, text: str) -> None:
         await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
     await ack_incoming_messages([message_id])
 
-async def _chat_with_session(
-    user_id: int, message: str, base_url: str, model: str, system_prompt: str,
-    require_tool: bool = False, require_tool_type: str | None = None,
-) -> dict:
-    session_id = await get_odysseus_session_id(user_id)
-    try:
-        result = await agent_chat(
-            message, base_url, model, session=session_id,
-            system_prompt=system_prompt, require_tool=require_tool,
-            require_tool_type=require_tool_type,
-        )
-    except SessionNotFoundError:
-        result = await agent_chat(
-            message, base_url, model, session=None,
-            system_prompt=system_prompt, require_tool=require_tool,
-            require_tool_type=require_tool_type,
-        )
-
-    new_session_id = result.get("session_id")
-    if new_session_id and new_session_id != session_id:
-        await set_odysseus_session_id(user_id, new_session_id)
-    return result
-
-
-ODYSSEUS_UNAVAILABLE_TEXT = "Не могу сейчас связаться с Odysseus. Попробуй чуть позже."
 TRILIUM_UNAVAILABLE_TEXT = "Не могу сейчас связаться с Trilium. Попробуй чуть позже."
 
 
@@ -283,40 +220,21 @@ async def handle_active_message(
             await _handle_relay_or_reminder(message_id, user_id, text)
             return
 
-        # Chinese word and sale both need a model to read free text, but
-        # only ever a single narrow extraction — never the full agent loop,
-        # sessions, or Odysseus's require_tool retry dance (see
-        # extract_fields_via_llm).
-
-        base_url, model = await get_active_endpoint()
-        tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
-        system_prompt = _build_prompt(user_id, "активное")
-
-        # Единственное, что ещё живёт в Odysseus, — свободный разговор.
-        # Записи в журнал, напоминания, канбан, книги, ежедневник и деньги
-        # бот делает сам; сюда доходит только то, что ничем не является.
-        # "general" передаётся явно, а не опускается: этим Odysseus решает,
-        # какие тулы вообще предложить модели, и пустое поле когда-то
-        # означало «все» — модель увидела schedule_send и переслала Маше
-        # недельной давности тестовое сообщение без всякой просьбы.
-        require_tool_type = "general"
-
-        result = await _chat_with_session(
-            user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=False,
-            require_tool_type=require_tool_type,
+        # Сюда доходит то, что не подошло ни под один триггер. Раньше это
+        # уходило в свободный разговор с Odysseus; им не пользовались, и
+        # ветку убрали вместе с ним. Молчать нельзя: сообщение уже
+        # отправлено человеку в пустоту, и без ответа непонятно, дошло ли
+        # оно вообще.
+        await send_message(
+            user_id,
+            "Не понял, что с этим делать. Посмотри /help — там всё, что я умею.",
         )
-        answer = (result.get("response") or "").strip()
-        if answer and not await send_message(user_id, answer):
-            print(f"failed to deliver active answer to user={user_id}", flush=True)
-
         await ack_incoming_messages([message_id])
     except Exception:
         print(f"handle_active_message failed for incoming id={message_id}:", flush=True)
         traceback.print_exc()
-        # Confirmed live: an Odysseus outage silently swallowed every active
-        # message here — this didn't crash the webhook (200 still went back
-        # to Telegram), but the person got total silence with no indication
-        # anything went wrong. Not acking on purpose: if this really was a
-        # transient failure, /sync/reprocess_active can still recover it.
-        await send_message(user_id, ODYSSEUS_UNAVAILABLE_TEXT)
+        # Подтверждено на живом: сбой здесь молча съедал сообщение —
+        # вебхук отвечал 200, а человек не получал ничего и не знал, что
+        # что-то сломалось. Намеренно не подтверждаем сообщение: если сбой
+        # был временным, его можно переиграть через /sync/reprocess_active.
+        await send_message(user_id, "Что-то сломалось на моей стороне. Попробуй ещё раз чуть позже.")

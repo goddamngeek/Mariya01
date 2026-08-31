@@ -8,14 +8,12 @@ from app.config import SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
     get_ezhednevnik_prompts_for_user,
-    get_odysseus_session_id,
     get_open_prompt,
     get_recent_incoming_messages,
     get_recent_reminders,
     get_water_reminders_for_date,
     peek_logged_messages,
     pull_unconfirmed_incoming,
-    set_odysseus_session_id,
     utcnow,
 )
 from app.ingest import handle_active_message
@@ -36,12 +34,6 @@ def require_bearer(authorization: str = Header(default="")) -> None:
 class AckRequest(BaseModel):
     ids: list[int]
 
-
-class SetSessionRequest(BaseModel):
-    user_id: int
-    session_id: str
-
-
 @router.get("/pull", dependencies=[Depends(require_bearer)])
 async def pull():
     rows = await pull_unconfirmed_incoming()
@@ -54,17 +46,6 @@ async def pull():
 @router.post("/ack", dependencies=[Depends(require_bearer)])
 async def ack(body: AckRequest):
     await ack_incoming_messages(body.ids)
-    return {"ok": True}
-
-
-@router.get("/session", dependencies=[Depends(require_bearer)])
-async def get_session(user_id: int):
-    return {"session_id": await get_odysseus_session_id(user_id)}
-
-
-@router.post("/session", dependencies=[Depends(require_bearer)])
-async def set_session(body: SetSessionRequest):
-    await set_odysseus_session_id(body.user_id, body.session_id)
     return {"ok": True}
 
 

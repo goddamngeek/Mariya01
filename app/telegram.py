@@ -2,7 +2,7 @@ import asyncio
 
 import httpx
 
-from app.config import TELEGRAM_BOT_TOKEN
+from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
 from app.db import log_chat_message
 
 _client: httpx.AsyncClient | None = None
@@ -179,10 +179,16 @@ ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "message_react
 
 
 async def ensure_webhook_allowed_updates() -> None:
-    """Re-register the EXISTING webhook URL with our allowed_updates list.
-    Reads the current URL from getWebhookInfo rather than hardcoding it, so
-    this stays correct across deploys/URL changes; a no-op if no webhook is
-    set yet. Idempotent — safe to run on every startup."""
+    """Re-register the EXISTING webhook URL with our allowed_updates list and
+    our secret token. Reads the current URL from getWebhookInfo rather than
+    hardcoding it, so this stays correct across deploys/URL changes; a no-op
+    if no webhook is set yet.
+
+    Unlike allowed_updates, the secret is NOT reported back by
+    getWebhookInfo, so there is no way to tell whether it is already in
+    place — hence setWebhook runs on every startup instead of only when
+    something looks wrong. It is a pure idempotent re-registration: no
+    message is sent, no pending update is dropped."""
     try:
         info_resp = await get_client().get(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo",
@@ -193,14 +199,18 @@ async def ensure_webhook_allowed_updates() -> None:
         if not url:
             print("ensure_webhook_allowed_updates: no webhook set, skipping", flush=True)
             return
-        if set(result.get("allowed_updates") or []) == set(ALLOWED_UPDATES):
-            return
+        payload = {"url": url, "allowed_updates": ALLOWED_UPDATES}
+        if TELEGRAM_WEBHOOK_SECRET:
+            payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
         set_resp = await get_client().post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
-            json={"url": url, "allowed_updates": ALLOWED_UPDATES},
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook", json=payload,
         )
         set_resp.raise_for_status()
-        print(f"webhook allowed_updates set to {ALLOWED_UPDATES}", flush=True)
+        print(
+            f"webhook re-registered: allowed_updates={ALLOWED_UPDATES}, "
+            f"secret={'set' if TELEGRAM_WEBHOOK_SECRET else 'MISSING'}",
+            flush=True,
+        )
     except httpx.HTTPError as exc:
         print(f"ensure_webhook_allowed_updates failed (non-fatal): {exc}", flush=True)
 

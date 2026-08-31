@@ -1,10 +1,10 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request, Response
 
 from app.callbacks import process_callback_query
-from app.config import MAX_REGISTERED_USERS, TIMEZONE
+from app.config import MAX_REGISTERED_USERS, TELEGRAM_WEBHOOK_SECRET, TIMEZONE
 from app.db import (
     close_pool,
     count_registered,
@@ -139,7 +139,20 @@ async def import_clippings_document(chat_id: int, document: dict) -> None:
 
 
 @app.post("/webhook/telegram")
-async def telegram_webhook(request: Request):
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str = Header(default=""),
+):
+    # Телеграм подписывает каждый запрос этим заголовком (см.
+    # ensure_webhook_allowed_updates). Без проверки сюда мог постучаться
+    # кто угодно: адрес бота не секрет, а дальше всё решает chat_id ИЗ
+    # САМОГО ЗАПРОСА — то есть подделать сообщение от любого из двоих было
+    # делом одного curl. Отвечаем 403, а не 200: подделке незачем знать,
+    # что её приняли, а настоящий телеграм этот путь никогда не проходит.
+    if TELEGRAM_WEBHOOK_SECRET and x_telegram_bot_api_secret_token != TELEGRAM_WEBHOOK_SECRET:
+        print("webhook: отклонён запрос без верного секрета", flush=True)
+        return Response(status_code=403)
+
     update = await request.json()
 
     if "callback_query" in update:

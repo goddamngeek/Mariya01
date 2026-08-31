@@ -1,3 +1,4 @@
+import hashlib
 import os
 from datetime import time
 from zoneinfo import ZoneInfo
@@ -62,3 +63,19 @@ FIREFLY_TOKENS = {
     "ОСТАП": os.environ.get("FIREFLY_TOKEN_OSTAP", ""),
     "МАША": os.environ.get("FIREFLY_TOKEN_MASHA", ""),
 }
+
+
+# Телеграм подписывает каждый запрос к вебхуку этим значением (заголовок
+# X-Telegram-Bot-Api-Secret-Token), если передать его в setWebhook. Без
+# проверки вебхук принимает ЛЮБОЙ POST: адрес бота не секрет, а
+# is_registered() смотрит на chat_id ИЗ САМОГО ЗАПРОСА — то есть подделать
+# сообщение от любого из двоих мог кто угодно.
+#
+# Значение по умолчанию выводится из токена бота, а не требует отдельной
+# переменной: так защита включается сразу на деплое, без окна, в котором
+# переменную ещё не проставили. Знать его может только тот, кто и так знает
+# токен бота, то есть владеет ботом целиком.
+TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET") or (
+    hashlib.sha256(f"webhook:{TELEGRAM_BOT_TOKEN}".encode()).hexdigest()
+    if TELEGRAM_BOT_TOKEN else ""
+)

@@ -22,7 +22,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.firefly_client import list_asset_accounts, recent_transactions
+from app.firefly_client import list_asset_accounts, list_categories, recent_transactions
 from app.trilium_client import get_active_reading_books, get_planner_cards, inspect_note
 
 router = APIRouter(prefix="/sync")
@@ -306,3 +306,16 @@ async def firefly_recent(user_id: int, limit: int = 10):
     """Диагностика: последние операции одного человека — чтобы видеть, что
     бот записал на самом деле, не открывая Firefly."""
     return await recent_transactions(user_id, limit)
+
+
+@router.get("/firefly_categories", dependencies=[Depends(require_bearer)])
+async def firefly_categories():
+    """Диагностика: категории каждого человека — будущие кнопки первого
+    шага. Пустой список значит, что человек их ещё не завёл."""
+    result = {}
+    for name, uid in NAME_TO_USER_ID.items():
+        try:
+            result[name] = await list_categories(uid)
+        except Exception as exc:
+            result[name] = {"error": f"{type(exc).__name__}: {exc}"}
+    return result

@@ -176,3 +176,25 @@ async def find_by_external_id(user_id: int, external_id: str) -> str | None:
     resp.raise_for_status()
     data = resp.json().get("data") or []
     return data[0]["id"] if data else None
+
+
+@_needs_firefly
+async def list_categories(user_id: int) -> list[dict]:
+    """Категории, заведённые человеком в Firefly, — они станут кнопками на
+    первом шаге записи траты.
+
+    Читаются, а не задаются списком в коде, по прямому выбору: пусть бот
+    показывает то, что реально есть у человека, а не навязывает свой набор,
+    который потом разъедется с настоящим. Обратная сторона — пустой список
+    означает, что показывать нечего, и поток должен сказать об этом
+    по-человечески, а не молчать."""
+    resp = await get_client().get(
+        f"{FIREFLY_URL}/api/v1/categories",
+        headers=_headers(user_id),
+        params={"limit": 100},
+    )
+    resp.raise_for_status()
+    return [
+        {"id": item["id"], "name": item["attributes"]["name"]}
+        for item in resp.json().get("data", [])
+    ]

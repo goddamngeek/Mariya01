@@ -2,6 +2,7 @@ from app.db import is_registered
 from app.service import (
     handle_book_finished,
     handle_book_quotes_selected,
+    handle_planner_action,
     handle_finished_book_selected,
     handle_quote_book_selected,
     handle_reading_book_selected,
@@ -37,6 +38,11 @@ async def process_callback_query(callback_query: dict) -> None:
             return
         if data.startswith("im:"):
             await handle_book_quotes_selected(callback_query)
+            return
+        # Планировщик дня: pt/pm/pl/ph — разбор инбокса, pd — «готово» в
+        # /plan (см. handle_planner_action).
+        if data[:2] in ("pt", "pm", "pl", "ph", "pd") and data[2:3] == ":":
+            await handle_planner_action(callback_query)
             return
 
     await answer_callback_query(callback_query["id"])

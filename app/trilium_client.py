@@ -378,6 +378,84 @@ async def add_kanban_card(
     await _create_attribute(client, note_id, "label", "owner", person_name)
 
 
+KANBAN_BACKLOG = "БЭКЛОГ // BACKLOG"
+KANBAN_FUTURE = "БУДУЩИЕ ЗАДАЧИ // FUTURE TASKS"
+KANBAN_DONE = "СДЕЛАНО // DONE"
+
+
+def _label(note: dict, name: str) -> str:
+    return next(
+        (a["value"] for a in note.get("attributes", [])
+         if a.get("type") == "label" and a.get("name") == name),
+        "",
+    )
+
+
+@_needs_trilium
+async def get_planner_cards(board_name: str = "КАНБАН // KANBAN") -> list[dict]:
+    """Every card on the board with the three things the planner cares
+    about: which column it's in, which day it's planned for, and whose it
+    is. One board read for all of it — the inbox, today's plan and whatever
+    is overdue are three slices of the same list, and fetching them
+    separately would mean three passes over every card (Trilium's ETAPI has
+    no "search by label" filter, see _list_books).
+
+    due is None when the card has no day yet — which is what puts it in the
+    inbox. An empty string counts as none: clearing a promoted date field in
+    Trilium's UI leaves the label attached rather than removing it."""
+    client = get_client()
+    board_id = await _find_note_id(client, board_name)
+    if board_id is None:
+        raise TriliumNoteNotFoundError(f"No board note titled '{board_name}' found.")
+
+    board_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{board_id}")
+    board_resp.raise_for_status()
+    child_ids = board_resp.json().get("childNoteIds") or []
+    if not child_ids:
+        return []
+
+    cards = []
+    for note in await _get_notes(client, child_ids):
+        due_raw = _label(note, "due")
+        try:
+            due = _date.fromisoformat(due_raw) if due_raw else None
+        except ValueError:
+            # A hand-typed date that isn't a date shouldn't hide the card
+            # from the inbox — treat it as unplanned rather than crashing.
+            print(f"planner: card {note.get('noteId')} has unparseable due={due_raw!r}", flush=True)
+            due = None
+        cards.append({
+            "note_id": note.get("noteId"),
+            "title": note.get("title") or "(без названия)",
+            "status": _label(note, "status") or "(без статуса)",
+            "owner": _label(note, "owner"),
+            "due": due,
+        })
+    return cards
+
+
+@_needs_trilium
+async def set_card_label(note_id: str, name: str, value: str) -> None:
+    """Set one label on a card, replacing whatever was there. PATCHes an
+    existing attribute rather than adding a second one with the same name —
+    same reasoning as set_reading_end."""
+    client = get_client()
+    note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+    note_resp.raise_for_status()
+    existing = next(
+        (a for a in note_resp.json().get("attributes", [])
+         if a.get("type") == "label" and a.get("name") == name),
+        None,
+    )
+    if existing is not None:
+        patch_resp = await client.patch(
+            f"{TRILIUM_URL}/etapi/attributes/{existing['attributeId']}", json={"value": value},
+        )
+        patch_resp.raise_for_status()
+        return
+    await _create_attribute(client, note_id, "label", name, value)
+
+
 async def log_reminder_to_calendar(sender_name: str, target_name: str, message: str, when: datetime) -> None:
     """Best-effort log of a scheduled reminder/relay into that day's
     Trilium calendar note, purely for visibility — never raises, since

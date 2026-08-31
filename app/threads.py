@@ -72,12 +72,14 @@ async def track(thread_id: int | None, message_id: int | None) -> None:
 
 async def send(
     thread_id: int | None, chat_id: int, text: str, parse_mode: str | None = None,
-    buttons: list[tuple[str, str]] | None = None,
+    buttons: list[tuple[str, str]] | None = None, row_width: int = 1,
 ) -> int | None:
     """Send a message and track it in one step — the normal way for any
     threaded flow to talk, so nothing is left untracked by accident."""
     if buttons:
-        message_id = await send_message_with_buttons(chat_id, text, buttons, parse_mode=parse_mode)
+        message_id = await send_message_with_buttons(
+            chat_id, text, buttons, parse_mode=parse_mode, row_width=row_width,
+        )
     else:
         message_id = await send_message_get_id(chat_id, text, parse_mode=parse_mode)
     await track(thread_id, message_id)

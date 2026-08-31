@@ -34,9 +34,18 @@ async def close_client() -> None:
         _client = None
 
 
+def _keyboard(buttons: list[tuple[str, str]], row_width: int) -> list[list[dict]]:
+    """Buttons laid out row_width per row. One per row reads best for a list
+    of choices of differing length (books, tasks); two per row keeps a fixed
+    set of short verbs on one screen without scrolling."""
+    cells = [{"text": label, "callback_data": data} for label, data in buttons]
+    return [cells[i:i + row_width] for i in range(0, len(cells), row_width)]
+
+
 async def _send(
     chat_id: int | str, text: str, parse_mode: str | None = None,
     buttons: list[tuple[str, str]] | None = None, log: bool = True,
+    row_width: int = 1,
 ) -> int | None:
     """The one sendMessage call — one attempt, no retries here; callers
     decide what happens on failure. Returns the sent message_id, or None.
@@ -50,9 +59,7 @@ async def _send(
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if buttons:
-        payload["reply_markup"] = {
-            "inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons],
-        }
+        payload["reply_markup"] = {"inline_keyboard": _keyboard(buttons, row_width)}
     try:
         resp = await get_client().post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=payload,
@@ -83,10 +90,34 @@ async def send_message_get_id(chat_id: int | str, text: str, parse_mode: str | N
 
 async def send_message_with_buttons(
     chat_id: int | str, text: str, buttons: list[tuple[str, str]], parse_mode: str | None = None,
+    row_width: int = 1,
 ) -> int | None:
-    """Same, plus an inline keyboard, one button per row — buttons is
-    [(label, callback_data), ...]."""
-    return await _send(chat_id, text, parse_mode, buttons=buttons)
+    """Same, plus an inline keyboard — buttons is [(label, callback_data),
+    ...], laid out row_width per row."""
+    return await _send(chat_id, text, parse_mode, buttons=buttons, row_width=row_width)
+
+
+async def edit_message(
+    chat_id: int | str, message_id: int, text: str,
+    buttons: list[tuple[str, str]] | None = None, parse_mode: str | None = None,
+    row_width: int = 1,
+) -> bool:
+    """Replace a message's text and buttons in place. Lets a one-at-a-time
+    flow (the inbox triage) flip through cards inside a single message
+    instead of leaving a wall of answered ones behind."""
+    payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    payload["reply_markup"] = {"inline_keyboard": _keyboard(buttons, row_width) if buttons else []}
+    try:
+        resp = await get_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json=payload,
+        )
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        print(f"telegram editMessageText failed: {exc}", flush=True)
+        return False
 
 
 # Телеграм отдаёт боту файлы не больше 20 МБ, но «My Clippings.txt» — это
@@ -201,7 +232,9 @@ async def set_bot_commands() -> None:
         {"command": "addbook", "description": "Книги · Добавить новую"},
         {"command": "finished", "description": "Книги · Прочитанные"},
 
-        {"command": "kanban", "description": "Задачи · Канбан-доска"},
+        {"command": "plan", "description": "Задачи · Что на сегодня"},
+        {"command": "inbox", "description": "Задачи · Разобрать новые"},
+        {"command": "kanban", "description": "Задачи · Доска целиком"},
 
         {"command": "links", "description": "Ссылки · Сохранённые"},
         {"command": "addlink", "description": "Ссылки · Добавить"},

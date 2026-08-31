@@ -42,7 +42,7 @@ from app.db import (
     utcnow,
 )
 from app.ingest import TRILIUM_UNAVAILABLE_TEXT, handle_active_message
-from app.people import USER_NAMES
+from app.people import USER_NAMES, dative
 from app.prompts import (
     ACTIVITY_STEPS,
     BOOK_DETAILS_TEMPLATE,
@@ -57,6 +57,7 @@ from app import background, clippings, humanize, threads, triggers
 from app.telegram import (
     answer_callback_query,
     clear_reply_markup,
+    edit_message,
     send_message,
     send_message_get_id,
 )
@@ -67,6 +68,10 @@ from app.trilium_client import (
     add_book_quote,
     add_book_quotes,
     add_link,
+    KANBAN_BACKLOG,
+    KANBAN_DONE,
+    KANBAN_FUTURE,
+    set_card_label,
     create_book_review_note,
     extract_duration,
     fill_book_details,
@@ -77,6 +82,7 @@ from app.trilium_client import (
     get_book_quotes,
     get_finished_books,
     get_links,
+    get_planner_cards,
     get_note_labels,
     log_activity,
     normalize_book_title,
@@ -913,6 +919,212 @@ async def _handle_link_add_reply(
         return
     await close_prompt("link_add", prompt["id"])
     await _dismiss_thread_by_id(thread_id)
+
+
+
+# --- планировщик дня поверх канбан-доски ---------------------------------
+#
+# Колонка отвечает на вопрос «на какой стадии задача», дата — на вопрос
+# «когда я ей займусь». Это разные оси: задача может быть одновременно
+# запланированной на сегодня и уже в работе. Поэтому «сегодняшность» живёт
+# меткой #due, а доска не меняется вовсе — ни новых колонок, ни
+# переименований (см. PLAN-planner.md).
+#
+# Единственное движение колонок, которое делает бот, — «Потом» уводит
+# карточку в БУДУЩИЕ ЗАДАЧИ, то есть ровно туда, что эта колонка означает.
+
+_PLAN_TODAY = "pt"
+_PLAN_TOMORROW = "pm"
+_PLAN_LATER = "pl"
+_PLAN_HAND = "ph"
+_PLAN_DONE = "pd"
+
+
+def _mine(card: dict, person_name: str) -> bool:
+    """Своя задача или общая. Карточка без владельца видна обоим — так
+    ведут себя все, что были заведены до появления этой метки, и это же
+    оказалось удобным для совместных дел."""
+    return card["owner"] in ("", person_name)
+
+
+def _slices(cards: list[dict], person_name: str, today) -> tuple[list, list, list]:
+    """Инбокс, план на сегодня и просроченное — три среза одного списка."""
+    mine = [c for c in cards if _mine(c, person_name)]
+    inbox = [c for c in mine if c["due"] is None and c["status"] == KANBAN_BACKLOG]
+    live = [c for c in mine if c["due"] is not None and c["status"] != KANBAN_DONE]
+    return (
+        inbox,
+        [c for c in live if c["due"] == today],
+        sorted([c for c in live if c["due"] < today], key=lambda c: c["due"]),
+    )
+
+
+def _other_person(person_name: str) -> str | None:
+    return next((n for n in USER_NAMES.values() if n != person_name), None)
+
+
+def _inbox_buttons(note_id: str, person_name: str) -> list[tuple[str, str]]:
+    buttons = [
+        ("Сегодня", f"{_PLAN_TODAY}:{note_id}"),
+        ("Завтра", f"{_PLAN_TOMORROW}:{note_id}"),
+        ("Потом", f"{_PLAN_LATER}:{note_id}"),
+    ]
+    other = _other_person(person_name)
+    if other:
+        buttons.append((dative(other), f"{_PLAN_HAND}:{note_id}"))
+    return buttons
+
+
+def _inbox_card_text(card: dict, remaining: int) -> str:
+    return f"<b>{html.escape(card['title'])}</b>\n\nВ инбоксе: {remaining}"
+
+
+async def show_inbox(user_id: int, trigger_message_id: int | None = None) -> None:
+    """/inbox — разбор по одной задаче. Состояния нигде не держим: в кнопке
+    лежит note_id, а следующая карточка каждый раз вычисляется из доски
+    заново. Значит разбор переживает и перезапуск бота, и параллельный
+    разбор со стороны второго человека."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
+    try:
+        cards = await get_planner_cards()
+    except Exception:
+        traceback.print_exc()
+        await threads.send(thread_id, user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+
+    inbox, _today, _overdue = _slices(cards, person_name, datetime.now(TIMEZONE).date())
+    if not inbox:
+        await threads.send(thread_id, user_id, "Инбокс пуст.")
+        return
+
+    card = inbox[0]
+    await threads.send(
+        thread_id, user_id, _inbox_card_text(card, len(inbox)),
+        parse_mode="HTML", buttons=_inbox_buttons(card["note_id"], person_name), row_width=2,
+    )
+
+
+async def show_plan(user_id: int, trigger_message_id: int | None = None) -> None:
+    """/plan — что назначено на сегодня, плюс всё просроченное отдельно.
+    Просроченное показывается вместе с сегодняшним намеренно: задача,
+    которую вчера не сделал, никуда не делась, и прятать её значит
+    потерять."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    today = datetime.now(TIMEZONE).date()
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
+    try:
+        cards = await get_planner_cards()
+    except Exception:
+        traceback.print_exc()
+        await threads.send(thread_id, user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+
+    inbox, planned, overdue = _slices(cards, person_name, today)
+    if not planned and not overdue:
+        hint = f" В инбоксе {len(inbox)} — разобрать: /inbox" if inbox else ""
+        await threads.send(thread_id, user_id, f"На сегодня ничего не запланировано.{hint}")
+        return
+
+    lines = [f"<b>На сегодня, {humanize.format_date(today)}</b>"]
+    lines += [f"{i}. {html.escape(c['title'])}" for i, c in enumerate(planned, 1)]
+    if overdue:
+        lines.append("")
+        lines.append("<b>Просрочено:</b>")
+        lines += [
+            f"{i}. {html.escape(c['title'])} <i>({humanize.format_date(c['due'])})</i>"
+            for i, c in enumerate(overdue, len(planned) + 1)
+        ]
+    buttons = [(f"✓ {c['title']}", f"{_PLAN_DONE}:{c['note_id']}") for c in planned + overdue]
+    await threads.send(
+        thread_id, user_id, "\n".join(lines), parse_mode="HTML", buttons=buttons,
+    )
+
+
+async def handle_planner_action(callback_query: dict) -> None:
+    """Любая кнопка планировщика. После действия карточка перерисовывается
+    на месте — при разборе это следующая задача в том же сообщении, а не
+    новое сообщение поверх отвеченного."""
+    data = callback_query.get("data") or ""
+    action, _, note_id = data.partition(":")
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    person_name = USER_NAMES.get(chat_id, str(chat_id))
+    today = datetime.now(TIMEZONE).date()
+
+    try:
+        if action == _PLAN_TODAY:
+            await set_card_label(note_id, "due", today.isoformat())
+            note = "Сегодня"
+        elif action == _PLAN_TOMORROW:
+            await set_card_label(note_id, "due", (today + timedelta(days=1)).isoformat())
+            note = "Завтра"
+        elif action == _PLAN_LATER:
+            await set_card_label(note_id, "status", KANBAN_FUTURE)
+            note = "Отложил"
+        elif action == _PLAN_HAND:
+            other = _other_person(person_name)
+            if other is None:
+                await answer_callback_query(callback_query["id"], "Некому передать.")
+                return
+            await set_card_label(note_id, "owner", other)
+            note = f"Передал {dative(other)}"
+        elif action == _PLAN_DONE:
+            await set_card_label(note_id, "status", KANBAN_DONE)
+            note = "Готово"
+        else:
+            await answer_callback_query(callback_query["id"])
+            return
+    except Exception:
+        traceback.print_exc()
+        await answer_callback_query(callback_query["id"], "Trilium недоступен.")
+        return
+
+    await answer_callback_query(callback_query["id"], note)
+
+    if action == _PLAN_DONE:
+        await _redraw_plan(chat_id, message_id, person_name, today)
+    else:
+        await _redraw_inbox(chat_id, message_id, person_name, today)
+
+
+async def _redraw_inbox(chat_id: int, message_id: int, person_name: str, today) -> None:
+    try:
+        inbox, _planned, _overdue = _slices(await get_planner_cards(), person_name, today)
+    except Exception:
+        traceback.print_exc()
+        return
+    if not inbox:
+        await edit_message(chat_id, message_id, "Инбокс разобран.")
+        return
+    card = inbox[0]
+    await edit_message(
+        chat_id, message_id, _inbox_card_text(card, len(inbox)),
+        buttons=_inbox_buttons(card["note_id"], person_name), parse_mode="HTML", row_width=2,
+    )
+
+
+async def _redraw_plan(chat_id: int, message_id: int, person_name: str, today) -> None:
+    try:
+        _inbox, planned, overdue = _slices(await get_planner_cards(), person_name, today)
+    except Exception:
+        traceback.print_exc()
+        return
+    if not planned and not overdue:
+        await edit_message(chat_id, message_id, "На сегодня всё сделано.")
+        return
+    lines = [f"<b>На сегодня, {humanize.format_date(today)}</b>"]
+    lines += [f"{i}. {html.escape(c['title'])}" for i, c in enumerate(planned, 1)]
+    if overdue:
+        lines.append("")
+        lines.append("<b>Просрочено:</b>")
+        lines += [
+            f"{i}. {html.escape(c['title'])} <i>({humanize.format_date(c['due'])})</i>"
+            for i, c in enumerate(overdue, len(planned) + 1)
+        ]
+    buttons = [(f"✓ {c['title']}", f"{_PLAN_DONE}:{c['note_id']}") for c in planned + overdue]
+    await edit_message(chat_id, message_id, "\n".join(lines), buttons=buttons, parse_mode="HTML")
 
 
 def _chunk(entries: list[str], header: str) -> list[str]:

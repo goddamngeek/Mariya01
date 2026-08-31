@@ -40,3 +40,13 @@ def format_reminder_message(
     sender_name = sender_raw.capitalize()
     verb = "просил" if USER_GENDER.get(sender_id) == "m" else "просила"
     return f"{sender_name} {verb} передать, что {message}"
+
+
+# Кому передают задачу — «Остапу», а не «Остап»: на кнопке это действие, а
+# не подпись. Словарём, потому что склонение двух имён правилами выводить
+# дороже, чем перечислить.
+NAME_DATIVE = {"МАША": "Маше", "ОСТАП": "Остапу"}
+
+
+def dative(name: str) -> str:
+    return NAME_DATIVE.get(name, name.capitalize())

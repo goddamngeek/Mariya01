@@ -22,7 +22,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
-from app.trilium_client import get_active_reading_books, inspect_note
+from app.trilium_client import get_active_reading_books, get_planner_cards, inspect_note
 
 router = APIRouter(prefix="/sync")
 
@@ -242,6 +242,27 @@ async def note(title: str):
     """Диагностика: что реально лежит в заметке — заголовок, лейблы и
     содержимое. Для проверки того, что бот записал."""
     return await inspect_note(title)
+
+
+@router.get("/planner", dependencies=[Depends(require_bearer)])
+async def planner():
+    """Диагностика: как планировщик видит доску — инбокс, сегодня и
+    просроченное для каждого человека (см. show_plan в app/service.py).
+    Чтобы проверять срезы на живых карточках, не проходя весь путь через
+    Telegram."""
+    from app.service import _slices
+    today = datetime.now(TIMEZONE).date()
+    cards = await get_planner_cards()
+    result = {}
+    for name, _uid in NAME_TO_USER_ID.items():
+        inbox, planned, overdue = _slices(cards, name, today)
+        result[name] = {
+            "inbox": [c["title"] for c in inbox],
+            "today": [c["title"] for c in planned],
+            "overdue": [f"{c['title']} ({c['due']})" for c in overdue],
+        }
+    result["_всего карточек"] = len(cards)
+    return result
 
 
 @router.get("/recent_incoming", dependencies=[Depends(require_bearer)])

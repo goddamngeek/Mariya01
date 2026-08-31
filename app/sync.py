@@ -22,6 +22,7 @@ from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
+from app.firefly_client import list_asset_accounts, recent_transactions
 from app.trilium_client import get_active_reading_books, get_planner_cards, inspect_note
 
 router = APIRouter(prefix="/sync")
@@ -281,3 +282,27 @@ async def recent_incoming(user_id: int):
         for r in await get_recent_incoming_messages(user_id)
     ]
 
+
+@router.get("/firefly_accounts", dependencies=[Depends(require_bearer)])
+async def firefly_accounts():
+    """Диагностика: счета каждого человека так, как их видит бот — это и
+    есть будущие кнопки при записи траты. Первое, что стоит проверить
+    после выдачи токена: ошибка тут означает неверный токен или адрес, а не
+    что-то в потоке диалога.
+
+    Ошибка одного человека не роняет ответ целиком: у Маши токена может
+    ещё не быть, и это не повод не показать счета Остапа."""
+    result = {}
+    for name, uid in NAME_TO_USER_ID.items():
+        try:
+            result[name] = await list_asset_accounts(uid)
+        except Exception as exc:
+            result[name] = {"error": f"{type(exc).__name__}: {exc}"}
+    return result
+
+
+@router.get("/firefly_recent", dependencies=[Depends(require_bearer)])
+async def firefly_recent(user_id: int, limit: int = 10):
+    """Диагностика: последние операции одного человека — чтобы видеть, что
+    бот записал на самом деле, не открывая Firefly."""
+    return await recent_transactions(user_id, limit)

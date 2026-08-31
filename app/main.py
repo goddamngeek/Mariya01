@@ -17,6 +17,7 @@ from app.db import (
 )
 from app.ingest import send_day_summary, send_kanban_status, send_week_summary
 from app.odysseus_client import close_client as close_odysseus_client
+from app.firefly_client import close_client as close_firefly_client
 from app.trilium_client import close_client as close_trilium_client
 from app import background, parables, threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
@@ -105,6 +106,7 @@ async def lifespan(app: FastAPI):
     await close_telegram_client()
     await close_odysseus_client()
     await close_trilium_client()
+    await close_firefly_client()
     await close_pool()
 
 

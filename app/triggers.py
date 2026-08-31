@@ -1,5 +1,3 @@
-import re
-
 """What an incoming message is asking for, decided by keywords alone.
 
 Every one of these is the same shape of guess: does the text contain the
@@ -21,6 +19,8 @@ doesn't recognise falls through to app/ingest.py's handle_active_message,
 which handles the rest. That split is about which module owns the flow, not
 about precedence — precedence is entirely this file's business.
 """
+
+import re
 
 # --- app/service.py's own (multi-step dialogues) ---------------------------
 
@@ -213,3 +213,19 @@ def classify(text: str) -> str | None:
     """The name of the first rule this text matches, or None for a message
     that isn't asking for anything in particular (general Q&A)."""
     return next((name for name, matches in PRECEDENCE if matches(text)), None)
+
+
+_NOTE_VERB_RE = re.compile(
+    r"^\s*(запиши|зафиксируй|запомни|занеси)\w*\s*[,:—-]?\s*(что\s+)?",
+    re.IGNORECASE,
+)
+
+
+def strip_note_verb(text: str) -> str:
+    """«запиши, что я купил велосипед» -> «я купил велосипед».
+
+    Просьба записать — не часть записи. Убираем только ведущий глагол и
+    следующее за ним «что»: всё остальное человек сформулировал сам и
+    трогать это нечего."""
+    stripped = _NOTE_VERB_RE.sub("", text, count=1).strip()
+    return stripped or text.strip()

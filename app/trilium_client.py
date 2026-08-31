@@ -1240,3 +1240,28 @@ async def log_activity(person_name: str, activity: str, feedback: str, score, du
     row[score_col] = {"v": int(score), "t": 2}
 
     await _put_content(client, note_id, json.dumps(data))
+
+
+@_needs_trilium
+async def append_journal(person_name: str, entry: str) -> None:
+    """Одна запись в личный журнал человека — заметка «Журнал — {ИМЯ}»,
+    формат строки тот же, что писал Odysseus: дата, тире, текст.
+
+    Пишется ДОСЛОВНО. Раньше это шло через агентный цикл, который
+    пересказывал сообщение своими словами, и половина промпта в
+    app/prompts.py уговаривала его ничего не выбрасывать и не обобщать
+    конкретику до общих фраз. Уговоры не нужны, если не пересказывать:
+    человек сам решил, что записать, и сказал это своими словами.
+
+    В отличие от Odysseus заметку не создаём, если её нет: тихо завести
+    новый журнал в корне дерева — не то, что стоит делать молча. Исключение
+    оставляет сообщение неподтверждённым, и его можно записать повторно."""
+    client = get_client()
+    title = f"Журнал — {person_name}"
+    note_id = await _find_note_id(client, title)
+    if note_id is None:
+        raise TriliumNoteNotFoundError(f"Не нашёл заметку «{title}»")
+
+    stamp = datetime.now(TIMEZONE).strftime("%d.%m.%Y %H:%M")
+    existing = await _get_content(client, note_id)
+    await _put_content(client, note_id, existing + f"<p><b>{stamp}</b> — {html.escape(entry.strip())}</p>")

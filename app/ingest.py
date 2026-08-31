@@ -40,6 +40,7 @@ from app.telegram import send_message
 from app.trilium_client import (
     add_chinese_word,
     add_kanban_card,
+    append_journal,
     get_day_summary,
     get_week_summary,
     log_reminder_to_calendar,
@@ -228,6 +229,33 @@ async def _handle_kanban_add(message_id: int, user_id: int, text: str) -> None:
     await ack_incoming_messages([message_id])
 
 
+async def _handle_note_request(message_id: int, user_id: int, text: str) -> None:
+    """«запиши / зафиксируй / запомни» — дословно в личный журнал человека.
+
+    Раньше это был единственный оставшийся полноценный агентный вызов:
+    Odysseus получал сообщение, пересказывал его своими словами и сам решал,
+    в какую заметку положить. Половина промпта (app/prompts.py) уходила на
+    уговоры ничего не выбрасывать и не обобщать «прийти к Дмитрию Ицковичу с
+    журналом и конкретным предложением» до «достичь признания».
+
+    Уговаривать некого, если не пересказывать. Человек уже сформулировал,
+    что хочет запомнить, — записываем это, а не свою версию этого.
+
+    Не подтверждаем сообщение при неудаче: запись потеряется молча, а так
+    её можно повторить (/sync/reprocess_active)."""
+    person_name = USER_NAMES.get(user_id, str(user_id))
+    entry = triggers.strip_note_verb(text)
+    try:
+        await append_journal(person_name, entry)
+    except Exception:
+        print(f"append_journal failed for user={user_id}:", flush=True)
+        traceback.print_exc()
+        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+    await send_message(user_id, "Записал.")
+    await ack_incoming_messages([message_id])
+
+
 async def _chat_with_session(
     user_id: int, message: str, base_url: str, model: str, system_prompt: str,
     require_tool: bool = False, require_tool_type: str | None = None,
@@ -350,6 +378,11 @@ async def handle_active_message(
         # only ever a single narrow extraction — never the full agent loop,
         # sessions, or Odysseus's require_tool retry dance (see
         # extract_fields_via_llm).
+        # Журнал пишется дословно из кода бота — см. _handle_note_request.
+        if trigger == "note_request":
+            await _handle_note_request(message_id, user_id, text)
+            return
+
         if trigger == "chinese_word":
             await _handle_chinese_word(message_id, user_id, text)
             return
@@ -361,42 +394,20 @@ async def handle_active_message(
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)
         system_prompt = _build_prompt(user_id, "активное")
 
-        note_intent = trigger == "note_request"
-        finance_intent = note_intent and triggers.is_finance(text)
-
-        # require_tool_type is now ALSO how Odysseus scopes which tools the
-        # model is even offered (see _TOOLS_BY_REQUIRE_TYPE in
-        # webhook_routes.py) — not just which fallback to run. Confirmed
-        # live: a message with NO matching intent ("это на какую дату ты
-        # спрашиваешь") still had schedule_send available (the old
-        # relevant_tools set was static, every tool offered on every single
-        # call regardless of relevance) and the model called it anyway,
-        # relaying a week-old test message to Masha completely unprompted.
-        # So every distinct intent still routed through Odysseus gets its
-        # own specific string, and the unclassified case sends an explicit
-        # "general" instead of omitting the field, so general chat never
-        # has schedule_send or any other write tool available at all.
-        if finance_intent:
-            require_tool_type = "trilium_notes_finance"
-        elif note_intent:
-            require_tool_type = "trilium_notes"
-        else:
-            require_tool_type = "general"
+        # Единственное, что ещё живёт в Odysseus, — свободный разговор.
+        # Записи в журнал, напоминания, канбан, книги, ежедневник и деньги
+        # бот делает сам; сюда доходит только то, что ничем не является.
+        # "general" передаётся явно, а не опускается: этим Odysseus решает,
+        # какие тулы вообще предложить модели, и пустое поле когда-то
+        # означало «все» — модель увидела schedule_send и переслала Маше
+        # недельной давности тестовое сообщение без всякой просьбы.
+        require_tool_type = "general"
 
         result = await _chat_with_session(
             user_id, tagged_text, base_url, model, system_prompt,
-            require_tool=note_intent,
+            require_tool=False,
             require_tool_type=require_tool_type,
         )
-        # finance_intent can't be true without note_intent, so note_intent
-        # alone is the whole condition.
-        if note_intent and result.get("forced_fallback") is False:
-            # Both the model and the deterministic fallback failed to act —
-            # unlike passive messages there's no 60s retry poll for active
-            # ones, so this is a real, visible loss, not just a delayed retry.
-            print(f"handle_active_message: {require_tool_type} not delivered for "
-                  f"incoming id={message_id} (require_tool fallback failed)", flush=True)
-
         answer = (result.get("response") or "").strip()
         if answer and not await send_message(user_id, answer):
             print(f"failed to deliver active answer to user={user_id}", flush=True)

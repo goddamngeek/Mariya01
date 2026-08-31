@@ -137,58 +137,6 @@ def is_relay_or_reminder(text: str) -> bool:
     lowered = text.lower()
     return any(kw in lowered for kw in _RELAY_OR_REMINDER_KEYWORDS)
 
-
-_CHINESE_WORD_VERBS = ("добавь", "запиши", "выучил", "выучила", "новое слово", "занеси")
-
-
-def is_chinese_word(text: str) -> bool:
-    """"добавь иероглиф ..." — needs an explicit add verb beside the Chinese
-    context, so a plain "покажи иероглифы" (no read path implemented) falls
-    through to general Q&A instead of misfiring an add."""
-    lowered = text.lower()
-    if "иероглиф" not in lowered and "китайск" not in lowered:
-        return False
-    return any(v in lowered for v in _CHINESE_WORD_VERBS)
-
-
-_SALE_KEYWORDS = ("продал", "продала", "продажа", "выручил", "выручила")
-
-
-def is_sale(text: str) -> bool:
-    """"продал куртку за 3000"."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _SALE_KEYWORDS)
-
-
-_NOTE_REQUEST_KEYWORDS = ("запиши", "зафиксируй", "запомни", "занеси")
-
-
-def is_note_request(text: str) -> bool:
-    """"запиши...", "зафиксируй что...", "запомни это" — an explicit ask to
-    log something. Last in precedence because its verbs are the most
-    generic ones here; "добавь" only counts with "заметк"/"журнал" beside
-    it, or it would swallow every other add-shaped intent."""
-    lowered = text.lower()
-    if any(kw in lowered for kw in _NOTE_REQUEST_KEYWORDS):
-        return True
-    return "добавь" in lowered and any(kw in lowered for kw in ("заметк", "журнал"))
-
-
-_MONEY_KEYWORDS = (
-    "потратил", "потратила", "заработал", "заработала", "купил", "купила",
-    "₽", "руб", "доллар", "евро", "€", "цена", "стоит", "стоимост",
-)
-
-
-def is_finance(text: str) -> bool:
-    """Not a trigger of its own — a modifier on is_note_request, deciding
-    whether the entry goes to ФИНАНСЫ // FINANCE instead of the person's own
-    journal. Only ever consulted alongside an explicit log verb, so a
-    passing mention of money in conversation is never auto-filed."""
-    lowered = text.lower()
-    return any(kw in lowered for kw in _MONEY_KEYWORDS)
-
-
 # Most specific first. A message satisfying two rules belongs to whichever
 # appears earlier, so anything sharing context words with a broader rule has
 # to sit above it: kanban_add over kanban_status (both say "канбан"),
@@ -203,9 +151,6 @@ PRECEDENCE = (
     ("kanban_add", is_kanban_add),
     ("kanban_status", is_kanban_status),
     ("relay_or_reminder", is_relay_or_reminder),
-    ("chinese_word", is_chinese_word),
-    ("sale", is_sale),
-    ("note_request", is_note_request),
 )
 
 
@@ -214,18 +159,3 @@ def classify(text: str) -> str | None:
     that isn't asking for anything in particular (general Q&A)."""
     return next((name for name, matches in PRECEDENCE if matches(text)), None)
 
-
-_NOTE_VERB_RE = re.compile(
-    r"^\s*(запиши|зафиксируй|запомни|занеси)\w*\s*[,:—-]?\s*(что\s+)?",
-    re.IGNORECASE,
-)
-
-
-def strip_note_verb(text: str) -> str:
-    """«запиши, что я купил велосипед» -> «я купил велосипед».
-
-    Просьба записать — не часть записи. Убираем только ведущий глагол и
-    следующее за ним «что»: всё остальное человек сформулировал сам и
-    трогать это нечего."""
-    stripped = _NOTE_VERB_RE.sub("", text, count=1).strip()
-    return stripped or text.strip()

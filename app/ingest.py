@@ -27,7 +27,6 @@ from app.db import (
 from app.odysseus_client import (
     SessionNotFoundError,
     agent_chat,
-    extract_fields_via_llm,
     get_active_endpoint,
     parse_time_via_llm,
 )
@@ -38,13 +37,10 @@ from app import humanize, threads, triggers
 from app.reminders import schedule_reminder
 from app.telegram import send_message
 from app.trilium_client import (
-    add_chinese_word,
     add_kanban_card,
-    append_journal,
     get_day_summary,
     get_week_summary,
     log_reminder_to_calendar,
-    log_sale,
     read_kanban_status,
 )
 
@@ -150,65 +146,6 @@ async def _handle_relay_or_reminder(message_id: int, user_id: int, text: str) ->
 
     await ack_incoming_messages([message_id])
 
-
-NOT_UNDERSTOOD_TEXT = "Не понял детали — напиши ещё раз, что именно записать."
-
-
-async def _handle_chinese_word(message_id: int, user_id: int, text: str) -> None:
-    """"добавь иероглиф 你好, пиньинь ni hao, тон 3, значение привет" — the
-    person_name is already known (user_id); everything else needs reading
-    free text, so a narrow LLM extraction call replaces the full agent loop."""
-    person_name = USER_NAMES.get(user_id, str(user_id))
-    fields = await extract_fields_via_llm(
-        text,
-        "Пользователь добавляет китайское слово в словарь. Извлеки из его "
-        "сообщения поля JSON: hieroglyph (иероглиф), pinyin (транскрипция "
-        "пиньинь), tone (тон, число), translation (перевод на русский). "
-        "translation и hieroglyph обязательны.",
-    )
-    if not fields or not fields.get("hieroglyph") or not fields.get("translation"):
-        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
-        await ack_incoming_messages([message_id])
-        return
-
-    try:
-        await add_chinese_word(
-            person_name, fields["hieroglyph"], fields.get("pinyin", ""),
-            str(fields.get("tone") or ""), fields["translation"],
-        )
-        await send_message(user_id, f"Добавил «{fields['hieroglyph']}» в словарь.")
-    except Exception:
-        print(f"_handle_chinese_word failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
-    await ack_incoming_messages([message_id])
-
-
-
-async def _handle_sale(message_id: int, user_id: int, text: str) -> None:
-    """"продал куртку за 3000"."""
-    person_name = USER_NAMES.get(user_id, str(user_id))
-    fields = await extract_fields_via_llm(
-        text,
-        "Пользователь сообщает о продаже. Извлеки из его сообщения поля "
-        "JSON: item (что продано) и status (цена и/или дата, как есть в "
-        "сообщении, произвольный текст, можно пусто). item обязателен.",
-    )
-    if not fields or not fields.get("item"):
-        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
-        await ack_incoming_messages([message_id])
-        return
-
-    try:
-        await log_sale(person_name, fields["item"], fields.get("status", ""))
-        await send_message(user_id, f"Записал продажу «{fields['item']}».")
-    except Exception:
-        print(f"_handle_sale failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
-    await ack_incoming_messages([message_id])
-
-
 async def _handle_kanban_add(message_id: int, user_id: int, text: str) -> None:
     """«добавь в канбан купить молоко» — заголовок отрезается регуляркой
     (см. triggers.strip_task_prefix), без обращения к модели.
@@ -227,34 +164,6 @@ async def _handle_kanban_add(message_id: int, user_id: int, text: str) -> None:
         traceback.print_exc()
         await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
     await ack_incoming_messages([message_id])
-
-
-async def _handle_note_request(message_id: int, user_id: int, text: str) -> None:
-    """«запиши / зафиксируй / запомни» — дословно в личный журнал человека.
-
-    Раньше это был единственный оставшийся полноценный агентный вызов:
-    Odysseus получал сообщение, пересказывал его своими словами и сам решал,
-    в какую заметку положить. Половина промпта (app/prompts.py) уходила на
-    уговоры ничего не выбрасывать и не обобщать «прийти к Дмитрию Ицковичу с
-    журналом и конкретным предложением» до «достичь признания».
-
-    Уговаривать некого, если не пересказывать. Человек уже сформулировал,
-    что хочет запомнить, — записываем это, а не свою версию этого.
-
-    Не подтверждаем сообщение при неудаче: запись потеряется молча, а так
-    её можно повторить (/sync/reprocess_active)."""
-    person_name = USER_NAMES.get(user_id, str(user_id))
-    entry = triggers.strip_note_verb(text)
-    try:
-        await append_journal(person_name, entry)
-    except Exception:
-        print(f"append_journal failed for user={user_id}:", flush=True)
-        traceback.print_exc()
-        await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
-        return
-    await send_message(user_id, "Записал.")
-    await ack_incoming_messages([message_id])
-
 
 async def _chat_with_session(
     user_id: int, message: str, base_url: str, model: str, system_prompt: str,
@@ -378,17 +287,6 @@ async def handle_active_message(
         # only ever a single narrow extraction — never the full agent loop,
         # sessions, or Odysseus's require_tool retry dance (see
         # extract_fields_via_llm).
-        # Журнал пишется дословно из кода бота — см. _handle_note_request.
-        if trigger == "note_request":
-            await _handle_note_request(message_id, user_id, text)
-            return
-
-        if trigger == "chinese_word":
-            await _handle_chinese_word(message_id, user_id, text)
-            return
-        if trigger == "sale":
-            await _handle_sale(message_id, user_id, text)
-            return
 
         base_url, model = await get_active_endpoint()
         tagged_text = _tag_message(user_id, text, received_at, reply_to_text)

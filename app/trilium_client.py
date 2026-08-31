@@ -476,56 +476,6 @@ async def log_reminder_to_calendar(sender_name: str, target_name: str, message: 
     except Exception as exc:
         print(f"log_reminder_to_calendar failed (non-fatal): {exc!r}", flush=True)
 
-
-@_needs_trilium
-async def log_sale(person_name: str, item: str, status: str = "") -> None:
-    """Log one sale as a new card on the ПРОДАЖИ board — same board-view
-    mechanism as the Kanban task board, just a different domain (each
-    card's #status here holds a price/date, not a workflow stage)."""
-    client = get_client()
-    board_id = await _find_note_id(client, "ПРОДАЖИ // SALES")
-    if board_id is None:
-        raise TriliumNoteNotFoundError("Could not find the ПРОДАЖИ // SALES board.")
-
-    create_resp = await client.post(
-        f"{TRILIUM_URL}/etapi/create-note",
-        json={"parentNoteId": board_id, "title": item, "type": "text", "content": ""},
-    )
-    create_resp.raise_for_status()
-    note_id = create_resp.json()["note"]["noteId"]
-
-    if status:
-        await _create_attribute(client, note_id, "label", "status", status)
-    await _create_attribute(client, note_id, "label", "owner", person_name)
-
-
-@_needs_trilium
-async def add_chinese_word(
-    person_name: str, hieroglyph: str, pinyin: str = "", tone: str = "",
-    translation: str = "", status: str = "новое",
-) -> None:
-    """Add one hieroglyph to Ostap's Chinese-vocabulary board (ЖИЗНЬ >
-    РУТИНА > КИТАЙСКИЙ > ОСТАП > ИЕРОГЛИФЫ) — a board-view Collection
-    note; each word becomes its own child note, with pinyin/tone/status as
-    labels and the translation as the note's own content."""
-    client = get_client()
-    board_id = await _find_note_id(client, "ИЕРОГЛИФЫ")
-    if board_id is None:
-        raise TriliumNoteNotFoundError("Could not find the ИЕРОГЛИФЫ board.")
-
-    create_resp = await client.post(
-        f"{TRILIUM_URL}/etapi/create-note",
-        json={"parentNoteId": board_id, "title": hieroglyph, "type": "text",
-              "content": f"<p>{translation}</p>"},
-    )
-    create_resp.raise_for_status()
-    note_id = create_resp.json()["note"]["noteId"]
-
-    for name, value in [("pinyin", pinyin), ("tone", tone), ("status", status), ("owner", person_name)]:
-        if value:
-            await _create_attribute(client, note_id, "label", name, value)
-
-
 @_needs_trilium
 async def add_book(person_name: str, title: str, author: str = "") -> str:
     """Add a new book note under КНИГИ, templated from _ШАБЛОН_КНИГА via a
@@ -1241,27 +1191,3 @@ async def log_activity(person_name: str, activity: str, feedback: str, score, du
 
     await _put_content(client, note_id, json.dumps(data))
 
-
-@_needs_trilium
-async def append_journal(person_name: str, entry: str) -> None:
-    """Одна запись в личный журнал человека — заметка «Журнал — {ИМЯ}»,
-    формат строки тот же, что писал Odysseus: дата, тире, текст.
-
-    Пишется ДОСЛОВНО. Раньше это шло через агентный цикл, который
-    пересказывал сообщение своими словами, и половина промпта в
-    app/prompts.py уговаривала его ничего не выбрасывать и не обобщать
-    конкретику до общих фраз. Уговоры не нужны, если не пересказывать:
-    человек сам решил, что записать, и сказал это своими словами.
-
-    В отличие от Odysseus заметку не создаём, если её нет: тихо завести
-    новый журнал в корне дерева — не то, что стоит делать молча. Исключение
-    оставляет сообщение неподтверждённым, и его можно записать повторно."""
-    client = get_client()
-    title = f"Журнал — {person_name}"
-    note_id = await _find_note_id(client, title)
-    if note_id is None:
-        raise TriliumNoteNotFoundError(f"Не нашёл заметку «{title}»")
-
-    stamp = datetime.now(TIMEZONE).strftime("%d.%m.%Y %H:%M")
-    existing = await _get_content(client, note_id)
-    await _put_content(client, note_id, existing + f"<p><b>{stamp}</b> — {html.escape(entry.strip())}</p>")

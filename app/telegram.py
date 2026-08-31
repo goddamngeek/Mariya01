@@ -232,6 +232,7 @@ async def set_bot_commands() -> None:
         {"command": "addbook", "description": "Книги · Добавить новую"},
         {"command": "finished", "description": "Книги · Прочитанные"},
 
+        {"command": "task", "description": "Задачи · Добавить в инбокс"},
         {"command": "plan", "description": "Задачи · Что на сегодня"},
         {"command": "inbox", "description": "Задачи · Разобрать новые"},
         {"command": "kanban", "description": "Задачи · Доска целиком"},

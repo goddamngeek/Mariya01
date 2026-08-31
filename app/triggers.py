@@ -1,3 +1,5 @@
+import re
+
 """What an incoming message is asking for, decided by keywords alone.
 
 Every one of these is the same shape of guess: does the text contain the
@@ -93,6 +95,28 @@ def is_kanban_add(text: str) -> bool:
     if not has_kanban_context:
         return False
     return any(v in lowered for v in _KANBAN_ADD_VERBS)
+
+
+_TASK_PREFIX_RE = re.compile(
+    r"^\s*(?:добав(?:ь|ить)|закин(?:ь|уть)|созда(?:й|ть)|занеси|поставь)\s*"
+    r"(?:(?:в|на)\s+)?(?:канбан\w*|доск\w+|бэклог\w*)?\s*"
+    r"(?:(?:в|на)\s+)?(?:задач\w*|таск\w*)?\s*[:\-—,]*\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_task_prefix(text: str) -> str:
+    """«добавь в канбан купить молоко» → «купить молоко».
+
+    Раньше заголовок вытаскивала языковая модель — сетевой вызов и
+    агентный цикл ради того, чтобы отрезать два слова в начале. Приставка
+    тут всегда одной формы (глагол, необязательное «в канбан», необязательное
+    «задачу»), так что регулярка справляется и делает это мгновенно.
+
+    Если после среза ничего не осталось, отдаём исходный текст: пусть
+    задача называется неудачно, но не пропадает."""
+    stripped = _TASK_PREFIX_RE.sub("", text, count=1).strip()
+    return stripped or text.strip()
 
 
 def is_kanban_status(text: str) -> bool:

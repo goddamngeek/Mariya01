@@ -111,6 +111,15 @@ CREATE TABLE IF NOT EXISTS activity_prompts (
 -- exchange and closes the prompt with it 5 minutes after the person goes
 -- quiet, rather than leaving a half-answered "Какую книгу?" sitting in the
 -- chat forever.
+CREATE TABLE IF NOT EXISTS task_add_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    thread_id INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS link_add_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -807,6 +816,7 @@ _PROMPT_TABLES = {
     "review": "book_review_prompts",
     "book_add": "book_add_prompts",
     "link_add": "link_add_prompts",
+    "task_add": "task_add_prompts",
 }
 
 # ежедневник outranks everything (priority 0): it's the one scheduled
@@ -827,9 +837,22 @@ UNION ALL
 SELECT 'book_add', id, updated_at, 1 FROM book_add_prompts WHERE user_id = $1 AND is_open
 UNION ALL
 SELECT 'link_add', id, updated_at, 1 FROM link_add_prompts WHERE user_id = $1 AND is_open
+UNION ALL
+SELECT 'task_add', id, updated_at, 1 FROM task_add_prompts WHERE user_id = $1 AND is_open
 ORDER BY priority, updated_at DESC
 LIMIT 1
 """
+
+
+async def open_task_add_prompt(user_id: int, thread_id: int | None) -> int:
+    """Ждём следующим сообщением текст задачи."""
+    pool = await get_pool()
+    now = utcnow()
+    return await pool.fetchval(
+        "INSERT INTO task_add_prompts (user_id, sent_at, updated_at, is_open, thread_id) "
+        "VALUES ($1, $2, $2, TRUE, $3) RETURNING id",
+        user_id, now, thread_id,
+    )
 
 
 async def open_link_add_prompt(user_id: int, thread_id: int | None) -> int:
@@ -920,7 +943,7 @@ async def get_stale_message_threads() -> list[asyncpg.Record]:
 
 _THREADED_PROMPT_TABLES = (
     "activity_prompts", "book_quote_prompts", "book_add_prompts", "book_review_prompts",
-    "link_add_prompts",
+    "link_add_prompts", "task_add_prompts",
 )
 
 

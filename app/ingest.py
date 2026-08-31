@@ -38,7 +38,6 @@ from app import humanize, threads, triggers
 from app.reminders import schedule_reminder
 from app.telegram import send_message
 from app.trilium_client import (
-    KANBAN_COLUMNS,
     add_chinese_word,
     add_kanban_card,
     get_day_summary,
@@ -210,28 +209,18 @@ async def _handle_sale(message_id: int, user_id: int, text: str) -> None:
 
 
 async def _handle_kanban_add(message_id: int, user_id: int, text: str) -> None:
-    """"добавь в канбан купить молоко" / "закинь задачу в работу"."""
+    """«добавь в канбан купить молоко» — заголовок отрезается регуляркой
+    (см. triggers.strip_task_prefix), без обращения к модели.
+
+    Колонку больше не выбираем: всё падает в БЭКЛОГ, то есть в инбокс, и
+    день ему назначается разбором в /inbox. Раньше модель угадывала
+    колонку из фразы — лишняя степень свободы, которая ничего не решала:
+    «в работе» осмысленно только когда ты и правда начал."""
     person_name = USER_NAMES.get(user_id, str(user_id))
-    fields = await extract_fields_via_llm(
-        text,
-        "Пользователь добавляет задачу на канбан-доску. Извлеки из его "
-        "сообщения поля JSON: title (короткое название задачи) и column "
-        "(ровно одно из: 'БЭКЛОГ // BACKLOG', 'БУДУЩИЕ ЗАДАЧИ // FUTURE "
-        "TASKS', 'В РАБОТЕ // IN PROGRESS', 'СДЕЛАНО // DONE' — если явно "
-        "не указано, в какую колонку класть, оставь пустым). title обязателен.",
-    )
-    if not fields or not fields.get("title"):
-        await send_message(user_id, NOT_UNDERSTOOD_TEXT)
-        await ack_incoming_messages([message_id])
-        return
-
-    column = fields.get("column") or "БЭКЛОГ // BACKLOG"
-    if column not in KANBAN_COLUMNS:
-        column = "БЭКЛОГ // BACKLOG"
-
+    title = triggers.strip_task_prefix(text)
     try:
-        await add_kanban_card(person_name, fields["title"], column)
-        await send_message(user_id, f"Добавил «{fields['title']}» в {column}.")
+        await add_kanban_card(person_name, title)
+        await send_message(user_id, f"Добавил «{title}» в инбокс.")
     except Exception:
         print(f"_handle_kanban_add failed for user={user_id}:", flush=True)
         traceback.print_exc()

@@ -19,6 +19,7 @@ from app.db import (
     close_ezhednevnik_prompt,
     close_prompt,
     open_link_add_prompt,
+    open_task_add_prompt,
     create_activity_prompt,
     create_book_add_prompt,
     create_book_quote_prompt,
@@ -67,6 +68,7 @@ from app.trilium_client import (
     add_book,
     add_book_quote,
     add_book_quotes,
+    add_kanban_card,
     add_link,
     KANBAN_BACKLOG,
     KANBAN_DONE,
@@ -871,6 +873,51 @@ async def show_links(user_id: int, trigger_message_id: int | None = None) -> Non
     await threads.send(thread_id, user_id, text)
 
 
+TASK_USAGE = "Что за задача? Напиши следующим сообщением."
+
+
+async def _write_task(user_id: int, thread_id: int | None, title: str) -> bool:
+    """Завести карточку. False — если текста нет."""
+    title = title.strip()
+    if not title:
+        return False
+    try:
+        await add_kanban_card(USER_NAMES.get(user_id, str(user_id)), title)
+    except Exception:
+        traceback.print_exc()
+        await threads.send(thread_id, user_id, TRILIUM_UNAVAILABLE_TEXT)
+        return True
+    await threads.send(thread_id, user_id, "Записал в инбокс. Разобрать: /inbox")
+    return True
+
+
+async def add_task_from_command(
+    user_id: int, text: str, trigger_message_id: int | None = None,
+) -> None:
+    """/task купить молоко — карточка сразу, без модели.
+
+    Всегда в БЭКЛОГ, то есть в инбокс: день назначается разбором, а не при
+    заведении. В этом весь смысл инбокса — кидать не думая."""
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
+    if await _write_task(user_id, thread_id, text[len("/task"):]):
+        await _dismiss_thread_by_id(thread_id)
+        return
+    await open_task_add_prompt(user_id, thread_id)
+    await threads.send(thread_id, user_id, TASK_USAGE)
+
+
+async def _handle_task_add_reply(
+    user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None,
+) -> None:
+    thread_id = prompt["thread_id"]
+    await threads.track(thread_id, telegram_message_id)
+    if not await _write_task(user_id, thread_id, text):
+        await threads.send(thread_id, user_id, TASK_USAGE)
+        return
+    await close_prompt("task_add", prompt["id"])
+    await _dismiss_thread_by_id(thread_id)
+
+
 async def _write_link(user_id: int, thread_id: int | None, text: str) -> bool:
     """Разобрать и записать. False — если ссылки в тексте не нашлось."""
     parsed = parse_link(text)
@@ -1306,6 +1353,7 @@ _PROMPT_HANDLERS = {
     "review": _handle_book_review_reply,
     "book_add": _handle_book_add_reply,
     "link_add": _handle_link_add_reply,
+    "task_add": _handle_task_add_reply,
 }
 
 

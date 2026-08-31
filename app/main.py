@@ -30,6 +30,7 @@ from app.service import (
     process_incoming_message,
     resend_ezhednevnik_question,
     show_finished_books,
+    add_task_from_command,
     show_inbox,
     show_links,
     show_plan,
@@ -60,6 +61,7 @@ HELP_TEXT = (
     "/finished — прочитанные книги\n"
     "\n"
     "ЗАДАЧИ\n"
+    "/task Текст — добавить задачу в инбокс\n"
     "/plan — что на сегодня\n"
     "/inbox — разобрать новые задачи по дням\n"
     "/kanban — канбан-доска целиком\n"
@@ -273,6 +275,10 @@ async def telegram_webhook(request: Request):
 
     if text.strip() == "/help":
         await send_message(chat_id, HELP_TEXT)
+        return {"ok": True}
+
+    if text.strip().startswith("/task"):
+        background.spawn(add_task_from_command(chat_id, text, message_id), "/task")
         return {"ok": True}
 
     if text.strip() == "/inbox":

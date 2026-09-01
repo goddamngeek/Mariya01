@@ -72,7 +72,6 @@ from app.trilium_client import (
     add_link,
     KANBAN_BACKLOG,
     KANBAN_DONE,
-    KANBAN_FUTURE,
     set_card_label,
     create_book_review_note,
     extract_duration,
@@ -1108,8 +1107,14 @@ async def handle_planner_action(callback_query: dict) -> None:
             await set_card_label(note_id, "due", (today + timedelta(days=1)).isoformat())
             note = "Завтра"
         elif action == _PLAN_LATER:
-            await set_card_label(note_id, "status", KANBAN_FUTURE)
-            note = "Отложил"
+            # «Потом» НИЧЕГО не меняет в задаче — только листает дальше.
+            # Раньше она ставила статус «БУДУЩИЕ ЗАДАЧИ», и задача пропадала
+            # из планировщика насовсем: ни инбокс, ни /plan таких не
+            # показывают никогда. То есть кнопка, которую жмут со смыслом
+            # «решу позже», означала «больше не спрашивай».
+            await answer_callback_query(callback_query["id"], "Потом")
+            await _redraw_inbox(chat_id, message_id, person_name, today, after=note_id)
+            return
         elif action == _PLAN_HAND:
             other = _other_person(person_name)
             if other is None:
@@ -1136,7 +1141,15 @@ async def handle_planner_action(callback_query: dict) -> None:
         await _redraw_inbox(chat_id, message_id, person_name, today)
 
 
-async def _redraw_inbox(chat_id: int, message_id: int, person_name: str, today) -> None:
+async def _redraw_inbox(
+    chat_id: int, message_id: int, person_name: str, today, after: str | None = None,
+) -> None:
+    """Следующая карточка инбокса в том же сообщении.
+
+    after — та, которую только что пролистали кнопкой «Потом»: показываем
+    идущую за ней, по кругу. Состояние по-прежнему нигде не хранится, его
+    заменяет note_id в кнопке, поэтому листание переживает и перезапуск
+    бота, и параллельный разбор со стороны второго человека."""
     try:
         inbox, _planned, _overdue = _slices(await get_planner_cards(), person_name, today)
     except Exception:
@@ -1145,7 +1158,15 @@ async def _redraw_inbox(chat_id: int, message_id: int, person_name: str, today) 
     if not inbox:
         await edit_message(chat_id, message_id, "Инбокс разобран.")
         return
-    card = inbox[0]
+
+    index = 0
+    if after is not None:
+        ids = [c["note_id"] for c in inbox]
+        if len(ids) == 1:
+            return  # листать некуда, перерисовка тем же текстом ничего не даст
+        if after in ids:
+            index = (ids.index(after) + 1) % len(ids)
+    card = inbox[index]
     await edit_message(
         chat_id, message_id, _inbox_card_text(card, len(inbox)),
         buttons=_inbox_buttons(card["note_id"], person_name), parse_mode="HTML", row_width=2,

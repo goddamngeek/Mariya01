@@ -1276,24 +1276,3 @@ async def archive_done_cards(board_name: str = "КАНБАН // KANBAN") -> list
         moved.append(note.get("title") or note_id)
 
     return moved
-
-
-@_needs_trilium
-async def normalize_card_statuses(board_name: str = "КАНБАН // KANBAN") -> list[str]:
-    """Одноразовое: всё, что не «в работе» и не «сделано», получает статус
-    БЭКЛОГ. Схлопывает бывшие «БУДУЩИЕ ЗАДАЧИ» и чинит карточки, заведённые
-    дочерней заметкой напрямую и оставшиеся без статуса вовсе."""
-    client = get_client()
-    board_id = await _find_note_id(client, board_name)
-    if board_id is None:
-        raise TriliumNoteNotFoundError(f"No board note titled '{board_name}' found.")
-    resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{board_id}")
-    resp.raise_for_status()
-    changed = []
-    for note in await _get_notes(client, resp.json().get("childNoteIds") or []):
-        status = _label(note, "status")
-        if status in (KANBAN_IN_PROGRESS, KANBAN_DONE):
-            continue
-        await set_card_label(note["noteId"], "status", KANBAN_BACKLOG)
-        changed.append(f"{note.get('title')}: {status or '(без статуса)'}")
-    return changed

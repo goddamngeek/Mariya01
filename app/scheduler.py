@@ -1,4 +1,5 @@
 import random
+import traceback
 from datetime import datetime, time, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -28,6 +29,7 @@ from app.db import (
     trim_chat_message_log,
 )
 from app import parables, threads
+from app.trilium_client import archive_done_cards
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
 from app.telegram import delete_messages, send_message, send_message_get_id
@@ -240,6 +242,23 @@ async def clear_chat_history(only_chat_id: int | None = None) -> None:
     await delete_messages([(row["chat_id"], row["message_id"]) for row in rows])
 
 
+async def archive_done_tasks() -> None:
+    """Еженедельная уборка доски: сделанное уезжает в архив.
+
+    Раз в неделю, а не при каждом «Готово», потому что карточку помечают
+    сделанной и руками в Trilium — сметать надо всё, а не только то, что
+    прошло через бота. Молча: это гигиена, а не событие, о котором стоит
+    писать людям."""
+    try:
+        moved = await archive_done_cards()
+    except Exception:
+        print("archive_done_tasks failed:", flush=True)
+        traceback.print_exc()
+        return
+    if moved:
+        print(f"архив задач: перенесено {len(moved)} — {'; '.join(moved)}", flush=True)
+
+
 async def start_scheduler() -> None:
     # Weekdays keep all three slots at their work-shaped times. Weekends get
     # the evening retrospective only, and later: asking "как проходит день"
@@ -317,6 +336,13 @@ async def start_scheduler() -> None:
         trigger="interval",
         seconds=60,
         id="release_due_water_reminders",
+    )
+    # Понедельник, раннее утро: неделя начинается с чистой доски, и в это
+    # время ничего другого не запускается.
+    scheduler.add_job(
+        archive_done_tasks,
+        trigger=CronTrigger(day_of_week="mon", hour=5, minute=0, timezone=TIMEZONE),
+        id="archive_done_tasks",
     )
     scheduler.add_job(
         trim_logs,

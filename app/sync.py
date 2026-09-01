@@ -19,7 +19,7 @@ from app.db import (
 from app.ingest import handle_active_message
 from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
-from app.scheduler import clear_chat_history, send_ezhednevnik_prompts
+from app.scheduler import archive_done_tasks, clear_chat_history, send_ezhednevnik_prompts
 from app.firefly_client import list_asset_accounts, list_categories, recent_transactions
 from app.trilium_client import get_active_reading_books, get_planner_cards, inspect_note
 
@@ -300,3 +300,11 @@ async def firefly_categories():
         except Exception as exc:
             result[name] = {"error": f"{type(exc).__name__}: {exc}"}
     return result
+
+
+@router.post("/archive_done", dependencies=[Depends(require_bearer)])
+async def archive_done():
+    """Ручной запуск еженедельной уборки доски — тем же кодом, что и
+    понедельничный тик, чтобы не ждать понедельника ради проверки."""
+    await archive_done_tasks()
+    return {"ok": True}

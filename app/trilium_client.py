@@ -1196,3 +1196,80 @@ async def log_activity(person_name: str, activity: str, feedback: str, score, du
 
     await _put_content(client, note_id, json.dumps(data))
 
+
+
+TASK_ARCHIVE_TITLE = "АРХИВ ЗАДАЧ // TASK ARCHIVE"
+
+
+@_needs_trilium
+async def archive_done_cards(board_name: str = "КАНБАН // KANBAN") -> list[str]:
+    """Унести сделанные карточки из-под доски в отдельную заметку-архив.
+
+    Зачем: сделанное копится вечно и его никто не убирает — на живой доске
+    оно занимало 11 карточек из 24. Планировщик тянет ВСЕХ детей доски при
+    каждом /inbox и /plan, чтобы узнать статус, так что балласт оплачивается
+    запросом на каждую карточку и каждый раз. Через полгода это сотня
+    запросов, из которых девяносто про давно закрытое.
+
+    Архив — соседняя заметка, а не дочерняя: ребёнок доски снова попал бы в
+    выборку карточек, и мы бы ничего не выиграли. История при этом цела,
+    карточки никуда не деваются, их просто не видно на доске.
+
+    Порядок операций важен. ETAPI не умеет менять родителя ветки (патчатся
+    только prefix и notePosition), поэтому перенос — это создать ветку в
+    архиве и удалить ветку под доской. Именно в таком порядке: удаление
+    ПОСЛЕДНЕЙ ветки заметки удаляет саму заметку, так что сначала должна
+    появиться новая.
+
+    Возвращает названия перенесённого."""
+    client = get_client()
+    board_id = await _find_note_id(client, board_name)
+    if board_id is None:
+        raise TriliumNoteNotFoundError(f"No board note titled '{board_name}' found.")
+
+    board_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{board_id}")
+    board_resp.raise_for_status()
+    board = board_resp.json()
+    child_ids = board.get("childNoteIds") or []
+    if not child_ids:
+        return []
+
+    archive_id = await _find_note_id(client, TASK_ARCHIVE_TITLE)
+    if archive_id is None:
+        parent_id = (board.get("parentNoteIds") or ["root"])[0]
+        create_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/create-note",
+            json={"parentNoteId": parent_id, "title": TASK_ARCHIVE_TITLE,
+                  "type": "text", "content": ""},
+        )
+        create_resp.raise_for_status()
+        archive_id = create_resp.json()["note"]["noteId"]
+        await cache_note_id(TASK_ARCHIVE_TITLE, archive_id)
+        print(f"planner: создан архив задач {archive_id}", flush=True)
+
+    moved = []
+    for note in await _get_notes(client, child_ids):
+        if _label(note, "status") != KANBAN_DONE:
+            continue
+        note_id = note.get("noteId")
+
+        branch_id = None
+        for candidate in note.get("parentBranchIds") or []:
+            branch_resp = await client.get(f"{TRILIUM_URL}/etapi/branches/{candidate}")
+            if branch_resp.status_code == 200 and branch_resp.json().get("parentNoteId") == board_id:
+                branch_id = candidate
+                break
+        if branch_id is None:
+            print(f"planner: не нашёл ветку доски у карточки {note_id}, пропускаю", flush=True)
+            continue
+
+        add_resp = await client.post(
+            f"{TRILIUM_URL}/etapi/branches",
+            json={"noteId": note_id, "parentNoteId": archive_id},
+        )
+        add_resp.raise_for_status()
+        drop_resp = await client.delete(f"{TRILIUM_URL}/etapi/branches/{branch_id}")
+        drop_resp.raise_for_status()
+        moved.append(note.get("title") or note_id)
+
+    return moved

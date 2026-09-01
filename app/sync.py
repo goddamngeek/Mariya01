@@ -313,4 +313,8 @@ async def archive_done():
 @router.post("/normalize_statuses", dependencies=[Depends(require_bearer)])
 async def normalize_statuses():
     """Одноразовый: свести колонки к трём. Удалить сразу после применения."""
-    return {"changed": await normalize_card_statuses()}
+    import traceback
+    try:
+        return {"changed": await normalize_card_statuses()}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "tb": traceback.format_exc()[-900:]}

@@ -21,7 +21,7 @@ from app.people import NAME_TO_USER_ID
 from app.reminders import schedule_reminder as schedule_reminder_now
 from app.scheduler import archive_done_tasks, clear_chat_history, send_ezhednevnik_prompts
 from app.firefly_client import list_asset_accounts, list_categories, recent_transactions
-from app.trilium_client import get_active_reading_books, get_planner_cards, inspect_note
+from app.trilium_client import normalize_card_statuses, get_active_reading_books, get_planner_cards, inspect_note
 
 router = APIRouter(prefix="/sync")
 
@@ -308,3 +308,9 @@ async def archive_done():
     понедельничный тик, чтобы не ждать понедельника ради проверки."""
     await archive_done_tasks()
     return {"ok": True}
+
+
+@router.post("/normalize_statuses", dependencies=[Depends(require_bearer)])
+async def normalize_statuses():
+    """Одноразовый: свести колонки к трём. Удалить сразу после применения."""
+    return {"changed": await normalize_card_statuses()}

@@ -90,9 +90,14 @@ def _needs_trilium(func):
 # Trilium's ETAPI has no bulk-fetch endpoint and no "search by missing
 # label" filter, so listing books or kanban cards means one request per
 # child. Done sequentially that is a round trip each, growing with the
-# library; done all at once it is a single wait. Bounded so a large vault
-# can't open dozens of simultaneous connections against Trilium.
-_MAX_PARALLEL_NOTE_FETCHES = 8
+# library; done all at once it is a single wait.
+#
+# Предел есть, потому что Trilium — один процесс, и заваливать его сотней
+# одновременных запросов незачем. Но 8 было слишком осторожно: доска на 24
+# карточки разбивалась на три волны вместо одной, и /inbox ждал впустую
+# две трети времени. 24 покрывают сегодняшнюю доску целиком, а дальше
+# растут волнами — это и есть смысл ограничения.
+_MAX_PARALLEL_NOTE_FETCHES = 24
 
 
 async def _get_notes(client: httpx.AsyncClient, note_ids: list[str]) -> list[dict]:

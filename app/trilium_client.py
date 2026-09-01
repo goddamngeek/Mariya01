@@ -387,6 +387,7 @@ async def add_kanban_card(
 
 
 KANBAN_BACKLOG = "БЭКЛОГ // BACKLOG"
+KANBAN_IN_PROGRESS = "В РАБОТЕ // IN PROGRESS"
 KANBAN_DONE = "СДЕЛАНО // DONE"
 
 

@@ -70,7 +70,6 @@ from app.trilium_client import (
     add_book_quotes,
     add_kanban_card,
     add_link,
-    KANBAN_BACKLOG,
     KANBAN_DONE,
     set_card_label,
     create_book_review_note,
@@ -994,9 +993,20 @@ def _mine(card: dict, person_name: str) -> bool:
 
 
 def _slices(cards: list[dict], person_name: str, today) -> tuple[list, list, list]:
-    """Инбокс, план на сегодня и просроченное — три среза одного списка."""
+    """Инбокс, план на сегодня и просроченное — три среза одного списка.
+
+    Инбокс — это «без даты и не сделано», а НЕ «лежит в колонке БЭКЛОГ».
+    Разница оказалась принципиальной: карточка, перенесённая в «БУДУЩИЕ
+    ЗАДАЧИ» руками или старой кнопкой «Потом», выпадала из инбокса (не
+    бэклог) и из /plan (нет даты) — то есть исчезала из бота насовсем. На
+    живой доске так потерялось семь задач. Сюда же попадают карточки вообще
+    без метки статуса: их заводит Trilium, когда дочернюю заметку создают
+    напрямую, а не перетаскиванием в колонку.
+
+    Иначе говоря, у задачи есть ровно два способа не спрашивать о себе:
+    получить день или быть сделанной."""
     mine = [c for c in cards if _mine(c, person_name)]
-    inbox = [c for c in mine if c["due"] is None and c["status"] == KANBAN_BACKLOG]
+    inbox = [c for c in mine if c["due"] is None and c["status"] != KANBAN_DONE]
     live = [c for c in mine if c["due"] is not None and c["status"] != KANBAN_DONE]
     return (
         inbox,

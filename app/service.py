@@ -54,7 +54,7 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app import background, clippings, humanize, threads, triggers
+from app import background, clippings, errors, humanize, threads, triggers
 from app.telegram import (
     answer_callback_query,
     clear_reply_markup,
@@ -104,6 +104,7 @@ async def _report_failure(
     read that failed, or an edit that patches an already-closed entry."""
     print(f"{label} failed for user={user_id}:", flush=True)
     traceback.print_exc()
+    errors.record(label, exc)
     await send_message(user_id, f"{text}: {type(exc).__name__}." + (_RETRY_HINT if retry else ""))
 
 

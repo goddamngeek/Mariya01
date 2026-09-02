@@ -1,3 +1,5 @@
+import os
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -18,7 +20,7 @@ from app.db import (
 from app.ingest import send_day_summary, send_kanban_status, send_week_summary
 from app.firefly_client import close_client as close_firefly_client
 from app.trilium_client import close_client as close_trilium_client
-from app import background, parables, threads
+from app import background, errors, parables, threads
 from app.scheduler import clear_chat_history, scheduler, start_scheduler
 from app.service import (
     handle_book_details_reply,
@@ -349,6 +351,27 @@ async def telegram_webhook(
     return {"ok": True}
 
 
+# Хеш коммита, если платформа его прокидывает, и время старта процесса.
+# started_at меняется на каждом деплое даже без переменных окружения —
+# этого достаточно, чтобы отличить новую сборку от старой. Без такого
+# маркера отладка превращалась в гадание: /health отвечает одинаково на
+# обеих, и можно двадцать раз подряд щупать старую версию, ища баг в уже
+# исправленном коде.
+_REV = next(
+    (os.environ[k] for k in ("BUILD_REV", "GIT_COMMIT", "NF_GIT_COMMIT", "SOURCE_COMMIT")
+     if os.environ.get(k)),
+    "unknown",
+)
+_STARTED_AT = datetime.now(TIMEZONE).isoformat(timespec="seconds")
+
+
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "rev": _REV, "started_at": _STARTED_AT}
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    errors.record(f"{request.method} {request.url.path}", exc)
+    traceback.print_exc()
+    return Response(status_code=500)

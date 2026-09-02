@@ -14,6 +14,8 @@ after 200 is already on its way back.
 import asyncio
 import traceback
 
+from app import errors
+
 # asyncio keeps only a weak reference to a task nothing else holds, so an
 # unreferenced fire-and-forget task can be garbage-collected mid-flight
 # (documented behavior) — these strong references are what keep it alive
@@ -27,9 +29,10 @@ async def _guard(coro, label: str) -> None:
     retrieved" long after the fact, detached from what caused it."""
     try:
         await coro
-    except Exception:
+    except Exception as exc:
         print(f"background task {label!r} failed:", flush=True)
         traceback.print_exc()
+        errors.record(label, exc)
 
 
 def spawn(coro, label: str) -> None:

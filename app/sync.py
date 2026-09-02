@@ -4,6 +4,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
+from app import errors
 from app.config import SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
@@ -308,3 +309,10 @@ async def archive_done():
     понедельничный тик, чтобы не ждать понедельника ради проверки."""
     await archive_done_tasks()
     return {"ok": True}
+
+
+@router.get("/errors", dependencies=[Depends(require_bearer)])
+async def recent_errors(limit: int = 10):
+    """Последние ошибки с трейсбеками — чтобы не деплоить ради того, чтобы
+    увидеть, что именно упало."""
+    return errors.recent(limit)

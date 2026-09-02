@@ -9,6 +9,10 @@ from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
     create_expense_prompt,
+    create_inbox_session,
+    get_inbox_session,
+    mark_inbox_handled,
+    touch_message_thread,
     get_expense_prompt,
     get_firefly_account,
     set_expense_transaction,
@@ -1080,15 +1084,19 @@ def _other_person(person_name: str) -> str | None:
     return next((n for n in USER_NAMES.values() if n != person_name), None)
 
 
-def _inbox_buttons(note_id: str, person_name: str) -> list[tuple[str, str]]:
+def _inbox_buttons(session_id: int, index: int, person_name: str) -> list[tuple[str, str]]:
+    """Кнопка адресует не карточку, а место в снимке: сессия плюс индекс.
+    Так «следующая» берётся из зафиксированного списка, а не из заново
+    прочитанной доски."""
+    ref = f"{session_id}:{index}"
     buttons = [
-        ("Сегодня", f"{_PLAN_TODAY}:{note_id}"),
-        ("Завтра", f"{_PLAN_TOMORROW}:{note_id}"),
-        ("Потом", f"{_PLAN_LATER}:{note_id}"),
+        ("Сегодня", f"{_PLAN_TODAY}:{ref}"),
+        ("Завтра", f"{_PLAN_TOMORROW}:{ref}"),
+        ("Потом", f"{_PLAN_LATER}:{ref}"),
     ]
     other = _other_person(person_name)
     if other:
-        buttons.append((dative(other), f"{_PLAN_HAND}:{note_id}"))
+        buttons.append((dative(other), f"{_PLAN_HAND}:{ref}"))
     return buttons
 
 
@@ -1097,10 +1105,16 @@ def _inbox_card_text(card: dict, remaining: int) -> str:
 
 
 async def show_inbox(user_id: int, trigger_message_id: int | None = None) -> None:
-    """/inbox — разбор по одной задаче. Состояния нигде не держим: в кнопке
-    лежит note_id, а следующая карточка каждый раз вычисляется из доски
-    заново. Значит разбор переживает и перезапуск бота, и параллельный
-    разбор со стороны второго человека."""
+    """/inbox — разбор по одной задаче.
+
+    Доска читается ОДИН раз, и порядок замораживается снимком в
+    inbox_sessions. Раньше следующая карточка вычислялась каждый раз из
+    свежепрочитанной доски: одно нажатие стоило полутора десятков запросов
+    к Trilium, а разбор одиннадцати задач — полутора сотен. Плюс порядок мог
+    съехать между нажатиями, и карточка показывалась дважды или пропускалась.
+
+    Снимок стареет — и это честно: разбор есть срез момента, заведённое
+    после приедет следующим заходом."""
     person_name = USER_NAMES.get(user_id, str(user_id))
     thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
     try:
@@ -1115,10 +1129,11 @@ async def show_inbox(user_id: int, trigger_message_id: int | None = None) -> Non
         await threads.send(thread_id, user_id, "Инбокс пуст.")
         return
 
-    card = inbox[0]
+    snapshot = [{"note_id": c["note_id"], "title": c["title"]} for c in inbox]
+    session_id = await create_inbox_session(user_id, snapshot, thread_id)
     await threads.send(
-        thread_id, user_id, _inbox_card_text(card, len(inbox)),
-        parse_mode="HTML", buttons=_inbox_buttons(card["note_id"], person_name), row_width=2,
+        thread_id, user_id, _inbox_card_text(snapshot[0], len(snapshot)),
+        parse_mode="HTML", buttons=_inbox_buttons(session_id, 0, person_name), row_width=2,
     )
 
 
@@ -1163,7 +1178,24 @@ async def handle_planner_action(callback_query: dict) -> None:
     на месте — при разборе это следующая задача в том же сообщении, а не
     новое сообщение поверх отвеченного."""
     data = callback_query.get("data") or ""
-    action, _, note_id = data.partition(":")
+    action, _, ref = data.partition(":")
+    # Две формы ссылки: «сессия:индекс» из разбора инбокса и голый note_id из
+    # /plan, где список короткий и снимок не нужен.
+    session = None
+    index = 0
+    if ":" in ref:
+        session = await get_inbox_session(int(ref.split(":")[0]))
+        if session is None:
+            await answer_callback_query(callback_query["id"], "Этот разбор уже неактуален.")
+            return
+        cards = json.loads(session["cards"]) if isinstance(session["cards"], str) else session["cards"]
+        index = int(ref.split(":")[1])
+        if index >= len(cards):
+            await answer_callback_query(callback_query["id"])
+            return
+        note_id = cards[index]["note_id"]
+    else:
+        note_id = ref
     message = callback_query.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
@@ -1184,7 +1216,8 @@ async def handle_planner_action(callback_query: dict) -> None:
             # показывают никогда. То есть кнопка, которую жмут со смыслом
             # «решу позже», означала «больше не спрашивай».
             await answer_callback_query(callback_query["id"], "Потом")
-            await _redraw_inbox(chat_id, message_id, person_name, today, after=note_id)
+            await touch_message_thread(session["thread_id"] if session else None)
+            await _redraw_inbox(chat_id, message_id, person_name, session, index)
             return
         elif action == _PLAN_HAND:
             other = _other_person(person_name)
@@ -1206,41 +1239,33 @@ async def handle_planner_action(callback_query: dict) -> None:
 
     await answer_callback_query(callback_query["id"], note)
 
-    if action == _PLAN_DONE:
+    if action == _PLAN_DONE or session is None:
         await _redraw_plan(chat_id, message_id, person_name, today)
-    else:
-        await _redraw_inbox(chat_id, message_id, person_name, today)
-
-
-async def _redraw_inbox(
-    chat_id: int, message_id: int, person_name: str, today, after: str | None = None,
-) -> None:
-    """Следующая карточка инбокса в том же сообщении.
-
-    after — та, которую только что пролистали кнопкой «Потом»: показываем
-    идущую за ней, по кругу. Состояние по-прежнему нигде не хранится, его
-    заменяет note_id в кнопке, поэтому листание переживает и перезапуск
-    бота, и параллельный разбор со стороны второго человека."""
-    try:
-        inbox, _planned, _overdue = _slices(await get_planner_cards(), person_name, today)
-    except Exception:
-        traceback.print_exc()
         return
-    if not inbox:
+    await mark_inbox_handled(session["id"], note_id)
+    await touch_message_thread(session["thread_id"])
+    session = await get_inbox_session(session["id"])
+    await _redraw_inbox(chat_id, message_id, person_name, session, index)
+
+
+async def _redraw_inbox(chat_id: int, message_id: int, person_name: str, session, index: int) -> None:
+    """Следующая неразобранная карточка снимка, по кругу. Ни одного запроса
+    к Trilium: список уже лежит в сессии."""
+    cards = json.loads(session["cards"]) if isinstance(session["cards"], str) else session["cards"]
+    handled = set(session["handled"] or [])
+    order = [i for i in range(1, len(cards) + 1)]
+    nxt = next(
+        (i % len(cards) for i in (index + o for o in order)
+         if cards[i % len(cards)]["note_id"] not in handled),
+        None,
+    )
+    if nxt is None:
         await edit_message(chat_id, message_id, "Инбокс разобран.")
         return
-
-    index = 0
-    if after is not None:
-        ids = [c["note_id"] for c in inbox]
-        if len(ids) == 1:
-            return  # листать некуда, перерисовка тем же текстом ничего не даст
-        if after in ids:
-            index = (ids.index(after) + 1) % len(ids)
-    card = inbox[index]
     await edit_message(
-        chat_id, message_id, _inbox_card_text(card, len(inbox)),
-        buttons=_inbox_buttons(card["note_id"], person_name), parse_mode="HTML", row_width=2,
+        chat_id, message_id,
+        _inbox_card_text(cards[nxt], len(cards) - len(handled)),
+        buttons=_inbox_buttons(session["id"], nxt, person_name), parse_mode="HTML", row_width=2,
     )
 
 

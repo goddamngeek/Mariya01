@@ -360,6 +360,21 @@ ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS firefly_account_id TEXT;
 -- счёт» (нужен id уже созданной транзакции, чтобы её поправить) и первого
 -- раза, когда счёт по умолчанию ещё не выбран и трату надо где-то
 -- подержать, пока человек его назовёт.
+-- Снимок инбокса на момент /inbox. Раньше «следующая карточка» считалась
+-- каждый раз из свежепрочитанной доски — то есть каждое нажатие кнопки
+-- стоило чтения всей доски целиком (полтора десятка запросов к Trilium), а
+-- порядок мог съехать между нажатиями, если второй человек разбирал свой
+-- инбокс параллельно. Снимок замораживает и то и другое: разбор — это срез
+-- момента, новое приедет следующим заходом.
+CREATE TABLE IF NOT EXISTS inbox_sessions (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    cards JSONB NOT NULL,
+    handled TEXT[] NOT NULL DEFAULT '{}',
+    thread_id INTEGER,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS expense_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -1136,4 +1151,43 @@ async def set_expense_transaction(prompt_id: int, transaction_id: str) -> None:
     pool = await get_pool()
     await pool.execute(
         "UPDATE expense_prompts SET transaction_id = $1 WHERE id = $2", transaction_id, prompt_id
+    )
+
+
+# --- разбор инбокса ---------------------------------------------------------
+
+async def create_inbox_session(user_id: int, cards: list[dict], thread_id: int | None) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "INSERT INTO inbox_sessions (user_id, cards, thread_id, created_at) "
+        "VALUES ($1, $2::jsonb, $3, $4) RETURNING id",
+        user_id, json.dumps(cards), thread_id, utcnow(),
+    )
+
+
+async def get_inbox_session(session_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM inbox_sessions WHERE id = $1", session_id)
+
+
+async def mark_inbox_handled(session_id: int, note_id: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE inbox_sessions SET handled = array_append(handled, $1) WHERE id = $2",
+        note_id, session_id,
+    )
+
+
+async def touch_message_thread(thread_id: int | None) -> None:
+    """Продлить ветку, ничего в неё не добавляя.
+
+    Разбор инбокса правит одно и то же сообщение через editMessageText, а не
+    шлёт новые, поэтому append_thread_message ему не подходит — а без
+    продления ветка считается заброшенной и уборщик сносит сообщение прямо
+    посреди разбора, через пять минут после /inbox."""
+    if thread_id is None:
+        return
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE message_threads SET updated_at = $1 WHERE id = $2", utcnow(), thread_id
     )

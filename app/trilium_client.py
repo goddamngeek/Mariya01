@@ -576,7 +576,7 @@ def _strip_html(fragment: str) -> str:
 
 
 @_needs_trilium
-async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str], dict[str, str]]:
+async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str], dict[str, str], list[tuple[str, str]]]:
     """Reverse of fill_book_details — reads back the note's title plus
     whatever's currently under each of the 4 template sections (see
     BOOK_DETAIL_HEADERS), for showing a book's description on demand (see
@@ -592,6 +592,17 @@ async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str]
     # Лейблы забираем из того же ответа: readingStart/readingEnd нужны для
     # шапки описания, а отдельного запроса за ними делать незачем.
     labels = {a["name"]: a["value"] for a in note.get("attributes", []) if a.get("type") == "label"}
+
+    # Оценка живёт не на книге, а на заметке отзыва — дочерней, её создаёт
+    # create_book_review_note с лейблами rating и owner. Отзывов может быть
+    # два: книгу читают оба, и оценки у них разные.
+    reviews = []
+    for child in await _get_notes(client, note.get("childNoteIds") or []):
+        child_labels = {
+            a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
+        }
+        if child_labels.get("rating"):
+            reviews.append((child_labels.get("owner", ""), child_labels["rating"]))
     content = await _get_content(client, note_id)
 
     details = {}
@@ -612,7 +623,7 @@ async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str]
         if text in ("scifi / drama / romance", "…"):
             text = ""
         details[header] = text
-    return title, details, _extract_quotes(content), labels
+    return title, details, _extract_quotes(content), labels, reviews
 
 
 @_needs_trilium

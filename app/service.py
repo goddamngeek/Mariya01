@@ -805,6 +805,21 @@ def _reading_dates(labels: dict) -> str:
     return ""
 
 
+def _ratings(reviews: list[tuple[str, str]]) -> str:
+    """«8/10» или «Остап 8/10 · Маша 9/10», если книгу оценили оба.
+
+    Имя подписывается только когда оценок больше одной: у своей книги
+    подпись «Остап» лишняя, а у общей без неё непонятно, чья цифра."""
+    if not reviews:
+        return ""
+    if len(reviews) == 1:
+        return f"{reviews[0][1]}/10"
+    return " · ".join(
+        f"{owner.capitalize()} {rating}/10" if owner else f"{rating}/10"
+        for owner, rating in reviews
+    )
+
+
 async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish_button: bool) -> None:
     """Shared by both lists' button handlers: strip the list's keyboard (so
     a second book can't be picked from the same message), then send that
@@ -824,7 +839,7 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     thread_id = thread["id"] if thread is not None else None
 
     try:
-        title, details, quotes, labels = await get_book_details(note_id)
+        title, details, quotes, labels, reviews = await get_book_details(note_id)
     except Exception as exc:
         await _report_failure(chat_id, "get_book_details", "Не получилось прочитать описание", exc)
         return
@@ -833,10 +848,10 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
         f"<b>{html.escape(header)}</b>\n{html.escape(details[header]) if details[header] else '—'}"
         for header in BOOK_DETAIL_HEADERS
     )
-    dates = _reading_dates(labels)
     header = f"<b>{html.escape(title)}</b>"
-    if dates:
-        header += f"\n<i>{dates}</i>"
+    subtitle = " · ".join(p for p in (_reading_dates(labels), _ratings(reviews)) if p)
+    if subtitle:
+        header += f"\n<i>{html.escape(subtitle)}</i>"
     body = f"{header}\n\n{sections}"
     # Sections are free text someone typed, so nothing bounds their length.
     # Over Telegram's limit the send fails outright and the button press

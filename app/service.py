@@ -780,6 +780,31 @@ async def show_finished_books(user_id: int, trigger_message_id: int | None = Non
     )
 
 
+def _reading_dates(labels: dict) -> str:
+    """«Читаю с 12.03.2026» или «12.03.2026 — 28.08.2026» под названием книги.
+
+    Даты лежат лейблами readingStart/readingEnd в формате Trilium
+    (ГГГГ-ММ-ДД). Проверяем значение на истинность, а не наличие метки:
+    очищенная в интерфейсе дата остаётся пустой строкой, а не исчезает.
+
+    Год показываем всегда: книгу читают месяцами, и «12 марта» без года
+    здесь двусмысленно, в отличие от подтверждений внутри одного дня."""
+    def fmt(raw: str) -> str:
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except ValueError:
+            return raw
+
+    start, end = labels.get("readingStart") or "", labels.get("readingEnd") or ""
+    if start and end:
+        return f"{fmt(start)} — {fmt(end)}"
+    if start:
+        return f"Читаю с {fmt(start)}"
+    if end:
+        return f"Дочитал {fmt(end)}"
+    return ""
+
+
 async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish_button: bool) -> None:
     """Shared by both lists' button handlers: strip the list's keyboard (so
     a second book can't be picked from the same message), then send that
@@ -799,7 +824,7 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     thread_id = thread["id"] if thread is not None else None
 
     try:
-        title, details, quotes = await get_book_details(note_id)
+        title, details, quotes, labels = await get_book_details(note_id)
     except Exception as exc:
         await _report_failure(chat_id, "get_book_details", "Не получилось прочитать описание", exc)
         return
@@ -808,7 +833,11 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
         f"<b>{html.escape(header)}</b>\n{html.escape(details[header]) if details[header] else '—'}"
         for header in BOOK_DETAIL_HEADERS
     )
-    body = f"<b>{html.escape(title)}</b>\n\n{sections}"
+    dates = _reading_dates(labels)
+    header = f"<b>{html.escape(title)}</b>"
+    if dates:
+        header += f"\n<i>{dates}</i>"
+    body = f"{header}\n\n{sections}"
     # Sections are free text someone typed, so nothing bounds their length.
     # Over Telegram's limit the send fails outright and the button press
     # looks like it did nothing at all; a visibly cut description is the

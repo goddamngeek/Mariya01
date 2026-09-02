@@ -576,7 +576,7 @@ def _strip_html(fragment: str) -> str:
 
 
 @_needs_trilium
-async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str]]:
+async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str], dict[str, str]]:
     """Reverse of fill_book_details — reads back the note's title plus
     whatever's currently under each of the 4 template sections (see
     BOOK_DETAIL_HEADERS), for showing a book's description on demand (see
@@ -587,7 +587,11 @@ async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str]
     client = get_client()
     note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
     note_resp.raise_for_status()
-    title = note_resp.json().get("title") or "(без названия)"
+    note = note_resp.json()
+    title = note.get("title") or "(без названия)"
+    # Лейблы забираем из того же ответа: readingStart/readingEnd нужны для
+    # шапки описания, а отдельного запроса за ними делать незачем.
+    labels = {a["name"]: a["value"] for a in note.get("attributes", []) if a.get("type") == "label"}
     content = await _get_content(client, note_id)
 
     details = {}
@@ -608,7 +612,7 @@ async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str]
         if text in ("scifi / drama / romance", "…"):
             text = ""
         details[header] = text
-    return title, details, _extract_quotes(content)
+    return title, details, _extract_quotes(content), labels
 
 
 @_needs_trilium

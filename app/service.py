@@ -8,6 +8,11 @@ from typing import Optional
 from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
+    create_expense_prompt,
+    get_expense_prompt,
+    get_firefly_account,
+    set_expense_transaction,
+    set_firefly_account,
     advance_activity_prompt_step,
     advance_book_quote_prompt_step,
     advance_ezhednevnik_step,
@@ -57,10 +62,18 @@ from app.prompts import (
 from app import background, clippings, errors, humanize, threads, triggers
 from app.telegram import (
     answer_callback_query,
+    delete_message,
+    send_message_with_buttons,
     clear_reply_markup,
     edit_message,
     send_message,
     send_message_get_id,
+)
+from app.firefly_client import (
+    create_expense,
+    find_by_external_id,
+    list_asset_accounts,
+    set_transaction_source,
 )
 from app.trilium_client import (
     BOOK_DETAIL_HEADERS,
@@ -148,6 +161,9 @@ async def process_incoming_message(
     # this stage doesn't own falls through to handle_active_message below,
     # which handles the rest of the names classify() can return.
     trigger = triggers.classify(text)
+    if trigger == "expense":
+        await start_expense_flow(user_id, text, telegram_message_id)
+        return
     if trigger == "activity":
         activity = triggers.activity_kind(text)
         await _start_activity_flow(user_id, text, reply_to_text, activity, telegram_message_id)
@@ -1530,3 +1546,140 @@ async def handle_clippings_file(user_id: int, raw: str) -> None:
     # Про новые книги спрашиваем подробности — по одной, после отчёта.
     for note_id, title, author in created_books:
         await _offer_book_details(user_id, note_id, title, author)
+
+
+# --- траты -----------------------------------------------------------------
+
+def _money(amount: str) -> str:
+    rubles = f"{int(float(amount)):,}".replace(",", " ")
+    kopecks = round(float(amount) % 1 * 100)
+    return f"{rubles}{f',{kopecks:02d}' if kopecks else ''} ₽"
+
+
+def _expense_line(amount: str, description: str, account: str) -> str:
+    return f"Записал: <b>{_money(amount)}</b> · {html.escape(description)} · {html.escape(account)}"
+
+
+async def _account_buttons(user_id: int, prompt_id: int) -> list[tuple[str, str]]:
+    return [
+        (a["name"], f"fx2:{prompt_id}:{a['id']}")
+        for a in await list_asset_accounts(user_id)
+    ]
+
+
+async def start_expense_flow(
+    user_id: int, text: str, telegram_message_id: int | None = None,
+) -> None:
+    """«потратил 1200 на продукты» — расход уходит в Firefly сразу.
+
+    Никаких вопросов при обычной трате: счёт берётся тот же, что в прошлый
+    раз, категория не спрашивается вовсе (в Firefly её удобнее проставлять
+    пачкой задним числом, на большом экране). Спросить приходится ровно
+    один раз — когда счёта по умолчанию ещё нет.
+
+    Подтверждение показывает разобранное целиком, и рядом кнопка сменить
+    счёт: разбор строки может ошибиться, и ошибка должна быть видна сразу,
+    а не всплыть в отчёте за квартал."""
+    parts = triggers.expense_parts(text)
+    if parts is None:
+        return
+    amount, description = parts
+    external_id = f"tg:{telegram_message_id}" if telegram_message_id else None
+    prompt_id = await create_expense_prompt(user_id, amount, description, external_id)
+
+    account_id = await get_firefly_account(user_id)
+    if account_id is None:
+        try:
+            buttons = await _account_buttons(user_id, prompt_id)
+        except Exception as exc:
+            await _report_failure(user_id, "list_asset_accounts", "Не получилось прочитать счета", exc)
+            return
+        if not buttons:
+            await send_message(user_id, "В Firefly нет ни одного счёта — заведи хотя бы один.")
+            return
+        await send_message_with_buttons(
+            user_id, f"{_money(amount)} · {html.escape(description)}\nС какого счёта?",
+            buttons, parse_mode="HTML", row_width=2,
+        )
+        return
+
+    await _write_expense(user_id, prompt_id, account_id)
+
+
+async def _write_expense(user_id: int, prompt_id: int, account_id: str) -> None:
+    """Создать трату в Firefly и подтвердить. Перед записью проверяем
+    external_id: телеграм передоставляет апдейт, если бот не ответил за
+    минуту, и дубль траты — не то же самое, что дубль заметки."""
+    prompt = await get_expense_prompt(prompt_id)
+    if prompt is None:
+        return
+    try:
+        if prompt["external_id"]:
+            existing = await find_by_external_id(user_id, prompt["external_id"])
+            if existing:
+                print(f"expense: {prompt['external_id']} уже записана, пропускаю", flush=True)
+                return
+        transaction_id = await create_expense(
+            user_id, prompt["amount"], prompt["description"], account_id,
+            prompt["description"], external_id=prompt["external_id"],
+        )
+        accounts = {a["id"]: a["name"] for a in await list_asset_accounts(user_id)}
+    except Exception as exc:
+        await _report_failure(user_id, "create_expense", "Не получилось записать трату", exc, retry=True)
+        return
+
+    await set_expense_transaction(prompt_id, transaction_id)
+    await set_firefly_account(user_id, account_id)
+    await send_message_with_buttons(
+        user_id,
+        _expense_line(prompt["amount"], prompt["description"], accounts.get(account_id, account_id)),
+        [("Другой счёт", f"fx:{prompt_id}")], parse_mode="HTML",
+    )
+
+
+async def handle_expense_change_account(callback_query: dict) -> None:
+    """«Другой счёт» под подтверждением — показать список прямо в этом же
+    сообщении."""
+    await answer_callback_query(callback_query["id"])
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    prompt_id = int((callback_query.get("data") or "fx:0").split(":")[1])
+    try:
+        buttons = await _account_buttons(chat_id, prompt_id)
+    except Exception:
+        traceback.print_exc()
+        return
+    await edit_message(chat_id, message.get("message_id"), "С какого счёта?", buttons=buttons, row_width=2)
+
+
+async def handle_expense_account_selected(callback_query: dict) -> None:
+    """Выбран счёт: либо это первая трата и её ещё нет в Firefly, либо
+    поправка уже записанной. Оба случая — один обработчик, потому что
+    решает наличие transaction_id, а не то, откуда пришло нажатие."""
+    await answer_callback_query(callback_query["id"])
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    _prefix, prompt_id_raw, account_id = (callback_query.get("data") or "").split(":", 2)
+    prompt_id = int(prompt_id_raw)
+
+    prompt = await get_expense_prompt(prompt_id)
+    if prompt is None or prompt["user_id"] != chat_id:
+        return
+
+    if prompt["transaction_id"]:
+        try:
+            await set_transaction_source(chat_id, prompt["transaction_id"], account_id)
+            accounts = {a["id"]: a["name"] for a in await list_asset_accounts(chat_id)}
+        except Exception as exc:
+            await _report_failure(chat_id, "set_transaction_source", "Не получилось поменять счёт", exc)
+            return
+        await set_firefly_account(chat_id, account_id)
+        await edit_message(
+            chat_id, message.get("message_id"),
+            _expense_line(prompt["amount"], prompt["description"], accounts.get(account_id, account_id)),
+            buttons=[("Другой счёт", f"fx:{prompt_id}")], parse_mode="HTML",
+        )
+        return
+
+    await delete_message(chat_id, message.get("message_id"))
+    await _write_expense(chat_id, prompt_id, account_id)

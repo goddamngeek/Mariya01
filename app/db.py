@@ -352,6 +352,23 @@ DROP TABLE IF EXISTS outgoing_messages;
 -- Odysseus убран целиком: свободный разговор им не пользовались,
 -- а всё остальное бот давно делает сам. Сессии хранить не для кого.
 ALTER TABLE registered_users DROP COLUMN IF EXISTS odysseus_session_id;
+-- Счёт, с которого человек платил в прошлый раз. Обычная трата уходит с
+-- него молча — выбор появляется только когда он реально нужен.
+ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS firefly_account_id TEXT;
+
+-- Одна трата, записанная строкой. Живёт ради двух вещей: кнопки «другой
+-- счёт» (нужен id уже созданной транзакции, чтобы её поправить) и первого
+-- раза, когда счёт по умолчанию ещё не выбран и трату надо где-то
+-- подержать, пока человек его назовёт.
+CREATE TABLE IF NOT EXISTS expense_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    amount TEXT NOT NULL,
+    description TEXT NOT NULL,
+    external_id TEXT,
+    transaction_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL
+);
 """
 
 _pool: asyncpg.Pool | None = None
@@ -1080,3 +1097,43 @@ async def claim_reminder(reminder_id: int) -> bool:
         utcnow(), reminder_id,
     )
     return result is not None
+
+
+# --- траты (Firefly) --------------------------------------------------------
+
+async def get_firefly_account(user_id: int) -> str | None:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT firefly_account_id FROM registered_users WHERE chat_id = $1", user_id
+    )
+
+
+async def set_firefly_account(user_id: int, account_id: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE registered_users SET firefly_account_id = $1 WHERE chat_id = $2",
+        account_id, user_id,
+    )
+
+
+async def create_expense_prompt(
+    user_id: int, amount: str, description: str, external_id: str | None,
+) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "INSERT INTO expense_prompts (user_id, amount, description, external_id, created_at) "
+        "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        user_id, amount, description, external_id, utcnow(),
+    )
+
+
+async def get_expense_prompt(prompt_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM expense_prompts WHERE id = $1", prompt_id)
+
+
+async def set_expense_transaction(prompt_id: int, transaction_id: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE expense_prompts SET transaction_id = $1 WHERE id = $2", transaction_id, prompt_id
+    )

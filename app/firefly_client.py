@@ -198,3 +198,18 @@ async def list_categories(user_id: int) -> list[dict]:
         {"id": item["id"], "name": item["attributes"]["name"]}
         for item in resp.json().get("data", [])
     ]
+
+
+@_needs_firefly
+async def set_transaction_source(user_id: int, transaction_id: str, source_id: str) -> None:
+    """Поменять счёт-источник у уже записанной траты — кнопка «другой счёт»
+    в подтверждении. Firefly обновляет транзакцию целиком, но принимает и
+    частичный набор полей: остальное остаётся как было."""
+    resp = await get_client().put(
+        f"{FIREFLY_URL}/api/v1/transactions/{transaction_id}",
+        headers=_headers(user_id),
+        json={"transactions": [{"source_id": str(source_id)}]},
+    )
+    if resp.status_code >= 400:
+        print(f"firefly set_transaction_source failed {resp.status_code}: {resp.text[:300]}", flush=True)
+    resp.raise_for_status()

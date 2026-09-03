@@ -1601,6 +1601,26 @@ async def handle_clippings_file(user_id: int, raw: str) -> None:
 # ошибается. Поэтому спрашиваем: описание сообщением, остальное кнопками из
 # того, что уже заведено, с возможностью написать своё.
 
+def _normalize_choice(value: str) -> str:
+    return " ".join(value.split()).lower().replace("ё", "е")
+
+
+def _match_existing(answer: str, candidates: list[str]) -> str:
+    """Написанное имя, схлопнутое к уже существующему, если оно то же самое.
+
+    Firefly заводит получателя, категорию и тэг по имени — и «Пятёрочка» с
+    «Пятерочкой» станут ДВУМЯ разными, молча разделив отчёты пополам.
+    Замечают такое через месяц. Сравниваем со схлопнутым регистром,
+    пробелами и «ё» — тот же приём, что normalize_book_title применяет к
+    названиям с читалки, которые тоже почти совпадают, но не побайтово.
+
+    Не совпало ни с чем — возвращаем как написано, это правда новое."""
+    target = _normalize_choice(answer)
+    return next(
+        (c for c in candidates if c and _normalize_choice(c) == target), answer.strip()
+    )
+
+
 def _money(amount: str) -> str:
     rubles = f"{int(float(amount)):,}".replace(",", " ")
     kopecks = round(float(amount) % 1 * 100)
@@ -1669,6 +1689,9 @@ async def _handle_expense_reply(
     await threads.track(prompt["thread_id"], telegram_message_id)
     answer = text.strip()
     step = prompt["step"]
+    # Списки, которыми задавался вопрос, уже лежат в строке — сверяемся с
+    # ними, не спрашивая Firefly заново.
+    candidates = json.loads(prompt["collected"] or "{}").get("candidates", [])
 
     if step == 0:
         await advance_expense_prompt(prompt["id"], 1, description=answer)
@@ -1678,7 +1701,9 @@ async def _handle_expense_reply(
         except Exception as exc:
             await _report_failure(user_id, "list_asset_accounts", "Не получилось прочитать счета", exc)
             return
-        match = next((a for a in accounts if a["name"].lower() == answer.lower()), None)
+        match = next(
+            (a for a in accounts if _normalize_choice(a["name"]) == _normalize_choice(answer)), None
+        )
         if match is None:
             await threads.send(
                 prompt["thread_id"], user_id,
@@ -1687,11 +1712,11 @@ async def _handle_expense_reply(
             return
         await advance_expense_prompt(prompt["id"], 2, account_id=match["id"])
     elif step == 2:
-        await advance_expense_prompt(prompt["id"], 3, destination=answer)
+        await advance_expense_prompt(prompt["id"], 3, destination=_match_existing(answer, candidates))
     elif step == 3:
-        await advance_expense_prompt(prompt["id"], 4, category=answer)
+        await advance_expense_prompt(prompt["id"], 4, category=_match_existing(answer, candidates))
     else:
-        await advance_expense_prompt(prompt["id"], 5, tag=answer)
+        await advance_expense_prompt(prompt["id"], 5, tag=_match_existing(answer, candidates))
 
     await _continue_expense(user_id, prompt["id"])
 

@@ -14,15 +14,25 @@
 """
 
 import functools
+from datetime import datetime
 
 import httpx
 
-from app.config import FIREFLY_TOKENS, FIREFLY_URL
+from app.config import FIREFLY_TOKENS, FIREFLY_URL, TIMEZONE
 from app.people import USER_NAMES
 
 
 class FireflyNotConfiguredError(Exception):
     pass
+
+
+class FireflyError(Exception):
+    """Ошибка Firefly вместе с ТЕЛОМ ответа.
+
+    httpx поднимает HTTPStatusError, в котором есть только код, а Firefly
+    на 422 объясняет в теле, какое поле не понравилось. Без тела ошибка
+    бесполезна: «422» не говорит ничего, а в /sync/errors попадает именно
+    текст исключения."""
 
 
 _client: httpx.AsyncClient | None = None
@@ -145,20 +155,21 @@ async def create_expense(
             "destination_name": destination_name,
         }]
     }
+    # Дата у транзакции обязательна — без неё Firefly отвечает 422. Раньше
+    # поле выбрасывалось, когда его не передали, и обычная трата «потратил
+    # 1200 на продукты» не записывалась вообще.
     tx = payload["transactions"][0]
+    tx["date"] = date or datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     if category_name:
         tx["category_name"] = category_name
     if external_id:
         tx["external_id"] = external_id
-    if not date:
-        tx.pop("date")
 
     resp = await get_client().post(
         f"{FIREFLY_URL}/api/v1/transactions", headers=_headers(user_id), json=payload,
     )
     if resp.status_code >= 400:
-        print(f"firefly create_expense failed {resp.status_code}: {resp.text[:400]}", flush=True)
-    resp.raise_for_status()
+        raise FireflyError(f"{resp.status_code} на создании траты: {resp.text[:400]}")
     return resp.json()["data"]["id"]
 
 
@@ -211,5 +222,4 @@ async def set_transaction_source(user_id: int, transaction_id: str, source_id: s
         json={"transactions": [{"source_id": str(source_id)}]},
     )
     if resp.status_code >= 400:
-        print(f"firefly set_transaction_source failed {resp.status_code}: {resp.text[:300]}", flush=True)
-    resp.raise_for_status()
+        raise FireflyError(f"{resp.status_code} на смене счёта: {resp.text[:300]}")

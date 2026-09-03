@@ -29,6 +29,7 @@ from app.db import (
     close_book_review_prompt,
     close_ezhednevnik_prompt,
     close_prompt,
+    _PROMPT_TABLES,
     open_link_add_prompt,
     open_task_add_prompt,
     create_activity_prompt,
@@ -1740,3 +1741,16 @@ async def handle_expense_choice(callback_query: dict) -> None:
     else:
         await advance_expense_prompt(prompt["id"], 4, category=value)
     await _continue_expense(chat_id, prompt["id"])
+
+
+# Траты определены ниже карты, поэтому дописываются сюда отдельно.
+_PROMPT_HANDLERS["expense"] = _handle_expense_reply
+
+# Каждый вид диалога должен быть и в карте таблиц (app/db.py), и в карте
+# обработчиков. Забыть одно из двух легко, и это не падает при импорте — оно
+# ждёт живого человека: get_open_prompt находит открытый вопрос, а получить
+# строку или позвать обработчик уже нечем, и бот молча зависает посреди
+# диалога. Так и случилось с тратами. Проверка на импорте ловит это до пуша.
+assert set(_PROMPT_TABLES) == set(_PROMPT_HANDLERS), (
+    f"виды диалогов разошлись: {set(_PROMPT_TABLES) ^ set(_PROMPT_HANDLERS)}"
+)

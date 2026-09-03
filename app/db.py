@@ -861,6 +861,7 @@ _PROMPT_TABLES = {
     "book_add": "book_add_prompts",
     "link_add": "link_add_prompts",
     "task_add": "task_add_prompts",
+    "expense": "expense_prompts",
 }
 
 # ежедневник outranks everything (priority 0): it's the one scheduled

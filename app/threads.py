@@ -42,6 +42,10 @@ from app.telegram import delete_message, delete_messages, send_message_get_id, s
 TTL_WATER = 2
 TTL_INFO = 3
 TTL_DIALOG = 5
+# Описание книги — четыре раздела свободным текстом, это дольше, чем ответ
+# на вопрос чек-ина. На пяти минутах шаблон успевал исчезнуть раньше, чем
+# человек дописывал.
+TTL_BOOK_DETAILS = 10
 # A day exactly: the morning thought is meant to be there all day and gone
 # by the time the next one arrives.
 TTL_DAY = 24 * 60

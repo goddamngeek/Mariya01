@@ -574,7 +574,7 @@ async def start_book_add_flow(
     # the thread signs off with this before tearing itself down, so the
     # book being added isn't left unconfirmed.
     thread_id = await threads.open_thread(
-        user_id, threads.TTL_DIALOG, telegram_message_id, closing_text="Добавил книгу",
+        user_id, threads.TTL_BOOK_DETAILS, telegram_message_id, closing_text="Добавил книгу",
     )
     prompt_id = await create_book_add_prompt(user_id, thread_id)
     if await threads.send(thread_id, user_id, book_add_step_text(0)) is None:
@@ -778,7 +778,7 @@ async def _show_book_list(
         return
 
     thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
-    buttons = [(book["title"], f"{prefix}:{book['note_id']}") for book in books]
+    buttons = [(_book_label(book), f"{prefix}:{book['note_id']}") for book in books]
     await threads.send(thread_id, user_id, "Какую книгу показать?", buttons=buttons)
 
 
@@ -828,6 +828,12 @@ def _reading_dates(labels: dict) -> str:
     return ""
 
 
+def _book_label(book: dict) -> str:
+    """«Автор — Название», или просто название, если автора нет."""
+    author = (book.get("author") or "").strip()
+    return f"{author} — {book['title']}" if author else book["title"]
+
+
 def _ratings(reviews: list[tuple[str, str]]) -> str:
     """«8/10» или «Остап 8/10 · Маша 9/10», если книгу оценили оба.
 
@@ -871,7 +877,7 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
         f"<b>{html.escape(header)}</b>\n{html.escape(details[header]) if details[header] else '—'}"
         for header in BOOK_DETAIL_HEADERS
     )
-    header = f"<b>{html.escape(title)}</b>"
+    header = f"<b>{html.escape(_book_label({'title': title, 'author': labels.get('author', '')}))}</b>"
     subtitle = " · ".join(p for p in (_reading_dates(labels), _ratings(reviews)) if p)
     if subtitle:
         header += f"\n<i>{html.escape(subtitle)}</i>"
@@ -890,6 +896,11 @@ async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish
     buttons = []
     if quotes:
         buttons.append((f"Интересные моменты ({len(quotes)})", f"im:{note_id}"))
+    # Заполнить или переписать четыре раздела шаблона можно в любой момент,
+    # а не только сразу после /addbook: диалог там живёт десять минут, и
+    # раньше не успевший его дозаполнить оставался с книгой в прочерках
+    # навсегда.
+    buttons.append(("Описание", f"bd:{note_id}"))
     if with_finish_button:
         buttons.append(("Я дочитал", f"fd:{note_id}"))
     await threads.send(thread_id, chat_id, body, parse_mode="HTML", buttons=buttons or None)
@@ -1481,7 +1492,7 @@ async def _offer_book_details(user_id: int, note_id: str, title: str, author: st
     же шаблон «расскажи подробнее», что и /addbook, и подключаем его к той
     же машинерии, чтобы ответ разложился по разделам заметки как обычно."""
     thread_id = await threads.open_thread(
-        user_id, threads.TTL_DIALOG, closing_text="Добавил книгу",
+        user_id, threads.TTL_BOOK_DETAILS, closing_text="Добавил книгу",
     )
     prompt_id = await create_book_add_prompt(user_id, thread_id)
     template_message_id = await threads.send(
@@ -1754,3 +1765,22 @@ _PROMPT_HANDLERS["expense"] = _handle_expense_reply
 assert set(_PROMPT_TABLES) == set(_PROMPT_HANDLERS), (
     f"виды диалогов разошлись: {set(_PROMPT_TABLES) ^ set(_PROMPT_HANDLERS)}"
 )
+
+
+async def handle_book_edit_details(callback_query: dict) -> None:
+    """«Описание» под книгой — открыть тот же шаблон «расскажи подробнее»,
+    что и /addbook, для уже существующей книги.
+
+    Нужен, потому что первый заход можно не успеть: диалог живёт десять
+    минут и уносит с собой шаблон. Раньше после этого книга оставалась с
+    прочерками навсегда — дописать было нечем."""
+    await answer_callback_query(callback_query["id"])
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    note_id = (callback_query.get("data") or "")[len("bd:"):]
+    try:
+        title, labels = await get_note_labels(note_id)
+    except Exception as exc:
+        await _report_failure(chat_id, "get_note_labels", "Не получилось прочитать книгу", exc)
+        return
+    await _offer_book_details(chat_id, note_id, title, labels.get("author", ""))

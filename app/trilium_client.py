@@ -729,7 +729,11 @@ async def _list_books(finished: bool) -> list[dict]:
             continue
         if bool(labels.get("readingEnd")) != finished:
             continue
-        books.append({"note_id": child_id, "title": child.get("title") or "(без названия)"})
+        books.append({
+            "note_id": child_id,
+            "title": child.get("title") or "(без названия)",
+            "author": labels.get("author", ""),
+        })
     return books
 
 

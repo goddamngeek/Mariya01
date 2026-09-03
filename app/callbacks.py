@@ -2,6 +2,7 @@ from app.db import is_registered
 from app.service import (
     handle_book_finished,
     handle_book_quotes_selected,
+    handle_book_edit_details,
     handle_expense_choice,
     handle_planner_action,
     handle_finished_book_selected,
@@ -36,6 +37,9 @@ async def process_callback_query(callback_query: dict) -> None:
             return
         if data.startswith("fd:"):
             await handle_book_finished(callback_query)
+            return
+        if data.startswith("bd:"):
+            await handle_book_edit_details(callback_query)
             return
         if data.startswith("im:"):
             await handle_book_quotes_selected(callback_query)

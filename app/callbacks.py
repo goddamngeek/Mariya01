@@ -2,8 +2,7 @@ from app.db import is_registered
 from app.service import (
     handle_book_finished,
     handle_book_quotes_selected,
-    handle_expense_account_selected,
-    handle_expense_change_account,
+    handle_expense_choice,
     handle_planner_action,
     handle_finished_book_selected,
     handle_quote_book_selected,
@@ -47,12 +46,9 @@ async def process_callback_query(callback_query: dict) -> None:
             await handle_planner_action(callback_query)
             return
 
-        # Траты: fx — «другой счёт» под подтверждением, fx2 — выбранный.
-        if data.startswith("fx2:"):
-            await handle_expense_account_selected(callback_query)
-            return
-        if data.startswith("fx:"):
-            await handle_expense_change_account(callback_query)
+        # Траты: ea — счёт, ed — получатель, ec — категория.
+        if data[:2] in ("ea", "ed", "ec") and data[2:3] == ":":
+            await handle_expense_choice(callback_query)
             return
 
     await answer_callback_query(callback_query["id"])

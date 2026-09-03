@@ -106,6 +106,20 @@ async def list_asset_accounts(user_id: int) -> list[dict]:
 
 
 @_needs_firefly
+async def list_expense_accounts(user_id: int, limit: int = 12) -> list[str]:
+    """Получатели, которые уже встречались, — кнопки шага «куда». Firefly
+    заводит расходный счёт сам при первой трате с новым именем, так что
+    список растёт без чьего-либо участия."""
+    resp = await get_client().get(
+        f"{FIREFLY_URL}/api/v1/accounts",
+        headers=_headers(user_id),
+        params={"type": "expense", "limit": limit},
+    )
+    resp.raise_for_status()
+    return [item["attributes"]["name"] for item in resp.json().get("data", [])]
+
+
+@_needs_firefly
 async def recent_transactions(user_id: int, limit: int = 10) -> list[dict]:
     """Последние операции — чтобы проверять, что записалось на самом деле,
     не открывая Firefly. Тот же приём, что /sync/note для Trilium."""

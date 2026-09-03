@@ -375,15 +375,42 @@ CREATE TABLE IF NOT EXISTS inbox_sessions (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+-- Трата, собираемая по шагам: сумма из сообщения, дальше «на что», счёт,
+-- получатель и категория. Из строки надёжно достаётся только число —
+-- остальное зависит от формулировки, поэтому спрашивается, а не угадывается.
+-- На каждом шаге кнопки с тем, что уже заведено, и можно написать своё.
 CREATE TABLE IF NOT EXISTS expense_prompts (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
     amount TEXT NOT NULL,
-    description TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     external_id TEXT,
     transaction_id TEXT,
+    step INTEGER NOT NULL DEFAULT 0,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    account_id TEXT,
+    destination TEXT,
+    category TEXT,
+    collected JSONB NOT NULL DEFAULT '{}'::jsonb,
+    thread_id INTEGER,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL
 );
+ALTER TABLE expense_prompts ALTER COLUMN description SET DEFAULT '';
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS step INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS account_id TEXT;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS destination TEXT;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- Строки, заведённые до пошагового диалога: у них описание уже заполнено, а
+-- шаг нулевой, потому что колонки тогда не было. is_open по умолчанию TRUE
+-- сделал бы их «открытым вопросом», и первое же сообщение человека уехало
+-- бы в них ответом. Закрываем — писать в Firefly им всё равно нечем.
+UPDATE expense_prompts SET is_open = FALSE WHERE step = 0 AND description <> '';
+CREATE INDEX IF NOT EXISTS expense_prompts_open_idx ON expense_prompts (user_id) WHERE is_open;
 """
 
 _pool: asyncpg.Pool | None = None
@@ -853,6 +880,8 @@ SELECT 'review', id, updated_at, 1 FROM book_review_prompts WHERE user_id = $1 A
 UNION ALL
 SELECT 'book_add', id, updated_at, 1 FROM book_add_prompts WHERE user_id = $1 AND is_open
 UNION ALL
+SELECT 'expense', id, updated_at, 1 FROM expense_prompts WHERE user_id = $1 AND is_open
+UNION ALL
 SELECT 'link_add', id, updated_at, 1 FROM link_add_prompts WHERE user_id = $1 AND is_open
 UNION ALL
 SELECT 'task_add', id, updated_at, 1 FROM task_add_prompts WHERE user_id = $1 AND is_open
@@ -1132,14 +1161,39 @@ async def set_firefly_account(user_id: int, account_id: str) -> None:
 
 
 async def create_expense_prompt(
-    user_id: int, amount: str, description: str, external_id: str | None,
+    user_id: int, amount: str, external_id: str | None, thread_id: int | None = None,
 ) -> int:
     pool = await get_pool()
+    now = utcnow()
     return await pool.fetchval(
-        "INSERT INTO expense_prompts (user_id, amount, description, external_id, created_at) "
-        "VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        user_id, amount, description, external_id, utcnow(),
+        "INSERT INTO expense_prompts (user_id, amount, external_id, thread_id, created_at, updated_at) "
+        "VALUES ($1, $2, $3, $4, $5, $5) RETURNING id",
+        user_id, amount, external_id, thread_id, now,
     )
+
+
+async def advance_expense_prompt(prompt_id: int, step: int, **fields) -> None:
+    """Шаг вперёд плюс любое из собранных полей — по одному на шаг."""
+    sets = ", ".join(f"{k} = ${i + 3}" for i, k in enumerate(fields))
+    pool = await get_pool()
+    await pool.execute(
+        f"UPDATE expense_prompts SET step = $2, updated_at = now()"
+        f"{', ' + sets if sets else ''} WHERE id = $1",
+        prompt_id, step, *fields.values(),
+    )
+
+
+async def set_expense_candidates(prompt_id: int, candidates: list) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE expense_prompts SET collected = $1::jsonb, updated_at = now() WHERE id = $2",
+        json.dumps({"candidates": candidates}), prompt_id,
+    )
+
+
+async def close_expense_prompt(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE expense_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
 
 
 async def get_expense_prompt(prompt_id: int) -> asyncpg.Record | None:

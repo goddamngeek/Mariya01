@@ -142,38 +142,26 @@ _SPEND_VERBS = ("потратил", "потратила", "купил", "куп�
 _AMOUNT_RE = re.compile(r"(\d[\d\s]*)(?:[.,](\d{1,2}))?")
 
 
-def expense_parts(text: str) -> tuple[str, str] | None:
-    """«потратил 1200 на продукты» -> ("1200.00", "продукты"), или None.
+def expense_amount(text: str) -> str | None:
+    """Сумма из «потратил 659 рублей на креатин» -> "659.00", или None.
 
-    Нужен и глагол траты, и число: одного глагола мало («купил бы»), одного
-    числа тем более. Пробелы внутри числа считаются разделителем тысяч —
-    так его и пишут руками («1 200»), — а запятая или точка отделяют копейки.
-
-    Описанием становится всё, что осталось после вычитания глагола и суммы,
-    без ведущих предлогов. Оно же уходит в Firefly именем получателя, и
-    расходный счёт с таким именем Firefly заводит себе сам."""
+    Из строки берётся ТОЛЬКО число: оно однозначно при любой формулировке,
+    а всё вокруг него — нет. Пробел внутри числа считается разделителем
+    тысяч («1 200»), запятая или точка отделяют копейки."""
     lowered = text.lower()
     if not any(v in lowered for v in _SPEND_VERBS):
         return None
     match = _AMOUNT_RE.search(text)
     if match is None:
         return None
-
     rubles = match.group(1).replace(" ", "")
     if not rubles:
         return None
-    amount = f"{int(rubles)}.{(match.group(2) or '0').ljust(2, '0')}"
-
-    rest = (text[:match.start()] + " " + text[match.end():])
-    for verb in _SPEND_VERBS:
-        rest = re.sub(verb + r"\w*", " ", rest, flags=re.IGNORECASE)
-    rest = re.sub(r"^[\s,.:—-]*(на|за|в|для)\b", " ", rest.strip(), flags=re.IGNORECASE)
-    rest = re.sub(r"\s+", " ", rest).strip(" ,.:—-")
-    return amount, rest or "Без описания"
+    return f"{int(rubles)}.{(match.group(2) or '0').ljust(2, '0')}"
 
 
 def is_expense(text: str) -> bool:
-    return expense_parts(text) is not None
+    return expense_amount(text) is not None
 
 
 # Most specific first. A message satisfying two rules belongs to whichever

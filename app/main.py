@@ -31,6 +31,7 @@ from app.service import (
     add_link_from_command,
     process_incoming_message,
     resend_ezhednevnik_question,
+    show_accounts,
     show_finished_books,
     add_task_from_command,
     show_inbox,
@@ -273,6 +274,10 @@ async def telegram_webhook(
         background.spawn(
             start_book_add_flow(chat_id, text, telegram_message_id=message_id), "/addbook",
         )
+        return {"ok": True}
+
+    if text.strip() == "/accounts":
+        background.spawn(show_accounts(chat_id, message_id), "/accounts")
         return {"ok": True}
 
     if text.strip() == "/reading":

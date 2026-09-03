@@ -3,6 +3,8 @@ from app.service import (
     handle_book_finished,
     handle_book_quotes_selected,
     handle_book_edit_details,
+    handle_account_new,
+    handle_account_role,
     handle_expense_choice,
     handle_planner_action,
     handle_finished_book_selected,
@@ -37,6 +39,12 @@ async def process_callback_query(callback_query: dict) -> None:
             return
         if data.startswith("fd:"):
             await handle_book_finished(callback_query)
+            return
+        if data == "na:new":
+            await handle_account_new(callback_query)
+            return
+        if data.startswith("nr:"):
+            await handle_account_role(callback_query)
             return
         if data.startswith("bd:"):
             await handle_book_edit_details(callback_query)

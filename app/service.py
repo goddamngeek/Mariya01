@@ -8,7 +8,11 @@ from typing import Optional
 from app.config import TIMEZONE
 from app.db import (
     ack_incoming_messages,
+    advance_account_prompt,
     advance_expense_prompt,
+    close_account_prompt,
+    create_account_prompt,
+    get_account_prompt,
     close_expense_prompt,
     create_expense_prompt,
     create_inbox_session,
@@ -75,6 +79,8 @@ from app.telegram import (
     send_message_get_id,
 )
 from app.firefly_client import (
+    ACCOUNT_ROLES,
+    create_asset_account,
     create_expense,
     list_categories,
     list_expense_accounts,
@@ -1765,16 +1771,6 @@ async def handle_expense_choice(callback_query: dict) -> None:
 
 
 # Траты определены ниже карты, поэтому дописываются сюда отдельно.
-_PROMPT_HANDLERS["expense"] = _handle_expense_reply
-
-# Каждый вид диалога должен быть и в карте таблиц (app/db.py), и в карте
-# обработчиков. Забыть одно из двух легко, и это не падает при импорте — оно
-# ждёт живого человека: get_open_prompt находит открытый вопрос, а получить
-# строку или позвать обработчик уже нечем, и бот молча зависает посреди
-# диалога. Так и случилось с тратами. Проверка на импорте ловит это до пуша.
-assert set(_PROMPT_TABLES) == set(_PROMPT_HANDLERS), (
-    f"виды диалогов разошлись: {set(_PROMPT_TABLES) ^ set(_PROMPT_HANDLERS)}"
-)
 
 
 async def handle_book_edit_details(callback_query: dict) -> None:
@@ -1794,3 +1790,122 @@ async def handle_book_edit_details(callback_query: dict) -> None:
         await _report_failure(chat_id, "get_note_labels", "Не получилось прочитать книгу", exc)
         return
     await _offer_book_details(chat_id, note_id, title, labels.get("author", ""))
+
+
+# --- счета ------------------------------------------------------------------
+
+async def show_accounts(user_id: int, trigger_message_id: int | None = None) -> None:
+    """/accounts — какие счета есть и сколько на них, плюс кнопка завести
+    новый. Заводится только основной счёт: получателей, категории и тэги
+    Firefly создаёт сам при первой операции с новым именем."""
+    thread_id = await threads.open_thread(user_id, threads.TTL_INFO, trigger_message_id)
+    try:
+        accounts = await list_asset_accounts(user_id)
+    except Exception as exc:
+        await _report_failure(user_id, "list_asset_accounts", "Не получилось прочитать счета", exc)
+        return
+    lines = [
+        f"<b>{html.escape(a['name'])}</b> — {_money(a['balance'] or '0')}"
+        for a in accounts
+    ] or ["Счетов пока нет."]
+    await threads.send(
+        thread_id, user_id, "\n".join(lines), parse_mode="HTML",
+        buttons=[("Завести счёт", "na:new")],
+    )
+
+
+async def handle_account_new(callback_query: dict) -> None:
+    await answer_callback_query(callback_query["id"])
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    thread = await threads.thread_for_message(chat_id, message.get("message_id"))
+    thread_id = thread["id"] if thread is not None else await threads.open_thread(
+        chat_id, threads.TTL_DIALOG,
+    )
+    prompt_id = await create_account_prompt(chat_id, thread_id)
+    await threads.send(thread_id, chat_id, "Как назвать счёт?")
+    await advance_account_prompt(prompt_id, 0)
+
+
+async def handle_account_role(callback_query: dict) -> None:
+    await answer_callback_query(callback_query["id"])
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    _prefix, prompt_id_raw, role = (callback_query.get("data") or "").split(":", 2)
+    prompt = await get_account_prompt(int(prompt_id_raw))
+    if prompt is None or not prompt["is_open"] or prompt["user_id"] != chat_id:
+        return
+    await clear_reply_markup(chat_id, message.get("message_id"))
+    await advance_account_prompt(prompt["id"], 2, role=role)
+    await threads.send(prompt["thread_id"], chat_id, "Сколько на нём сейчас? (0 — если пусто)")
+
+
+async def _handle_account_reply(
+    user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None = None,
+) -> None:
+    """Название, остаток и — только у кредитки — день платежа. Тип
+    спрашивается кнопками (см. handle_account_role): вариантов ровно
+    четыре, и Firefly принимает не любые слова, а свои четыре значения."""
+    await threads.track(prompt["thread_id"], telegram_message_id)
+    answer = text.strip()
+    step = prompt["step"]
+
+    if step == 0:
+        await advance_account_prompt(prompt["id"], 1, name=answer)
+        await threads.send(
+            prompt["thread_id"], user_id, "Какого он типа?",
+            buttons=[(label, f"nr:{prompt['id']}:{role}") for role, label in ACCOUNT_ROLES.items()],
+            row_width=2,
+        )
+        return
+
+    if step == 2:
+        balance = re.sub(r"[^\d.,-]", "", answer).replace(",", ".") or "0"
+        if prompt["role"] == "ccAsset":
+            await advance_account_prompt(prompt["id"], 3, opening_balance=balance)
+            await threads.send(prompt["thread_id"], user_id, "Какого числа списывается платёж?")
+            return
+        await advance_account_prompt(prompt["id"], 3, opening_balance=balance)
+        await _create_account(user_id, prompt["id"])
+        return
+
+    day = re.sub(r"\D", "", answer) or "1"
+    await advance_account_prompt(prompt["id"], 4, payment_day=day)
+    await _create_account(user_id, prompt["id"])
+
+
+async def _create_account(user_id: int, prompt_id: int) -> None:
+    prompt = await get_account_prompt(prompt_id)
+    if prompt is None or not prompt["is_open"]:
+        return
+    try:
+        await create_asset_account(
+            user_id, prompt["name"], prompt["role"],
+            prompt["opening_balance"] or "0", prompt["payment_day"],
+        )
+    except Exception as exc:
+        await _report_failure(user_id, "create_asset_account", "Не получилось завести счёт", exc, retry=True)
+        return
+    await close_account_prompt(prompt_id)
+    await threads.send(
+        prompt["thread_id"], user_id,
+        f"Завёл счёт <b>{html.escape(prompt['name'])}</b> — {ACCOUNT_ROLES.get(prompt['role'], '')}.",
+        parse_mode="HTML",
+    )
+    await _dismiss_thread_by_id(prompt["thread_id"])
+
+
+# Регистрируются здесь, а не в самом словаре: обработчики определены
+# ниже него, а поднимать словарь в конец файла — ломать соседние
+# правки. Расхождение с _PROMPT_TABLES ловит assert внизу.
+_PROMPT_HANDLERS["expense"] = _handle_expense_reply
+_PROMPT_HANDLERS["account"] = _handle_account_reply
+
+# Каждый вид диалога должен быть и в карте таблиц (app/db.py), и в карте
+# обработчиков. Забыть одно из двух легко, и это не падает при импорте — оно
+# ждёт живого человека: get_open_prompt находит открытый вопрос, а получить
+# строку или позвать обработчик уже нечем, и бот молча зависает посреди
+# диалога. Так и случилось с тратами. Проверка на импорте ловит это до пуша.
+assert set(_PROMPT_TABLES) == set(_PROMPT_HANDLERS), (
+    f"виды диалогов разошлись: {set(_PROMPT_TABLES) ^ set(_PROMPT_HANDLERS)}"
+)

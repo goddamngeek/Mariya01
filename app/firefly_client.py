@@ -251,3 +251,51 @@ async def set_transaction_source(user_id: int, transaction_id: str, source_id: s
     )
     if resp.status_code >= 400:
         raise FireflyError(f"{resp.status_code} на смене счёта: {resp.text[:300]}")
+
+
+# Роли, которые Firefly понимает у основного счёта. Названия взяты из
+# живого инстанса, а не из головы: у заведённой руками кредитки в базе
+# лежит account_role = "ccAsset".
+ACCOUNT_ROLES = {
+    "defaultAsset": "Карта или счёт",
+    "savingAsset": "Накопительный",
+    "cashWalletAsset": "Наличные",
+    "ccAsset": "Кредитная карта",
+}
+
+
+@_needs_firefly
+async def create_asset_account(
+    user_id: int, name: str, role: str, opening_balance: str = "0",
+    payment_day: str | None = None,
+) -> str:
+    """Завести основной счёт — тот, с которого человек платит.
+
+    Валюта рублёвая и не спрашивается. Начальный остаток датируется
+    сегодняшним днём: это точка «на такое-то число было столько», от неё
+    Firefly и считает дальше каждой операцией.
+
+    У кредитки Firefly требует ещё план погашения и день платежа. План
+    всегда «полное ежемесячное»: другой означает, что человек таскает долг
+    и платит проценты, а их Firefly всё равно не считает."""
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    payload = {
+        "name": name,
+        "type": "asset",
+        "account_role": role,
+        "currency_code": "RUB",
+        "opening_balance": str(opening_balance),
+        "opening_balance_date": today,
+    }
+    if role == "ccAsset":
+        payload["credit_card_type"] = "monthlyFull"
+        # Firefly хранит полную дату, но использует из неё только число
+        # месяца — так написано в подсказке под полем в его же интерфейсе.
+        payload["monthly_payment_date"] = f"{today[:8]}{int(payment_day or 1):02d}"
+
+    resp = await get_client().post(
+        f"{FIREFLY_URL}/api/v1/accounts", headers=_headers(user_id), json=payload,
+    )
+    if resp.status_code >= 400:
+        raise FireflyError(f"{resp.status_code} на создании счёта: {resp.text[:400]}")
+    return resp.json()["data"]["id"]

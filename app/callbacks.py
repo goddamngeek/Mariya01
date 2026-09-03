@@ -51,7 +51,7 @@ async def process_callback_query(callback_query: dict) -> None:
             return
 
         # Траты: ea — счёт, ed — получатель, ec — категория.
-        if data[:2] in ("ea", "ed", "ec") and data[2:3] == ":":
+        if data[:2] in ("ea", "ed", "ec", "et") and data[2:3] == ":":
             await handle_expense_choice(callback_query)
             return
 

@@ -78,6 +78,7 @@ from app.firefly_client import (
     create_expense,
     list_categories,
     list_expense_accounts,
+    list_tags,
     find_by_external_id,
     list_asset_accounts,
 )
@@ -1594,9 +1595,6 @@ async def handle_clippings_file(user_id: int, raw: str) -> None:
 # ошибается. Поэтому спрашиваем: описание сообщением, остальное кнопками из
 # того, что уже заведено, с возможностью написать своё.
 
-_EXPENSE_STEPS = ("описание", "счёт", "получатель", "категория")
-
-
 def _money(amount: str) -> str:
     rubles = f"{int(float(amount)):,}".replace(",", " ")
     kopecks = round(float(amount) % 1 * 100)
@@ -1631,10 +1629,16 @@ async def _ask_expense_step(user_id: int, prompt, step: int) -> None:
             options = [(n, n) for n in await list_expense_accounts(user_id)]
             question = "Кому или куда? (можно написать своё)"
             prefix = "ed"
-        else:
+        elif step == 3:
             options = [(c["name"], c["name"]) for c in await list_categories(user_id)]
             question = "Категория? (можно написать свою)"
             prefix = "ec"
+        else:
+            # Пустое значение первым — «без тэга». Без него необязательный
+            # шаг становится обязательным: пропустить его было бы нечем.
+            options = [("Без тэга", "")] + [(t, t) for t in await list_tags(user_id)]
+            question = "Тэг? (можно написать свой)"
+            prefix = "et"
     except Exception as exc:
         await _report_failure(user_id, "firefly options", "Не получилось прочитать списки из Firefly", exc)
         return
@@ -1678,8 +1682,10 @@ async def _handle_expense_reply(
         await advance_expense_prompt(prompt["id"], 2, account_id=match["id"])
     elif step == 2:
         await advance_expense_prompt(prompt["id"], 3, destination=answer)
-    else:
+    elif step == 3:
         await advance_expense_prompt(prompt["id"], 4, category=answer)
+    else:
+        await advance_expense_prompt(prompt["id"], 5, tag=answer)
 
     await _continue_expense(user_id, prompt["id"])
 
@@ -1688,7 +1694,7 @@ async def _continue_expense(user_id: int, prompt_id: int) -> None:
     prompt = await get_expense_prompt(prompt_id)
     if prompt is None or not prompt["is_open"]:
         return
-    if prompt["step"] < 4:
+    if prompt["step"] < 5:
         await _ask_expense_step(user_id, prompt, prompt["step"])
         return
     await _write_expense(user_id, prompt)
@@ -1707,6 +1713,7 @@ async def _write_expense(user_id: int, prompt) -> None:
             user_id, prompt["amount"], prompt["description"], prompt["account_id"],
             prompt["destination"] or prompt["description"],
             category_name=prompt["category"], external_id=prompt["external_id"],
+            tags=[prompt["tag"]] if prompt["tag"] else None,
         )
         accounts = {a["id"]: a["name"] for a in await list_asset_accounts(user_id)}
     except Exception as exc:
@@ -1721,7 +1728,8 @@ async def _write_expense(user_id: int, prompt) -> None:
         f"Записал: <b>{_money(prompt['amount'])}</b> · {html.escape(prompt['description'])}"
         f"\n{html.escape(accounts.get(prompt['account_id'], ''))} → "
         f"{html.escape(prompt['destination'] or prompt['description'])} · "
-        f"{html.escape(prompt['category'] or 'без категории')}",
+        f"{html.escape(prompt['category'] or 'без категории')}"
+        + (f" · #{html.escape(prompt['tag'])}" if prompt["tag"] else ""),
         parse_mode="HTML",
     )
     await _dismiss_thread_by_id(prompt["thread_id"])
@@ -1749,8 +1757,10 @@ async def handle_expense_choice(callback_query: dict) -> None:
         await advance_expense_prompt(prompt["id"], 2, account_id=value)
     elif prefix == "ed":
         await advance_expense_prompt(prompt["id"], 3, destination=value)
-    else:
+    elif prefix == "ec":
         await advance_expense_prompt(prompt["id"], 4, category=value)
+    else:
+        await advance_expense_prompt(prompt["id"], 5, tag=value)
     await _continue_expense(chat_id, prompt["id"])
 
 

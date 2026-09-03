@@ -120,6 +120,17 @@ async def list_expense_accounts(user_id: int, limit: int = 12) -> list[str]:
 
 
 @_needs_firefly
+async def list_tags(user_id: int, limit: int = 12) -> list[str]:
+    """Тэги, которые уже заводились. Как и категории, читаются из Firefly, а
+    не задаются списком в коде."""
+    resp = await get_client().get(
+        f"{FIREFLY_URL}/api/v1/tags", headers=_headers(user_id), params={"limit": limit},
+    )
+    resp.raise_for_status()
+    return [item["attributes"]["tag"] for item in resp.json().get("data", [])]
+
+
+@_needs_firefly
 async def recent_transactions(user_id: int, limit: int = 10) -> list[dict]:
     """Последние операции — чтобы проверять, что записалось на самом деле,
     не открывая Firefly. Тот же приём, что /sync/note для Trilium."""
@@ -152,6 +163,7 @@ async def create_expense(
     user_id: int, amount: str, description: str, source_id: str,
     destination_name: str, category_name: str | None = None,
     date: str | None = None, external_id: str | None = None,
+    tags: list[str] | None = None,
 ) -> str:
     """Одна трата. Возвращает id созданной транзакции.
 
@@ -178,6 +190,8 @@ async def create_expense(
         tx["category_name"] = category_name
     if external_id:
         tx["external_id"] = external_id
+    if tags:
+        tx["tags"] = tags
 
     resp = await get_client().post(
         f"{FIREFLY_URL}/api/v1/transactions", headers=_headers(user_id), json=payload,

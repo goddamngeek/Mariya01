@@ -391,6 +391,7 @@ CREATE TABLE IF NOT EXISTS expense_prompts (
     account_id TEXT,
     destination TEXT,
     category TEXT,
+    tag TEXT,
     collected JSONB NOT NULL DEFAULT '{}'::jsonb,
     thread_id INTEGER,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -402,6 +403,7 @@ ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DE
 ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS account_id TEXT;
 ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS destination TEXT;
 ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS tag TEXT;
 ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
 ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();

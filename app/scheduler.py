@@ -33,7 +33,7 @@ from app import parables, threads
 from app.trilium_client import archive_done_cards
 from app.prompts import ezhednevnik_step_text
 from app.reminders import deliver_reminder
-from app.telegram import delete_messages, send_message, send_message_get_id
+from app.channel import delete_messages, send_message, send_message_get_id
 
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 

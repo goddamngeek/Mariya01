@@ -23,7 +23,7 @@ from app.people import NAME_TO_USER_ID, USER_NAMES
 from app.reminder_time import parse_reminder_time
 from app import humanize, threads, triggers
 from app.reminders import schedule_reminder
-from app.telegram import send_message
+from app.channel import send_message
 from app.trilium_client import (
     add_kanban_card,
     get_day_summary,

@@ -71,7 +71,7 @@ from app.prompts import (
     quote_step_text,
 )
 from app import background, clippings, errors, humanize, threads, triggers
-from app.telegram import (
+from app.channel import (
     answer_callback_query,
     clear_reply_markup,
     edit_message,

@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from app.db import claim_reminder, insert_reminder, utcnow
 from app.people import format_reminder_message
-from app.telegram import send_message
+from app.channel import send_message
 
 
 async def deliver_reminder(

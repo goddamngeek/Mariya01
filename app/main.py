@@ -43,11 +43,11 @@ from app.service import (
     start_quote_flow,
 )
 from app.sync import router as sync_router
+from app.channel import send_message
 from app.telegram import (
     close_client as close_telegram_client,
     download_document,
     ensure_webhook_allowed_updates,
-    send_message,
     set_bot_commands,
 )
 

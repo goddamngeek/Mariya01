@@ -11,7 +11,7 @@ from app.service import (
     handle_quote_book_selected,
     handle_reading_book_selected,
 )
-from app.telegram import answer_callback_query
+from app.channel import answer_callback_query
 
 
 async def process_callback_query(callback_query: dict) -> None:

@@ -33,7 +33,7 @@ from app.db import (
     create_message_thread,
     get_thread_by_message,
 )
-from app.telegram import delete_message, delete_messages, send_message_get_id, send_message_with_buttons
+from app.channel import delete_message, delete_messages, send_message_get_id, send_message_with_buttons
 
 # How long a thread survives with no activity, by what kind of thing it is.
 # A water reminder is a nudge you either act on or don't; an informational

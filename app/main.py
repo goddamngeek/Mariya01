@@ -14,6 +14,7 @@ from app.db import (
     get_open_ezhednevnik_prompt,
     init_db,
     is_registered,
+    journal_message,
     log_chat_message,
     register_user,
 )
@@ -207,6 +208,19 @@ async def telegram_webhook(
             await log_chat_message(chat_id, message_id)
         except Exception as exc:
             print(f"log_chat_message failed (non-fatal): {exc!r}", flush=True)
+
+    # Реплика человека — в тот же журнал, куда telegram.py кладёт ответы бота
+    # (chat_journal), иначе в истории останется монолог. Документ текстом не
+    # опишешь, кладём имя файла: важно, что в этот момент в разговоре
+    # что-то произошло. Best-effort, как и лог выше.
+    try:
+        await journal_message(
+            chat_id, "user",
+            text if text is not None else f"[файл: {(document or {}).get('file_name', 'без имени')}]",
+            telegram_message_id=message_id,
+        )
+    except Exception as exc:
+        print(f"journal_message failed (non-fatal): {exc!r}", flush=True)
 
     if text is not None and text.strip() == "/start":
         await handle_start(chat_id)

@@ -430,6 +430,36 @@ ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT 
 -- бы в них ответом. Закрываем — писать в Firefly им всё равно нечем.
 UPDATE expense_prompts SET is_open = FALSE WHERE step = 0 AND description <> '';
 CREATE INDEX IF NOT EXISTS expense_prompts_open_idx ON expense_prompts (user_id) WHERE is_open;
+
+-- Журнал разговора: что бот сказал и что ему ответили, вместе с текстом.
+-- Соседний chat_messages_log хранит одни идентификаторы и живёт до первого
+-- /clear — после уборки от переписки не остаётся ничего, и узнать, что бот
+-- написал вчера, уже неоткуда. Здесь остаётся сам текст, и он переживает
+-- и уборку, и удаление сообщения в телеграме, и недоступность самого
+-- телеграма: строка пишется даже когда отправка не удалась, тогда
+-- telegram_message_id пустой.
+--
+-- chat_id текстом, а не BIGINT: у людей он числовой, а у канала это
+-- "@blessandbeblessed" (см. THOUGHT_CHANNEL) — под BIGINT посты в канал
+-- просто не попали бы в историю.
+CREATE TABLE IF NOT EXISTS chat_journal (
+    id BIGSERIAL PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    author TEXT NOT NULL,
+    text TEXT NOT NULL,
+    buttons JSONB,
+    parse_mode TEXT,
+    telegram_message_id BIGINT,
+    created_at TIMESTAMPTZ NOT NULL,
+    edited_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS chat_journal_chat_idx ON chat_journal (chat_id, id DESC);
+-- Правку и удаление телеграм приносит со своим message_id и больше ни с чем.
+-- Без этого индекса каждая перерисовка карточки в инбоксе перебирала бы
+-- журнал целиком.
+CREATE INDEX IF NOT EXISTS chat_journal_tg_idx ON chat_journal (chat_id, telegram_message_id)
+    WHERE telegram_message_id IS NOT NULL;
 """
 
 _pool: asyncpg.Pool | None = None
@@ -1052,6 +1082,100 @@ async def log_chat_message(chat_id: int, message_id: int) -> None:
         "INSERT INTO chat_messages_log (chat_id, message_id, created_at) VALUES ($1, $2, $3)",
         chat_id, message_id, utcnow(),
     )
+
+
+# --- журнал разговора -------------------------------------------------
+
+def _buttons_json(buttons: list[tuple[str, str]] | None) -> str | None:
+    return json.dumps([{"label": label, "data": data} for label, data in buttons]) if buttons else None
+
+
+async def journal_message(
+    chat_id: int | str, author: str, text: str,
+    buttons: list[tuple[str, str]] | None = None,
+    parse_mode: str | None = None,
+    telegram_message_id: int | None = None,
+) -> None:
+    """Записать реплику. author — 'bot' или 'user'."""
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO chat_journal "
+        "(chat_id, author, text, buttons, parse_mode, telegram_message_id, created_at) "
+        "VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)",
+        str(chat_id), author, text, _buttons_json(buttons), parse_mode,
+        telegram_message_id, utcnow(),
+    )
+
+
+async def journal_edit(
+    chat_id: int | str, telegram_message_id: int, text: str,
+    buttons: list[tuple[str, str]] | None = None,
+) -> None:
+    """Отразить правку отправленного сообщения. Правим САМУЮ СВЕЖУЮ строку с
+    этим message_id: телеграм переиспользует номера после того, как чат
+    почищен, а журнал чистку переживает — старые строки с тем же номером в
+    нём остаются, и трогать надо последнюю."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE chat_journal SET text = $1, buttons = $2::jsonb, edited_at = $3 "
+        "WHERE id = (SELECT id FROM chat_journal WHERE chat_id = $4 AND telegram_message_id = $5 "
+        "ORDER BY id DESC LIMIT 1)",
+        text, _buttons_json(buttons), utcnow(), str(chat_id), telegram_message_id,
+    )
+
+
+async def journal_buttons_cleared(chat_id: int | str, telegram_message_id: int) -> None:
+    """Список отвечен, кнопки сняты — текст при этом не меняется."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE chat_journal SET buttons = NULL, edited_at = $1 "
+        "WHERE id = (SELECT id FROM chat_journal WHERE chat_id = $2 AND telegram_message_id = $3 "
+        "ORDER BY id DESC LIMIT 1)",
+        utcnow(), str(chat_id), telegram_message_id,
+    )
+
+
+async def journal_deleted(chat_id: int | str, telegram_message_id: int) -> None:
+    """Пометить, что сообщения больше нет в телеграме. Строку не удаляем — в
+    этом весь смысл журнала: /clear выметает переписку, история остаётся."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE chat_journal SET deleted_at = $1 "
+        "WHERE chat_id = $2 AND telegram_message_id = $3 AND deleted_at IS NULL",
+        utcnow(), str(chat_id), telegram_message_id,
+    )
+
+
+async def get_journal(
+    chat_id: int | str | None = None, limit: int = 50, before_id: int | None = None,
+) -> list[asyncpg.Record]:
+    """Свежие реплики, новые первыми. before_id листает вглубь."""
+    pool = await get_pool()
+    clauses: list[str] = []
+    args: list = []
+    if chat_id is not None:
+        args.append(str(chat_id))
+        clauses.append(f"chat_id = ${len(args)}")
+    if before_id is not None:
+        args.append(before_id)
+        clauses.append(f"id < ${len(args)}")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    args.append(limit)
+    return await pool.fetch(
+        f"SELECT * FROM chat_journal {where} ORDER BY id DESC LIMIT ${len(args)}", *args,
+    )
+
+
+async def trim_journal(days: int = 180) -> int:
+    """Журнал не чистит никто — /clear его намеренно не трогает. На двоих
+    это тысячи строк за полгода, не гигабайты, но расти бесконечно незачем.
+    Возвращает число удалённых строк."""
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM chat_journal WHERE created_at < $1", utcnow() - timedelta(days=days),
+    )
+    return int(result.rsplit(" ", 1)[-1]) if result.startswith("DELETE") else 0
+
 
 
 async def pop_logged_messages_except(skip_chat_ids: set[int]) -> list[asyncpg.Record]:

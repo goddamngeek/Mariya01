@@ -27,6 +27,7 @@ from app.db import (
     mark_water_reminder_sent,
     pop_logged_messages_except,
     trim_chat_message_log,
+    trim_journal,
 )
 from app import parables, threads
 from app.trilium_client import archive_done_cards
@@ -105,8 +106,9 @@ async def send_thought_of_the_day(part: int = 0) -> None:
     канале же посты копятся в архив и никому не мешают. Прочитать мысль в
     личке по-прежнему можно, но по своей воле — командой /thought.
 
-    Не в ветке и без записи в журнал чата: смысл ровно обратный уборке,
-    посты должны остаться.
+    Не в ветке и с log=False: смысл ровно обратный уборке, посты должны
+    остаться. Это про chat_messages_log; в историю (chat_journal) пост
+    попадает, её никто не выметает.
 
     A portion that isn't there is normal, not a failure: days differ in
     size and a short one runs out before the evening slot."""
@@ -188,6 +190,12 @@ async def trim_logs() -> None:
     trimmed = await trim_chat_message_log()
     if trimmed:
         print(f"trimmed {trimmed} chat-log row(s) past Telegram's delete window", flush=True)
+    # Журнал разговора (chat_journal) — история, а не рабочая таблица: его не
+    # трогает ни /clear, ни удаление сообщений, поэтому подрезать его больше
+    # некому. Полгода — это тысячи строк на двоих, не гигабайты.
+    trimmed = await trim_journal()
+    if trimmed:
+        print(f"trimmed {trimmed} journal row(s) older than 180 days", flush=True)
 
 
 async def release_stale_message_threads() -> None:

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
@@ -10,6 +11,7 @@ from app.db import (
     ack_incoming_messages,
     get_ezhednevnik_prompts_for_user,
     get_open_prompt,
+    get_journal,
     get_recent_incoming_messages,
     get_recent_reminders,
     get_water_reminders_for_date,
@@ -194,6 +196,27 @@ async def chat_log():
     return [
         {"id": r["id"], "chat_id": r["chat_id"], "message_id": r["message_id"], "created_at": r["created_at"]}
         for r in await peek_logged_messages()
+    ]
+
+
+@router.get("/journal", dependencies=[Depends(require_bearer)])
+async def journal(chat_id: Optional[str] = None, limit: int = 30, before_id: Optional[int] = None):
+    """Журнал разговора — что бот сказал и что ему ответили, новые первыми.
+    В отличие от /chat_log это история с текстом, и она переживает /clear.
+    Она же будет читающей стороной веб-чата."""
+    return [
+        {
+            "id": r["id"],
+            "chat_id": r["chat_id"],
+            "author": r["author"],
+            "text": r["text"],
+            "buttons": json.loads(r["buttons"]) if r["buttons"] else None,
+            "message_id": r["telegram_message_id"],
+            "created_at": r["created_at"],
+            "edited_at": r["edited_at"],
+            "deleted_at": r["deleted_at"],
+        }
+        for r in await get_journal(chat_id, min(limit, 200), before_id)
     ]
 
 

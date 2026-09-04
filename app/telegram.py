@@ -3,7 +3,13 @@ import asyncio
 import httpx
 
 from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
-from app.db import log_chat_message
+from app.db import (
+    journal_buttons_cleared,
+    journal_deleted,
+    journal_edit,
+    journal_message,
+    log_chat_message,
+)
 
 _client: httpx.AsyncClient | None = None
 
@@ -16,6 +22,28 @@ async def _log_sent(chat_id: int | str, message_id: int) -> None:
         await log_chat_message(int(chat_id), message_id)
     except Exception as exc:
         print(f"log_chat_message failed (non-fatal): {exc!r}", flush=True)
+
+
+async def _record(
+    chat_id: int | str, author: str, text: str,
+    buttons: list[tuple[str, str]] | None = None,
+    parse_mode: str | None = None, message_id: int | None = None,
+) -> None:
+    """Сложить реплику в журнал (см. chat_journal в db.py). Best-effort, как
+    и _log_sent: журнал — это история, а не работа бота, и его сбой не имеет
+    права ронять отправку сообщения."""
+    try:
+        await journal_message(chat_id, author, text, buttons, parse_mode, message_id)
+    except Exception as exc:
+        print(f"journal_message failed (non-fatal): {exc!r}", flush=True)
+
+
+async def _record_change(what, *args) -> None:
+    """То же самое для правок, снятия кнопок и удалений."""
+    try:
+        await what(*args)
+    except Exception as exc:
+        print(f"{what.__name__} failed (non-fatal): {exc!r}", flush=True)
 
 
 def get_client() -> httpx.AsyncClient:
@@ -60,6 +88,7 @@ async def _send(
         payload["parse_mode"] = parse_mode
     if buttons:
         payload["reply_markup"] = {"inline_keyboard": _keyboard(buttons, row_width)}
+    message_id: int | None = None
     try:
         resp = await get_client().post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=payload,
@@ -68,10 +97,14 @@ async def _send(
         message_id = resp.json()["result"]["message_id"]
         if log:
             await _log_sent(chat_id, message_id)
-        return message_id
     except httpx.HTTPError as exc:
         print(f"telegram sendMessage failed: {exc}", flush=True)
-        return None
+    # В журнал идёт и неудачная отправка тоже — с пустым message_id. Если
+    # телеграм недоступен, сказанное ботом всё равно должно остаться в
+    # истории: ровно ради этого случая журнал и заводился. log сюда не
+    # влияет, он про уборку чата, а не про историю.
+    await _record(chat_id, "bot", text, buttons, parse_mode, message_id)
+    return message_id
 
 
 async def send_message(
@@ -114,10 +147,15 @@ async def edit_message(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json=payload,
         )
         resp.raise_for_status()
-        return True
+        ok = True
     except httpx.HTTPError as exc:
         print(f"telegram editMessageText failed: {exc}", flush=True)
-        return False
+        ok = False
+    # Правку журналим независимо от того, приняли её в телеграме или нет —
+    # то же правило, что и у отправки: журнал хранит сказанное ботом, а не
+    # содержимое телеграма.
+    await _record_change(journal_edit, chat_id, message_id, text, buttons)
+    return ok
 
 
 # Телеграм отдаёт боту файлы не больше 20 МБ, но «My Clippings.txt» — это
@@ -164,6 +202,7 @@ async def clear_reply_markup(chat_id: int | str, message_id: int) -> bool:
             url, json={"chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []}},
         )
         resp.raise_for_status()
+        await _record_change(journal_buttons_cleared, chat_id, message_id)
         return True
     except httpx.HTTPError as exc:
         print(f"telegram editMessageReplyMarkup failed: {exc}", flush=True)
@@ -269,6 +308,11 @@ async def delete_message(chat_id: int | str, message_id: int) -> bool:
     try:
         resp = await get_client().post(url, json={"chat_id": chat_id, "message_id": message_id})
         resp.raise_for_status()
+        # Здесь — только при успехе, в отличие от отправки и правки:
+        # deleted_at значит «этого сообщения в телеграме больше нет», и
+        # ставить его на неудавшемся удалении было бы враньём. Сама строка
+        # журнала остаётся: /clear выметает чат, история не выметается.
+        await _record_change(journal_deleted, chat_id, message_id)
         return True
     except httpx.HTTPError as exc:
         print(f"telegram deleteMessage failed: {exc}", flush=True)

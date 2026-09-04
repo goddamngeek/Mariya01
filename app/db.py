@@ -1166,6 +1166,31 @@ async def get_journal(
     )
 
 
+async def get_journal_row(row_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM chat_journal WHERE id = $1", row_id)
+
+
+async def get_journal_updates(
+    chat_id: int | str, after_id: int = 0, since: datetime | None = None,
+) -> list[asyncpg.Record]:
+    """Что изменилось в разговоре с прошлого опроса: новые реплики плюс те,
+    что с тех пор поправили или удалили. Веб-страница опрашивает это раз в
+    пару секунд и заменяет у себя строки по id — поэтому порядок прямой, от
+    старых к новым, в отличие от get_journal."""
+    pool = await get_pool()
+    if since is None:
+        return await pool.fetch(
+            "SELECT * FROM chat_journal WHERE chat_id = $1 AND id > $2 ORDER BY id LIMIT 500",
+            str(chat_id), after_id,
+        )
+    return await pool.fetch(
+        "SELECT * FROM chat_journal WHERE chat_id = $1 "
+        "AND (id > $2 OR edited_at > $3 OR deleted_at > $3) ORDER BY id LIMIT 500",
+        str(chat_id), after_id, since,
+    )
+
+
 async def trim_journal(days: int = 180) -> int:
     """Журнал не чистит никто — /clear его намеренно не трогает. На двоих
     это тысячи строк за полгода, не гигабайты, но расти бесконечно незачем.

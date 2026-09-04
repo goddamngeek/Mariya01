@@ -27,6 +27,7 @@ from app.service import (
     handle_message_reaction,
 )
 from app.sync import router as sync_router
+from app.web import router as web_router
 from app.channel import send_message
 from app.telegram import (
     close_client as close_telegram_client,
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(sync_router)
+app.include_router(web_router)
 
 
 async def handle_start(chat_id: int) -> None:

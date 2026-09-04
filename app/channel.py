@@ -99,3 +99,4 @@ async def answer_callback_query(callback_query_id: str, text: str | None = None)
     когда появится второй, сюда придётся передавать его явно. Отмечено, чтобы
     не выяснять это в тот же момент, когда всё остальное уже переехало."""
     return await _TELEGRAM.answer_callback_query(callback_query_id, text)
+

@@ -3,6 +3,7 @@ import asyncio
 import httpx
 
 from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
+from app.press import Press
 from app.db import (
     journal_buttons_cleared,
     journal_deleted,
@@ -349,3 +350,15 @@ async def answer_callback_query(callback_query_id: str, text: str | None = None)
     except httpx.HTTPError as exc:
         print(f"telegram answerCallbackQuery failed: {exc}", flush=True)
         return False
+
+
+def press_from_update(callback_query: dict) -> Press:
+    """Телеграмный callback_query → нейтральное нажатие. Единственное место,
+    которое знает, как этот словарь устроен."""
+    message = callback_query.get("message") or {}
+    return Press(
+        id=callback_query["id"],
+        data=callback_query.get("data") or "",
+        chat_id=(message.get("chat") or {}).get("id"),
+        message_id=message.get("message_id"),
+    )

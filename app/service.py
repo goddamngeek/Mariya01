@@ -59,6 +59,7 @@ from app.db import (
     utcnow,
 )
 from app.ingest import TRILIUM_UNAVAILABLE_TEXT, handle_active_message
+from app.press import Press
 from app.people import USER_NAMES, dative
 from app.prompts import (
     ACTIVITY_STEPS,
@@ -409,12 +410,12 @@ async def start_quote_flow(
     await ack_incoming_messages([message_id])
 
 
-async def handle_quote_book_selected(callback_query: dict) -> None:
+async def handle_quote_book_selected(press: Press) -> None:
     """Routes a "bq:{prompt_id}:{index}" button press from start_quote_flow
     above back to the matching book — called from app/callbacks.py."""
-    query_id = callback_query["id"]
-    data = callback_query.get("data") or ""
-    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+    query_id = press.id
+    data = press.data
+    chat_id = press.chat_id
 
     try:
         _prefix, prompt_id_str, index_str = data.split(":")
@@ -436,7 +437,7 @@ async def handle_quote_book_selected(callback_query: dict) -> None:
     book = candidates[index]
     await set_book_quote_prompt_book(prompt_id, book["note_id"], book["title"])
     await answer_callback_query(query_id, f"Книга: {book['title']}")
-    list_message_id = (callback_query.get("message") or {}).get("message_id")
+    list_message_id = press.message_id
     if list_message_id is not None:
         await clear_reply_markup(chat_id, list_message_id)
     await threads.send(prompt["thread_id"], chat_id, quote_step_text(0))
@@ -856,16 +857,15 @@ def _ratings(reviews: list[tuple[str, str]]) -> str:
     )
 
 
-async def _handle_book_list_press(callback_query: dict, prefix: str, with_finish_button: bool) -> None:
+async def _handle_book_list_press(press: Press, prefix: str, with_finish_button: bool) -> None:
     """Shared by both lists' button handlers: strip the list's keyboard (so
     a second book can't be picked from the same message), then send that
     book's description — always leading with the book's own title (per
     request), then the 4 template sections."""
-    await answer_callback_query(callback_query["id"])
-    data = callback_query.get("data") or ""
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    list_message_id = message.get("message_id")
+    await answer_callback_query(press.id)
+    data = press.data
+    chat_id = press.chat_id
+    list_message_id = press.message_id
     note_id = data[len(prefix) + 1:]
 
     thread = None
@@ -1193,11 +1193,11 @@ async def show_plan(user_id: int, trigger_message_id: int | None = None) -> None
     )
 
 
-async def handle_planner_action(callback_query: dict) -> None:
+async def handle_planner_action(press: Press) -> None:
     """Любая кнопка планировщика. После действия карточка перерисовывается
     на месте — при разборе это следующая задача в том же сообщении, а не
     новое сообщение поверх отвеченного."""
-    data = callback_query.get("data") or ""
+    data = press.data
     action, _, ref = data.partition(":")
     # Две формы ссылки: «сессия:индекс» из разбора инбокса и голый note_id из
     # /plan, где список короткий и снимок не нужен.
@@ -1206,19 +1206,18 @@ async def handle_planner_action(callback_query: dict) -> None:
     if ":" in ref:
         session = await get_inbox_session(int(ref.split(":")[0]))
         if session is None:
-            await answer_callback_query(callback_query["id"], "Этот разбор уже неактуален.")
+            await answer_callback_query(press.id, "Этот разбор уже неактуален.")
             return
         cards = json.loads(session["cards"]) if isinstance(session["cards"], str) else session["cards"]
         index = int(ref.split(":")[1])
         if index >= len(cards):
-            await answer_callback_query(callback_query["id"])
+            await answer_callback_query(press.id)
             return
         note_id = cards[index]["note_id"]
     else:
         note_id = ref
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    message_id = message.get("message_id")
+    chat_id = press.chat_id
+    message_id = press.message_id
     person_name = USER_NAMES.get(chat_id, str(chat_id))
     today = datetime.now(TIMEZONE).date()
 
@@ -1235,14 +1234,14 @@ async def handle_planner_action(callback_query: dict) -> None:
             # из планировщика насовсем: ни инбокс, ни /plan таких не
             # показывают никогда. То есть кнопка, которую жмут со смыслом
             # «решу позже», означала «больше не спрашивай».
-            await answer_callback_query(callback_query["id"], "Потом")
+            await answer_callback_query(press.id, "Потом")
             await touch_message_thread(session["thread_id"] if session else None)
             await _redraw_inbox(chat_id, message_id, person_name, session, index)
             return
         elif action == _PLAN_HAND:
             other = _other_person(person_name)
             if other is None:
-                await answer_callback_query(callback_query["id"], "Некому передать.")
+                await answer_callback_query(press.id, "Некому передать.")
                 return
             await set_card_label(note_id, "owner", other)
             note = f"Передал {dative(other)}"
@@ -1250,14 +1249,14 @@ async def handle_planner_action(callback_query: dict) -> None:
             await set_card_label(note_id, "status", KANBAN_DONE)
             note = "Готово"
         else:
-            await answer_callback_query(callback_query["id"])
+            await answer_callback_query(press.id)
             return
     except Exception:
         traceback.print_exc()
-        await answer_callback_query(callback_query["id"], "Trilium недоступен.")
+        await answer_callback_query(press.id, "Trilium недоступен.")
         return
 
-    await answer_callback_query(callback_query["id"], note)
+    await answer_callback_query(press.id, note)
 
     if action == _PLAN_DONE or session is None:
         await _redraw_plan(chat_id, message_id, person_name, today)
@@ -1331,18 +1330,17 @@ def _chunk(entries: list[str], header: str) -> list[str]:
     return messages
 
 
-async def handle_book_quotes_selected(callback_query: dict) -> None:
+async def handle_book_quotes_selected(press: Press) -> None:
     """"Интересные моменты" under a book's description — sends everything
     collected for that book, from /quote and from the reader import alike.
     Stays in the same thread as the description, so one reaction still
     clears the whole conversation."""
-    await answer_callback_query(callback_query["id"])
-    data = callback_query.get("data") or ""
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
+    await answer_callback_query(press.id)
+    data = press.data
+    chat_id = press.chat_id
     note_id = data[len("im:"):]
 
-    thread = await threads.thread_for_message(chat_id, message.get("message_id"))
+    thread = await threads.thread_for_message(chat_id, press.message_id)
     thread_id = thread["id"] if thread is not None else None
 
     try:
@@ -1362,15 +1360,15 @@ async def handle_book_quotes_selected(callback_query: dict) -> None:
         await threads.send(thread_id, chat_id, part, parse_mode="HTML")
 
 
-async def handle_reading_book_selected(callback_query: dict) -> None:
+async def handle_reading_book_selected(press: Press) -> None:
     """Routes a "rb:{note_id}" button press from show_reading_status above
     — called from app/callbacks.py."""
-    await _handle_book_list_press(callback_query, "rb", with_finish_button=True)
+    await _handle_book_list_press(press, "rb", with_finish_button=True)
 
 
-async def handle_finished_book_selected(callback_query: dict) -> None:
+async def handle_finished_book_selected(press: Press) -> None:
     """Routes a "pb:{note_id}" button press from show_finished_books above."""
-    await _handle_book_list_press(callback_query, "pb", with_finish_button=False)
+    await _handle_book_list_press(press, "pb", with_finish_button=False)
 
 
 async def handle_message_reaction(user_id: int, message_id: int) -> None:
@@ -1397,18 +1395,17 @@ async def _dismiss_thread_by_id(thread_id: int | None) -> None:
         await threads.dismiss(thread)
 
 
-async def handle_book_finished(callback_query: dict) -> None:
+async def handle_book_finished(press: Press) -> None:
     """"Я дочитал" — the button under a book's description (see
     handle_reading_book_selected above). Stamps readingEnd on the book
     IMMEDIATELY, before asking anything (per explicit request), so an
     abandoned review dialogue still leaves the book correctly marked as
     finished — it just won't get a review note. Then opens the two-step
     rating/review flow (_handle_book_review_reply below)."""
-    query_id = callback_query["id"]
-    data = callback_query.get("data") or ""
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    description_message_id = message.get("message_id")
+    query_id = press.id
+    data = press.data
+    chat_id = press.chat_id
+    description_message_id = press.message_id
     note_id = data[len("fd:"):]
 
     await answer_callback_query(query_id)
@@ -1766,13 +1763,12 @@ async def _write_expense(user_id: int, prompt) -> None:
     await _dismiss_thread_by_id(prompt["thread_id"])
 
 
-async def handle_expense_choice(callback_query: dict) -> None:
+async def handle_expense_choice(press: Press) -> None:
     """Нажатие на любом шаге. Кнопка несёт индекс в списке, сохранённом при
     вопросе, — сам список в кнопку не влезает и мог бы устареть."""
-    await answer_callback_query(callback_query["id"])
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    prefix, prompt_id_raw, index_raw = (callback_query.get("data") or "").split(":", 2)
+    await answer_callback_query(press.id)
+    chat_id = press.chat_id
+    prefix, prompt_id_raw, index_raw = press.data.split(":", 2)
     prompt = await get_expense_prompt(int(prompt_id_raw))
     if prompt is None or not prompt["is_open"] or prompt["user_id"] != chat_id:
         return
@@ -1783,7 +1779,7 @@ async def handle_expense_choice(callback_query: dict) -> None:
         return
     value = candidates[index]
 
-    await clear_reply_markup(chat_id, message.get("message_id"))
+    await clear_reply_markup(chat_id, press.message_id)
     if prefix == "ea":
         await advance_expense_prompt(prompt["id"], 2, account_id=value)
     elif prefix == "ed":
@@ -1798,17 +1794,16 @@ async def handle_expense_choice(callback_query: dict) -> None:
 # Траты определены ниже карты, поэтому дописываются сюда отдельно.
 
 
-async def handle_book_edit_details(callback_query: dict) -> None:
+async def handle_book_edit_details(press: Press) -> None:
     """«Описание» под книгой — открыть тот же шаблон «расскажи подробнее»,
     что и /addbook, для уже существующей книги.
 
     Нужен, потому что первый заход можно не успеть: диалог живёт десять
     минут и уносит с собой шаблон. Раньше после этого книга оставалась с
     прочерками навсегда — дописать было нечем."""
-    await answer_callback_query(callback_query["id"])
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    note_id = (callback_query.get("data") or "")[len("bd:"):]
+    await answer_callback_query(press.id)
+    chat_id = press.chat_id
+    note_id = press.data[len("bd:"):]
     try:
         title, labels = await get_note_labels(note_id)
     except Exception as exc:
@@ -1839,11 +1834,10 @@ async def show_accounts(user_id: int, trigger_message_id: int | None = None) -> 
     )
 
 
-async def handle_account_new(callback_query: dict) -> None:
-    await answer_callback_query(callback_query["id"])
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    thread = await threads.thread_for_message(chat_id, message.get("message_id"))
+async def handle_account_new(press: Press) -> None:
+    await answer_callback_query(press.id)
+    chat_id = press.chat_id
+    thread = await threads.thread_for_message(chat_id, press.message_id)
     thread_id = thread["id"] if thread is not None else await threads.open_thread(
         chat_id, threads.TTL_DIALOG,
     )
@@ -1852,15 +1846,14 @@ async def handle_account_new(callback_query: dict) -> None:
     await advance_account_prompt(prompt_id, 0)
 
 
-async def handle_account_role(callback_query: dict) -> None:
-    await answer_callback_query(callback_query["id"])
-    message = callback_query.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    _prefix, prompt_id_raw, role = (callback_query.get("data") or "").split(":", 2)
+async def handle_account_role(press: Press) -> None:
+    await answer_callback_query(press.id)
+    chat_id = press.chat_id
+    _prefix, prompt_id_raw, role = press.data.split(":", 2)
     prompt = await get_account_prompt(int(prompt_id_raw))
     if prompt is None or not prompt["is_open"] or prompt["user_id"] != chat_id:
         return
-    await clear_reply_markup(chat_id, message.get("message_id"))
+    await clear_reply_markup(chat_id, press.message_id)
     await advance_account_prompt(prompt["id"], 2, role=role)
     await threads.send(prompt["thread_id"], chat_id, "Сколько на нём сейчас? (0 — если пусто)")
 

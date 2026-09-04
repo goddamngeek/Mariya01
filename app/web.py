@@ -103,22 +103,58 @@ def _row(r) -> dict:
     }
 
 
+_NOTICE = """<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Алексей</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{
+    margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
+    font: 17px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }}
+  div {{ max-width: 30em; text-align: center; }}
+  p {{ opacity: .65; font-size: 15px; }}
+</style>
+<div><h1>{title}</h1><p>{text}</p></div>
+"""
+
+
+def _notice(status: int, title: str, text: str) -> HTMLResponse:
+    """Отказ, который читает человек, а не программа.
+
+    Раньше это был HTTPException, то есть JSON — и в браузере он показывался
+    нечитаемой строкой: заголовок ответа не называл кодировку, и русский
+    текст разбирался как латиница. Видно это ровно тогда, когда надо понять,
+    что делать: протухла кука, чужое устройство, ошибка в токене."""
+    return HTMLResponse(_NOTICE.format(title=title, text=text), status_code=status)
+
+
 @router.get("")
 async def page(request: Request, t: str | None = None, web_token: str | None = Cookie(default=None)):
     """Страница. С ?t=… — обмен токена на куку и редирект без него в адресе."""
     if not any(WEB_TOKENS.values()):
-        raise HTTPException(status_code=503, detail="веб-вход не настроен")
+        return _notice(
+            503, "Веб-вход выключен",
+            "Ни одного токена не задано. Нужна переменная окружения "
+            "WEB_TOKEN_OSTAP или WEB_TOKEN_MASHA.",
+        )
 
     if t is not None:
         if _person_for(t) is None:
-            raise HTTPException(status_code=401, detail="неизвестный токен")
+            return _notice(401, "Токен не подошёл", "Проверь, что скопировал его целиком.")
         response = RedirectResponse(url=str(request.url_for("page")), status_code=303)
         response.set_cookie(
             _COOKIE, t, max_age=_COOKIE_MAX_AGE, httponly=True, secure=True, samesite="lax",
         )
         return response
 
-    _require_person(web_token)
+    if _person_for(web_token) is None:
+        return _notice(
+            401, "Нужен вход",
+            "Открой один раз ссылку с токеном в конце: /w?t=…  "
+            "Дальше он запомнится и адрес можно будет набирать без него.",
+        )
     return HTMLResponse(_PAGE.read_text(encoding="utf-8"))
 
 

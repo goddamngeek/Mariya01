@@ -354,7 +354,6 @@ DROP TABLE IF EXISTS outgoing_messages;
 ALTER TABLE registered_users DROP COLUMN IF EXISTS odysseus_session_id;
 -- Счёт, с которого человек платил в прошлый раз. Обычная трата уходит с
 -- него молча — выбор появляется только когда он реально нужен.
-ALTER TABLE registered_users ADD COLUMN IF NOT EXISTS firefly_account_id TEXT;
 
 -- Одна трата, записанная строкой. Живёт ради двух вещей: кнопки «другой
 -- счёт» (нужен id уже созданной транзакции, чтобы её поправить) и первого
@@ -377,59 +376,11 @@ CREATE TABLE IF NOT EXISTS inbox_sessions (
 
 -- Новый счёт, заводимый по шагам: название, тип, начальный остаток и —
 -- только для кредитки — день платежа. Валюту не спрашиваем, она рублёвая.
-CREATE TABLE IF NOT EXISTS account_prompts (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    step INTEGER NOT NULL DEFAULT 0,
-    is_open BOOLEAN NOT NULL DEFAULT TRUE,
-    name TEXT,
-    role TEXT,
-    opening_balance TEXT,
-    payment_day TEXT,
-    thread_id INTEGER,
-    updated_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS account_prompts_open_idx ON account_prompts (user_id) WHERE is_open;
 
 -- Трата, собираемая по шагам: сумма из сообщения, дальше «на что», счёт,
 -- получатель и категория. Из строки надёжно достаётся только число —
 -- остальное зависит от формулировки, поэтому спрашивается, а не угадывается.
 -- На каждом шаге кнопки с тем, что уже заведено, и можно написать своё.
-CREATE TABLE IF NOT EXISTS expense_prompts (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    amount TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    external_id TEXT,
-    transaction_id TEXT,
-    step INTEGER NOT NULL DEFAULT 0,
-    is_open BOOLEAN NOT NULL DEFAULT TRUE,
-    account_id TEXT,
-    destination TEXT,
-    category TEXT,
-    tag TEXT,
-    collected JSONB NOT NULL DEFAULT '{}'::jsonb,
-    thread_id INTEGER,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_at TIMESTAMPTZ NOT NULL
-);
-ALTER TABLE expense_prompts ALTER COLUMN description SET DEFAULT '';
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS step INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DEFAULT TRUE;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS account_id TEXT;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS destination TEXT;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS category TEXT;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS tag TEXT;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS collected JSONB NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS thread_id INTEGER;
-ALTER TABLE expense_prompts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
--- Строки, заведённые до пошагового диалога: у них описание уже заполнено, а
--- шаг нулевой, потому что колонки тогда не было. is_open по умолчанию TRUE
--- сделал бы их «открытым вопросом», и первое же сообщение человека уехало
--- бы в них ответом. Закрываем — писать в Firefly им всё равно нечем.
-UPDATE expense_prompts SET is_open = FALSE WHERE step = 0 AND description <> '';
-CREATE INDEX IF NOT EXISTS expense_prompts_open_idx ON expense_prompts (user_id) WHERE is_open;
 
 -- Журнал разговора: что бот сказал и что ему ответили, вместе с текстом.
 -- Соседний chat_messages_log хранит одни идентификаторы и живёт до первого
@@ -948,8 +899,6 @@ _PROMPT_TABLES = {
     "book_add": "book_add_prompts",
     "link_add": "link_add_prompts",
     "task_add": "task_add_prompts",
-    "expense": "expense_prompts",
-    "account": "account_prompts",
 }
 
 # ежедневник outranks everything (priority 0): it's the one scheduled
@@ -968,10 +917,6 @@ UNION ALL
 SELECT 'review', id, updated_at, 1 FROM book_review_prompts WHERE user_id = $1 AND is_open
 UNION ALL
 SELECT 'book_add', id, updated_at, 1 FROM book_add_prompts WHERE user_id = $1 AND is_open
-UNION ALL
-SELECT 'expense', id, updated_at, 1 FROM expense_prompts WHERE user_id = $1 AND is_open
-UNION ALL
-SELECT 'account', id, updated_at, 1 FROM account_prompts WHERE user_id = $1 AND is_open
 UNION ALL
 SELECT 'link_add', id, updated_at, 1 FROM link_add_prompts WHERE user_id = $1 AND is_open
 UNION ALL
@@ -1240,7 +1185,6 @@ async def trim_journal(days: int = 180) -> int:
     return int(result.rsplit(" ", 1)[-1]) if result.startswith("DELETE") else 0
 
 
-
 async def pop_logged_messages_except(skip_chat_ids: set[int]) -> list[asyncpg.Record]:
     """Fetch and clear the log in one atomic step, EXCLUDING any chat_id in
     skip_chat_ids — used once a night by clear_chat_history(), which skips
@@ -1355,68 +1299,6 @@ async def claim_reminder(reminder_id: int) -> bool:
 
 # --- траты (Firefly) --------------------------------------------------------
 
-async def get_firefly_account(user_id: int) -> str | None:
-    pool = await get_pool()
-    return await pool.fetchval(
-        "SELECT firefly_account_id FROM registered_users WHERE chat_id = $1", user_id
-    )
-
-
-async def set_firefly_account(user_id: int, account_id: str) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE registered_users SET firefly_account_id = $1 WHERE chat_id = $2",
-        account_id, user_id,
-    )
-
-
-async def create_expense_prompt(
-    user_id: int, amount: str, external_id: str | None, thread_id: int | None = None,
-) -> int:
-    pool = await get_pool()
-    now = utcnow()
-    return await pool.fetchval(
-        "INSERT INTO expense_prompts (user_id, amount, external_id, thread_id, created_at, updated_at) "
-        "VALUES ($1, $2, $3, $4, $5, $5) RETURNING id",
-        user_id, amount, external_id, thread_id, now,
-    )
-
-
-async def advance_expense_prompt(prompt_id: int, step: int, **fields) -> None:
-    """Шаг вперёд плюс любое из собранных полей — по одному на шаг."""
-    sets = ", ".join(f"{k} = ${i + 3}" for i, k in enumerate(fields))
-    pool = await get_pool()
-    await pool.execute(
-        f"UPDATE expense_prompts SET step = $2, updated_at = now()"
-        f"{', ' + sets if sets else ''} WHERE id = $1",
-        prompt_id, step, *fields.values(),
-    )
-
-
-async def set_expense_candidates(prompt_id: int, candidates: list) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE expense_prompts SET collected = $1::jsonb, updated_at = now() WHERE id = $2",
-        json.dumps({"candidates": candidates}), prompt_id,
-    )
-
-
-async def close_expense_prompt(prompt_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute("UPDATE expense_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
-
-
-async def get_expense_prompt(prompt_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow("SELECT * FROM expense_prompts WHERE id = $1", prompt_id)
-
-
-async def set_expense_transaction(prompt_id: int, transaction_id: str) -> None:
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE expense_prompts SET transaction_id = $1 WHERE id = $2", transaction_id, prompt_id
-    )
-
 
 # --- разбор инбокса ---------------------------------------------------------
 
@@ -1456,32 +1338,3 @@ async def touch_message_thread(thread_id: int | None) -> None:
         "UPDATE message_threads SET updated_at = $1 WHERE id = $2", utcnow(), thread_id
     )
 
-
-async def create_account_prompt(user_id: int, thread_id: int | None) -> int:
-    pool = await get_pool()
-    now = utcnow()
-    return await pool.fetchval(
-        "INSERT INTO account_prompts (user_id, thread_id, created_at, updated_at) "
-        "VALUES ($1, $2, $3, $3) RETURNING id",
-        user_id, thread_id, now,
-    )
-
-
-async def get_account_prompt(prompt_id: int):
-    pool = await get_pool()
-    return await pool.fetchrow("SELECT * FROM account_prompts WHERE id = $1", prompt_id)
-
-
-async def advance_account_prompt(prompt_id: int, step: int, **fields) -> None:
-    sets = ", ".join(f"{k} = ${i + 3}" for i, k in enumerate(fields))
-    pool = await get_pool()
-    await pool.execute(
-        f"UPDATE account_prompts SET step = $2, updated_at = now()"
-        f"{', ' + sets if sets else ''} WHERE id = $1",
-        prompt_id, step, *fields.values(),
-    )
-
-
-async def close_account_prompt(prompt_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute("UPDATE account_prompts SET is_open = FALSE WHERE id = $1", prompt_id)

@@ -25,7 +25,6 @@ from app.service import (
     handle_ezhednevnik_question_reply,
     process_incoming_message,
     resend_ezhednevnik_question,
-    show_accounts,
     show_finished_books,
     show_inbox,
     show_links,
@@ -150,10 +149,6 @@ async def handle_incoming(
         background.spawn(
             show_spent(chat_id, text.strip()[len("/spent"):]), "/spent",
         )
-        return
-
-    if text.strip() == "/accounts":
-        background.spawn(show_accounts(chat_id, message_id), "/accounts")
         return
 
     if text.strip() == "/reading":

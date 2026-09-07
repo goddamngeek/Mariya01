@@ -51,17 +51,6 @@ SYNC_BEARER_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
 TRILIUM_URL = os.environ.get("TRILIUM_URL", "").rstrip("/")
 TRILIUM_ETAPI_TOKEN = os.environ.get("TRILIUM_ETAPI_TOKEN", "")
 
-# Firefly III — учёт денег, поднят на том же VPS, что Trilium, за своим
-# поддоменом. Токен у КАЖДОГО человека свой: в Firefly два пользователя с
-# полностью изолированными данными, общего представления нет — сводку по
-# двоим, если понадобится, складывает бот, держа оба токена.
-FIREFLY_URL = os.environ.get("FIREFLY_URL", "").rstrip("/")
-FIREFLY_TOKENS = {
-    "ОСТАП": os.environ.get("FIREFLY_TOKEN_OSTAP", ""),
-    "МАША": os.environ.get("FIREFLY_TOKEN_MASHA", ""),
-}
-
-
 # Траты — beancount вместо Firefly (см. app/ledger.py).
 #
 # Здесь, а не в переменных окружения: это не секрет, а раскладка счетов, и

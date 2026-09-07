@@ -3,9 +3,6 @@ from app.service import (
     handle_book_finished,
     handle_book_quotes_selected,
     handle_book_edit_details,
-    handle_account_new,
-    handle_account_role,
-    handle_expense_choice,
     handle_ledger_choice,
     handle_planner_action,
     handle_finished_book_selected,
@@ -42,12 +39,6 @@ async def handle_press(press: Press) -> None:
         if data.startswith("fd:"):
             await handle_book_finished(press)
             return
-        if data == "na:new":
-            await handle_account_new(press)
-            return
-        if data.startswith("nr:"):
-            await handle_account_role(press)
-            return
         if data.startswith("bd:"):
             await handle_book_edit_details(press)
             return
@@ -64,13 +55,6 @@ async def handle_press(press: Press) -> None:
         # записанной строкой.
         if data.startswith("el:"):
             await handle_ledger_choice(press)
-            return
-
-        # Старый фаерфлаевский поток: ea — счёт, ed — получатель, ec —
-        # категория. Новые траты сюда не приходят, но кнопки под сообщениями,
-        # отправленными до переезда, ещё живут в чате.
-        if data[:2] in ("ea", "ed", "ec", "et") and data[2:3] == ":":
-            await handle_expense_choice(press)
             return
 
     await answer_callback_query(press.id)

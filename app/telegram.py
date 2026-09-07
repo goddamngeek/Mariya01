@@ -287,6 +287,7 @@ async def set_bot_commands() -> None:
         {"command": "inbox", "description": "Задачи · Разобрать новые"},
         {"command": "kanban", "description": "Задачи · Доска целиком"},
 
+        {"command": "spent", "description": "Деньги · Сколько ушло за месяц"},
         {"command": "accounts", "description": "Деньги · Счета"},
         {"command": "links", "description": "Ссылки · Сохранённые"},
         {"command": "addlink", "description": "Ссылки · Добавить"},

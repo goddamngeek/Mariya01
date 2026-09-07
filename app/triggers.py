@@ -164,6 +164,36 @@ def is_expense(text: str) -> bool:
     return expense_amount(text) is not None
 
 
+_CURRENCY_RE = re.compile(r"\b(рубл\w*|руб\.?|р\.?|₽)\b", re.IGNORECASE)
+_PREPOSITIONS = "на|за|в|во|для|по|с|со"
+_LEAD_PREPOSITION_RE = re.compile(rf"^({_PREPOSITIONS})\s+", re.IGNORECASE)
+# Предлог оказывается в хвосте, когда сумма стояла после него: «купил
+# креатин за 800» -> вырезали 800 -> «креатин за».
+_TAIL_PREPOSITION_RE = re.compile(rf"\s+({_PREPOSITIONS})$", re.IGNORECASE)
+
+
+def expense_note(text: str) -> str:
+    """Что осталось от «потратил 659 рублей на креатин» — «креатин».
+
+    Раньше это спрашивали отдельным вопросом, потому что Firefly не принимал
+    проводку без описания, а разбирать формулировку означало бы иногда
+    ошибиться. Теперь ошибиться не страшно: описание — не поле формы, а
+    просто текст в проводке, и поправить его можно в файле. Зато вопросов на
+    одну покупку стало на один меньше.
+
+    Оно же служит ключом, по которому в следующий раз подставляются счёт и
+    категория (см. ledger.account_for_note), поэтому чистится агрессивно:
+    «659 руб. на креатин» и «купил креатин за 800» должны дать одно и то же."""
+    out = text
+    for verb in _SPEND_VERBS:
+        out = re.sub(rf"\b{verb}\b", " ", out, flags=re.IGNORECASE)
+    out = _AMOUNT_RE.sub(" ", out, count=1)
+    out = _CURRENCY_RE.sub(" ", out)
+    out = " ".join(out.split()).strip(" .,;:-—")
+    out = _LEAD_PREPOSITION_RE.sub("", out)
+    return _TAIL_PREPOSITION_RE.sub("", out).strip()
+
+
 # Most specific first. A message satisfying two rules belongs to whichever
 # appears earlier, so anything sharing context words with a broader rule has
 # to sit above it: kanban_add over kanban_status (both say "канбан"),

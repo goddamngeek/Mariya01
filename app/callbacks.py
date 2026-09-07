@@ -6,6 +6,7 @@ from app.service import (
     handle_account_new,
     handle_account_role,
     handle_expense_choice,
+    handle_ledger_choice,
     handle_planner_action,
     handle_finished_book_selected,
     handle_quote_book_selected,
@@ -59,7 +60,15 @@ async def handle_press(press: Press) -> None:
             await handle_planner_action(press)
             return
 
-        # Траты: ea — счёт, ed — получатель, ec — категория.
+        # Траты в леджере (app/ledger.py): категория, счёт, отмена под уже
+        # записанной строкой.
+        if data.startswith("el:"):
+            await handle_ledger_choice(press)
+            return
+
+        # Старый фаерфлаевский поток: ea — счёт, ed — получатель, ec —
+        # категория. Новые траты сюда не приходят, но кнопки под сообщениями,
+        # отправленными до переезда, ещё живут в чате.
         if data[:2] in ("ea", "ed", "ec", "et") and data[2:3] == ":":
             await handle_expense_choice(press)
             return

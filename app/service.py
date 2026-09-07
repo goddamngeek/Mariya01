@@ -2,10 +2,16 @@ import html
 import json
 import re
 import traceback
-from datetime import datetime, timedelta
+from datetime import date as _date, datetime, timedelta
 from typing import Optional
 
-from app.config import TIMEZONE
+from app.config import (
+    LEDGER_ACCOUNTS,
+    LEDGER_CATEGORIES,
+    LEDGER_DEFAULT_CATEGORY,
+    TIMEZONE,
+    ledger_label,
+)
 from app.db import (
     ack_incoming_messages,
     advance_account_prompt,
@@ -14,7 +20,6 @@ from app.db import (
     create_account_prompt,
     get_account_prompt,
     close_expense_prompt,
-    create_expense_prompt,
     create_inbox_session,
     set_expense_candidates,
     get_inbox_session,
@@ -71,13 +76,14 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app import background, clippings, errors, humanize, threads, triggers
+from app import background, clippings, errors, humanize, ledger, threads, triggers
 from app.channel import (
     answer_callback_query,
     clear_reply_markup,
     edit_message,
     send_message,
     send_message_get_id,
+    send_message_with_buttons,
 )
 from app.firefly_client import (
     ACCOUNT_ROLES,
@@ -1627,16 +1633,182 @@ def _money(amount: str) -> str:
 async def start_expense_flow(
     user_id: int, text: str, telegram_message_id: int | None = None,
 ) -> None:
-    """Сумма из сообщения — и первый вопрос. Число в строке однозначно, а
-    формулировка вокруг него нет, поэтому больше из текста ничего не
-    берётся."""
+    """Записать трату сразу, не спрашивая ничего.
+
+    Раньше здесь начинался диалог из пяти вопросов — описание, счёт,
+    получатель, категория, тэг, — и не потому, что столько нужно знать, а
+    потому что Firefly не принимал проводку без них. Форма отчётности
+    диктовала, что спрашивают у человека, и учёт умирал не от лени, а от
+    пяти касаний на каждый чек.
+
+    beancount не требует ничего, кроме суммы и двух счетов. Поэтому:
+    записываем немедленно, а уточняем кнопками под подтверждением — и почти
+    всегда не уточняем вовсе. Записать покупку можно только сейчас, пока
+    помнишь; разложить по полкам — когда угодно потом.
+
+    Счёт и категория берутся из прошлой такой же траты (ledger, по тексту
+    описания), а если её не было — первый счёт человека и «Прочее»."""
     amount = triggers.expense_amount(text)
     if amount is None:
         return
-    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
-    external_id = f"tg:{telegram_message_id}" if telegram_message_id else None
-    await create_expense_prompt(user_id, amount, external_id, thread_id)
-    await threads.send(thread_id, user_id, f"{_money(amount)} — на что?")
+    person = USER_NAMES.get(user_id, "")
+    accounts = LEDGER_ACCOUNTS.get(person, [])
+    if not accounts:
+        await send_message(user_id, "Счета не настроены — см. LEDGER_ACCOUNTS в app/config.py.")
+        return
+
+    note = triggers.expense_note(text)
+    account = await ledger.account_for_note(user_id, note)
+    category = await ledger.category_for_note(user_id, note)
+
+    entry_id, created = await ledger.add_expense(
+        user_id, amount,
+        account=account or accounts[0],
+        category=category or LEDGER_DEFAULT_CATEGORY,
+        narration=note,
+        external_id=f"tg:{telegram_message_id}" if telegram_message_id else None,
+    )
+    if not created:
+        # Тот же апдейт приехал второй раз (вебхук передоставляет, если бот
+        # молчал минуту). Строка уже есть — второе подтверждение было бы
+        # враньём про две покупки.
+        print(f"трата tg:{telegram_message_id} уже записана", flush=True)
+        return
+
+    await _send_expense_card(user_id, entry_id, offer_category=category is None)
+
+
+_MONTHS = (
+    "январь", "февраль", "март", "апрель", "май", "июнь",
+    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+)
+_MONTHS_IN = (
+    "январе", "феврале", "марте", "апреле", "мае", "июне",
+    "июле", "августе", "сентябре", "октябре", "ноябре", "декабре",
+)
+
+
+def _month_bounds(text: str) -> tuple[_date, _date, str]:
+    """Период, о котором спрашивают. Без аргумента — текущий месяц.
+
+    Названия месяцев принимаются и в именительном, и в предложном падеже,
+    потому что спрашивают обоими: «/spent август» и «сколько ушло в
+    августе»."""
+    today = datetime.now(TIMEZONE).date()
+    wanted = text.strip().lower()
+    month = today.month
+    for i, (nom, prep) in enumerate(zip(_MONTHS, _MONTHS_IN), start=1):
+        if wanted and (nom in wanted or prep in wanted):
+            month = i
+            break
+    year = today.year if month <= today.month else today.year - 1
+    start = today.replace(year=year, month=month, day=1)
+    end = (start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    return start, min(end, today), _MONTHS[month - 1]
+
+
+async def show_spent(user_id: int, argument: str = "") -> None:
+    """Сколько ушло за месяц и на что.
+
+    Ради этого всё и затевалось: у Firefly ответ на такой вопрос жил только
+    внутри его интерфейса, куда надо было зайти. Здесь это обычный SQL по
+    своей же таблице, поэтому ответ приходит в чат за миллисекунды и
+    работает, даже когда VPS недоступен."""
+    since, until, name = _month_bounds(argument)
+    rows = await ledger.spent(user_id, since, until)
+    if not rows:
+        await send_message(user_id, f"За {name} ничего не записано.")
+        return
+    total = sum(amount for _c, amount in rows)
+    lines = [
+        f"<b>{_money(str(total))}</b> за {name}",
+        "",
+    ] + [
+        f"{html.escape(ledger_label(category))} — {_money(str(amount))}"
+        for category, amount in rows
+    ]
+    await send_message(user_id, "\n".join(lines), parse_mode="HTML")
+
+
+def _expense_card(row, offer_category: bool) -> tuple[str, list[tuple[str, str]], int]:
+    """Текст подтверждения и кнопки под ним.
+
+    Кнопки категорий показываются только когда категорию не угадали: если
+    прошлая такая же трата уже разложена, спрашивать не о чем. Счёт спрятан
+    за одну кнопку, а не разложен рядом — он угадывается почти всегда, и
+    занимать им экран на каждой покупке незачем."""
+    entry_id = row["id"]
+    text = (
+        f"Записал: <b>{_money(str(row['amount']))}</b>"
+        + (f" · {html.escape(row['narration'])}" if row["narration"] else "")
+        + f"\n<code>{html.escape(row['account'])}</code>"
+        f" → <code>{html.escape(row['category'])}</code>"
+    )
+    buttons: list[tuple[str, str]] = []
+    if offer_category:
+        buttons += [
+            (ledger_label(c), f"el:{entry_id}:c:{i}") for i, c in enumerate(LEDGER_CATEGORIES)
+        ]
+    buttons.append(("Счёт", f"el:{entry_id}:A"))
+    buttons.append(("Отменить", f"el:{entry_id}:x"))
+    return text, buttons, 2
+
+
+async def _send_expense_card(user_id: int, entry_id: int, offer_category: bool) -> None:
+    row = await ledger.get(entry_id, user_id)
+    if row is None:
+        return
+    text, buttons, width = _expense_card(row, offer_category)
+    await send_message_with_buttons(user_id, text, buttons, parse_mode="HTML", row_width=width)
+
+
+async def handle_ledger_choice(press: Press) -> None:
+    """Кнопки под записанной тратой: категория, счёт, отмена.
+
+    Правка меняет уже лежащую в леджере строку — и заодно учит бота: в
+    следующий раз ledger.account_for_note найдёт именно её и не спросит."""
+    await answer_callback_query(press.id)
+    user_id = press.chat_id
+    parts = press.data.split(":")
+    entry_id = int(parts[1])
+    action = parts[2]
+
+    row = await ledger.get(entry_id, user_id)
+    if row is None:
+        return
+
+    if action == "x":
+        if await ledger.forget(entry_id, user_id):
+            await edit_message(user_id, press.message_id, "Отменил, трата не записана.")
+        return
+
+    if action == "A":
+        # Показать счета вместо категорий, не пересылая карточку заново.
+        accounts = LEDGER_ACCOUNTS.get(USER_NAMES.get(user_id, ""), [])
+        buttons = [(ledger_label(a), f"el:{entry_id}:a:{i}") for i, a in enumerate(accounts)]
+        buttons.append(("Отменить", f"el:{entry_id}:x"))
+        text, _b, _w = _expense_card(row, offer_category=False)
+        await edit_message(user_id, press.message_id, text, buttons, parse_mode="HTML", row_width=2)
+        return
+
+    index = int(parts[3])
+    if action == "c":
+        if index >= len(LEDGER_CATEGORIES):
+            return
+        await ledger.reclassify(entry_id, user_id, category=LEDGER_CATEGORIES[index])
+    elif action == "a":
+        accounts = LEDGER_ACCOUNTS.get(USER_NAMES.get(user_id, ""), [])
+        if index >= len(accounts):
+            return
+        await ledger.reclassify(entry_id, user_id, account=accounts[index])
+
+    row = await ledger.get(entry_id, user_id)
+    text, _b, _w = _expense_card(row, offer_category=False)
+    await edit_message(
+        user_id, press.message_id, text,
+        [("Счёт", f"el:{entry_id}:A"), ("Отменить", f"el:{entry_id}:x")],
+        parse_mode="HTML", row_width=2,
+    )
 
 
 async def _ask_expense_step(user_id: int, prompt, step: int) -> None:

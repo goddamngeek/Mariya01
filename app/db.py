@@ -460,6 +460,44 @@ CREATE INDEX IF NOT EXISTS chat_journal_chat_idx ON chat_journal (chat_id, id DE
 -- журнал целиком.
 CREATE INDEX IF NOT EXISTS chat_journal_tg_idx ON chat_journal (chat_id, telegram_message_id)
     WHERE telegram_message_id IS NOT NULL;
+
+-- Траты (см. app/ledger.py). Заменяют Firefly: там двойная запись требовала
+-- сведения баланса, а окупиться могла бы только автоматическим импортом из
+-- банка, которого у Озона для физлиц нет вовсе.
+--
+-- Правда живёт здесь, а не в файле: бот на Northflank, диск там временный, а
+-- Fava на VPS. render() собирает из этих строк beancount-файл, VPS забирает
+-- его по расписанию. Писатель один — блокировка не нужна.
+--
+-- amount NUMERIC, а не TEXT как в expense_prompts по соседству: по тратам
+-- считают суммы, и делать это в SQL можно только над числом.
+--
+-- external_id — против повторной записи: телеграм переотправляет апдейт,
+-- если бот не ответил за минуту (см. app/background.py), и одна покупка
+-- попала бы в леджер дважды.
+CREATE TABLE IF NOT EXISTS ledger_entries (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    entry_date DATE NOT NULL,
+    payee TEXT NOT NULL DEFAULT '',
+    narration TEXT NOT NULL DEFAULT '',
+    amount NUMERIC(16, 2) NOT NULL,
+    currency TEXT NOT NULL,
+    account TEXT NOT NULL,
+    category TEXT NOT NULL,
+    external_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL,
+    deleted_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ledger_entries_user_idx
+    ON ledger_entries (user_id, entry_date, id) WHERE deleted_at IS NULL;
+-- Подстановка счёта и категории по прошлой такой же трате — то, что заменило
+-- два вопроса из пяти. Делается на каждой трате, поэтому индекс. Ключ —
+-- описание, а не получатель: люди пишут «на креатин», а не название магазина.
+CREATE INDEX IF NOT EXISTS ledger_entries_note_idx
+    ON ledger_entries (user_id, lower(narration), id DESC) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_external_idx
+    ON ledger_entries (user_id, external_id) WHERE external_id IS NOT NULL;
 """
 
 _pool: asyncpg.Pool | None = None

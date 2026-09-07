@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from app import errors
+from app import errors, ledger
 from app.config import SYNC_BEARER_TOKEN, TIMEZONE
 from app.db import (
     ack_incoming_messages,
@@ -332,6 +333,23 @@ async def archive_done():
     понедельничный тик, чтобы не ждать понедельника ради проверки."""
     await archive_done_tasks()
     return {"ok": True}
+
+
+@router.get("/ledger", dependencies=[Depends(require_bearer)], response_class=PlainTextResponse)
+async def ledger_file(person: str):
+    """Траты одного человека как готовый beancount-файл (см. app/ledger.py).
+
+    Это выход наружу: VPS забирает его по расписанию и кладёт рядом с
+    личным файлом, который подключает его через `include`. Поэтому здесь
+    нет ни `option`, ни `open` — они живут в том файле, который ведут
+    руками, и переживают любую неудачную выгрузку.
+
+    Качать надо во временный файл и переименовывать: Fava читает каталог
+    сама, и недокачанный файл она успеет подхватить."""
+    user_id = _resolve_name(person)
+    if user_id is None:
+        raise HTTPException(400, f"Unknown person name: {person!r}")
+    return await ledger.render(user_id)
 
 
 @router.get("/errors", dependencies=[Depends(require_bearer)])

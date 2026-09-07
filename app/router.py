@@ -31,6 +31,7 @@ from app.service import (
     show_links,
     show_plan,
     show_reading_status,
+    show_spent,
     start_book_add_flow,
     start_quote_flow,
 )
@@ -53,6 +54,9 @@ HELP_TEXT = (
     "/plan — что на сегодня\n"
     "/inbox — разобрать новые задачи по дням\n"
     "/kanban — канбан-доска целиком\n"
+    "\n"
+    "ДЕНЬГИ\n"
+    "/spent — сколько ушло за месяц и на что\n"
     "\n"
     "ССЫЛКИ\n"
     "/links — сохранённые\n"
@@ -136,6 +140,15 @@ async def handle_incoming(
     if text.strip() == "/addbook":
         background.spawn(
             start_book_add_flow(chat_id, text, telegram_message_id=message_id), "/addbook",
+        )
+        return
+
+    # По startswith, а не по равенству: у команды есть необязательный
+    # аргумент-месяц — «/spent август». Ср. /addbook по соседству, где
+    # равенство строгое намеренно.
+    if text.strip() == "/spent" or text.strip().startswith("/spent "):
+        background.spawn(
+            show_spent(chat_id, text.strip()[len("/spent"):]), "/spent",
         )
         return
 

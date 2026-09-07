@@ -83,7 +83,6 @@ from app.channel import (
     edit_message,
     send_message,
     send_message_get_id,
-    send_message_with_buttons,
 )
 from app.firefly_client import (
     ACCOUNT_ROLES,
@@ -1661,6 +1660,12 @@ async def start_expense_flow(
     account = await ledger.account_for_note(user_id, note)
     category = await ledger.category_for_note(user_id, note)
 
+    # Ветка, как у всех остальных потоков: карточка подтверждения и само
+    # сообщение человека уезжают вместе через TTL, по реакции или по
+    # «Отменить». Без неё карточка висела бы в чате вечно, а реакция —
+    # документированный жест «свернуть это» — молча ничего не делала.
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
+
     entry_id, created = await ledger.add_expense(
         user_id, amount,
         account=account or accounts[0],
@@ -1675,7 +1680,7 @@ async def start_expense_flow(
         print(f"трата tg:{telegram_message_id} уже записана", flush=True)
         return
 
-    await _send_expense_card(user_id, entry_id, offer_category=category is None)
+    await _send_expense_card(user_id, entry_id, category is None, thread_id)
 
 
 _MONTHS = (
@@ -1754,12 +1759,16 @@ def _expense_card(row, offer_category: bool) -> tuple[str, list[tuple[str, str]]
     return text, buttons, 2
 
 
-async def _send_expense_card(user_id: int, entry_id: int, offer_category: bool) -> None:
+async def _send_expense_card(
+    user_id: int, entry_id: int, offer_category: bool, thread_id: int | None,
+) -> None:
     row = await ledger.get(entry_id, user_id)
     if row is None:
         return
     text, buttons, width = _expense_card(row, offer_category)
-    await send_message_with_buttons(user_id, text, buttons, parse_mode="HTML", row_width=width)
+    await threads.send(
+        thread_id, user_id, text, parse_mode="HTML", buttons=buttons, row_width=width,
+    )
 
 
 async def handle_ledger_choice(press: Press) -> None:
@@ -1777,10 +1786,21 @@ async def handle_ledger_choice(press: Press) -> None:
     if row is None:
         return
 
+    thread = await threads.thread_for_message(user_id, press.message_id)
+
     if action == "x":
-        if await ledger.forget(entry_id, user_id):
+        await ledger.forget(entry_id, user_id)
+        # Не «Отменил» в карточке, а снос ветки целиком: отмена значит «этого
+        # не было», и оставлять в чате след о ненаписанной трате незачем.
+        if thread is not None:
+            await threads.dismiss(thread)
+        else:
             await edit_message(user_id, press.message_id, "Отменил, трата не записана.")
         return
+
+    # Правка — это активность: без продления уборщик снёс бы карточку прямо
+    # под руками через пять минут после сообщения (см. touch_message_thread).
+    await touch_message_thread(thread["id"] if thread else None)
 
     if action == "A":
         # Показать счета вместо категорий, не пересылая карточку заново.

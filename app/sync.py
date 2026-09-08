@@ -313,6 +313,16 @@ async def ledger_file(person: str):
     return await ledger.render(user_id)
 
 
+# ОДНОРАЗОВЫЙ: переименовать заметку. Применить и сразу удалить.
+@router.post("/rename_note", dependencies=[Depends(require_bearer)])
+async def rename_note(note_id: str, title: str):
+    from app.trilium_client import get_client, TRILIUM_URL
+    resp = await get_client().patch(
+        f"{TRILIUM_URL}/etapi/notes/{note_id}", json={"title": title},
+    )
+    return {"status": resp.status_code, "title": resp.json().get("title") if resp.status_code < 300 else resp.text[:200]}
+
+
 @router.get("/errors", dependencies=[Depends(require_bearer)])
 async def recent_errors(limit: int = 10):
     """Последние ошибки с трейсбеками — чтобы не деплоить ради того, чтобы

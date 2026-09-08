@@ -2147,10 +2147,15 @@ _MEDIA_EMPTY = {
 }
 
 
+# Названия придуманы Остапом и взяты как есть. Важно в них одно: название
+# СПИСКА не совпадает с названием ДЕЙСТВИЯ. Раньше «Посмотрел» стояло и на
+# кнопке «отметить просмотренным», и на кнопке «показать просмотренные» —
+# он нажал вторую, увидел «пока нет просмотренных» и решил, что фильм не
+# добавился вовсе.
 _MEDIA_LIST_NAMES = {
-    media.WANT: "Хочу посмотреть",
-    media.IN_PROGRESS: "Смотрю",
-    media.DONE: "Посмотрел",
+    media.WANT: "Я хочу посмотреть",
+    media.IN_PROGRESS: "Я смотрю",
+    media.DONE: "Просмотренные",
 }
 
 
@@ -2248,16 +2253,16 @@ async def handle_media_selected(press: Press) -> None:
     fill = [] if labels.get("tmdbId") else [("Заполнить из TMDb", f"mF:{kind.slug}:{note_id}")]
 
     if state == media.WANT:
-        buttons = [go("Посмотрел", media.DONE)]
+        buttons = [go("Я посмотрел", media.DONE)]
         if kind.has_in_progress:
-            buttons.append(go("Начал смотреть", media.IN_PROGRESS))
+            buttons.append(go("Я начал смотреть", media.IN_PROGRESS))
         buttons.append(go("Не буду смотреть", media.DROPPED))
     elif state == media.IN_PROGRESS:
-        buttons = [go("Посмотрел", media.DONE), go("Бросил", media.DROPPED)]
+        buttons = [go("Я посмотрел", media.DONE), go("Бросил", media.DROPPED)]
     else:
         # Посмотрел или бросил — оба состояния конечные, и единственное
         # осмысленное действие это откатить, если нажали не то.
-        buttons = [go("Вернуть в «хочу»", media.WANT)]
+        buttons = [go("Вернуть в «хочу посмотреть»", media.WANT)]
 
     await threads.send(
         thread_id, chat_id, text[:4000], parse_mode="HTML",

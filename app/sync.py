@@ -313,6 +313,32 @@ async def ledger_file(person: str):
     return await ledger.render(user_id)
 
 
+# ОДНОРАЗОВЫЙ. Повесить #фильмы на нужную заметку и убрать тестовый мусор.
+# Применить и удалить тем же днём — см. CLAUDE.md.
+@router.post("/repair_media_parent", dependencies=[Depends(require_bearer)])
+async def repair_media_parent():
+    from app.trilium_client import get_client, TRILIUM_URL
+    client = get_client()
+    result = {}
+
+    resp = await client.post(
+        f"{TRILIUM_URL}/etapi/attributes",
+        json={"noteId": "KqFXX24A870A", "type": "label", "name": "фильмы", "value": ""},
+    )
+    result["метка"] = f"{resp.status_code} {resp.text[:120]}"
+
+    for note_id, why in (("gB5XFl8inzzX", "хочу посмотреть Дюну"),):
+        d = await client.delete(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+        result[f"удалено: {why}"] = d.status_code
+
+    check = await client.get(f"{TRILIUM_URL}/etapi/notes", params={"search": "#фильмы"})
+    result["по метке найдено"] = [
+        {"id": n.get("noteId"), "title": n.get("title")}
+        for n in (check.json().get("results") or [])
+    ]
+    return result
+
+
 @router.get("/errors", dependencies=[Depends(require_bearer)])
 async def recent_errors(limit: int = 10):
     """Последние ошибки с трейсбеками — чтобы не деплоить ради того, чтобы

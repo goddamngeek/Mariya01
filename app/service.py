@@ -1947,6 +1947,16 @@ async def start_media_add_flow(
     try:
         found = await tmdb_client.search(kind, query)
         searched = True
+        if not found and note_id is None:
+            # Вид определяется словом «сериал» во фразе, и человек его
+            # опускает чаще, чем ошибается в названии: «хочу посмотреть
+            # Разделение» — это сериал, но искали среди фильмов и не нашли
+            # ничего даже при верном названии. Пробуем соседний вид молча:
+            # находка сама скажет, что это было.
+            other = media.SERIES if kind is media.FILM else media.FILM
+            found = await tmdb_client.search(other, query)
+            if found:
+                kind = other
     except tmdb_client.TmdbNotConfiguredError:
         pass  # ключа нет — заводим по названию, это штатный путь
     except Exception as exc:
@@ -1966,11 +1976,22 @@ async def start_media_add_flow(
         if not searched or retry:
             await _create_media(user_id, kind, thread_id, query, None)
             return
-        await _ask_media_title(
-            user_id, kind, thread_id,
-            f"Не нашёл «{query}». Напиши название как в базе — в именительном "
-            f"падеже, например «Дюна», а не «Дюну».",
+        # Пустая карточка — только осознанным выбором, кнопкой. Раньше она
+        # получалась сама: «I love killing flies» (на деле «I Like Killing
+        # Flies») не нашлось, и бот молча завёл заметку без года, режиссёра
+        # и описания. Человек узнавал об этом через неделю, открыв Trilium.
+        prompt_id = await create_media_add_prompt(
+            user_id, kind.slug, query, [], thread_id,
         )
+        text = (
+            f"Не нашёл «{query}» ни среди фильмов, ни среди сериалов.\n"
+            f"Напиши название точнее — или заведу как есть, без описания."
+        )
+        if await threads.send(
+            thread_id, user_id, text,
+            buttons=[("Завести как есть", f"ma:{prompt_id}:-1")],
+        ) is None:
+            await close_media_add_prompt(prompt_id)
         return
 
     candidates = [

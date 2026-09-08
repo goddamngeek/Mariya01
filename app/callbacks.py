@@ -5,6 +5,7 @@ from app.service import (
     handle_book_edit_details,
     handle_ledger_choice,
     handle_media_add_choice,
+    handle_media_fill,
     handle_media_list,
     handle_media_mark,
     handle_media_selected,
@@ -65,6 +66,9 @@ async def handle_press(press: Press) -> None:
         # список показать, ms — выбранное кино, mm — сменить состояние.
         if data.startswith("ma:"):
             await handle_media_add_choice(press)
+            return
+        if data.startswith("mF:"):
+            await handle_media_fill(press)
             return
         if data.startswith("ml:"):
             await handle_media_list(press)

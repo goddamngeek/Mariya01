@@ -468,6 +468,10 @@ CREATE TABLE IF NOT EXISTS media_add_prompts (
     updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS media_add_prompts_open_idx ON media_add_prompts (user_id) WHERE is_open;
+-- Заполнение УЖЕ существующей заметки, заведённой руками в Trilium: тогда
+-- выбор находки не создаёт новую, а дописывает эту. Отдельным ALTER —
+-- CREATE TABLE IF NOT EXISTS колонок не добавляет.
+ALTER TABLE media_add_prompts ADD COLUMN IF NOT EXISTS note_id TEXT;
 
 CREATE INDEX IF NOT EXISTS ledger_entries_note_idx
     ON ledger_entries (user_id, lower(narration), id DESC) WHERE deleted_at IS NULL;
@@ -1372,6 +1376,7 @@ async def touch_message_thread(thread_id: int | None) -> None:
 
 async def create_media_add_prompt(
     user_id: int, kind_slug: str, query: str, candidates: list, thread_id: int | None,
+    note_id: str | None = None,
 ) -> int:
     """Ждём, чем человек ответит: нажмёт находку или напишет название.
 
@@ -1382,10 +1387,10 @@ async def create_media_add_prompt(
     now = utcnow()
     return await pool.fetchval(
         "INSERT INTO media_add_prompts "
-        "(user_id, kind, query, candidates, step, is_open, thread_id, created_at, updated_at) "
-        "VALUES ($1, $2, $3, $4::jsonb, $5, TRUE, $6, $7, $7) RETURNING id",
+        "(user_id, kind, query, candidates, step, is_open, thread_id, note_id, created_at, updated_at) "
+        "VALUES ($1, $2, $3, $4::jsonb, $5, TRUE, $6, $7, $8, $8) RETURNING id",
         user_id, kind_slug, query, json.dumps(candidates),
-        0 if not candidates else 1, thread_id, now,
+        0 if not candidates else 1, thread_id, note_id, now,
     )
 
 

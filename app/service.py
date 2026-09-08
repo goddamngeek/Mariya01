@@ -81,6 +81,7 @@ from app.channel import (
 )
 from app.trilium_client import (
     add_media,
+    fill_media,
     find_media_by_title,
     create_media_review_note,
     get_media_details,
@@ -1914,7 +1915,7 @@ async def _ask_media_title(user_id: int, kind, thread_id, text: str) -> None:
 
 async def start_media_add_flow(
     user_id: int, kind, query: str, telegram_message_id: int | None = None,
-    retry: bool = False,
+    retry: bool = False, note_id: str | None = None,
 ) -> None:
     """«хочу посмотреть Дюну» — найти в TMDb и предложить выбрать.
 
@@ -1938,6 +1939,10 @@ async def start_media_add_flow(
         await _ask_media_title(user_id, kind, thread_id, f"Какой {kind.one}?")
         return
 
+    # note_id задан — значит заполняем уже заведённую руками заметку, а не
+    # создаём новую. Тогда «не нашли» это тупик, а не повод спрашивать
+    # название: название и так взято из самой заметки.
+
     searched, found = False, []
     try:
         found = await tmdb_client.search(kind, query)
@@ -1951,6 +1956,13 @@ async def start_media_add_flow(
         # Не искали вовсе (нет ключа, TMDb недоступен) или уже спрашивали —
         # заводим по написанному: переспрашивать без работающего поиска
         # бессмысленно.
+        if note_id is not None:
+            await threads.send(
+                thread_id, user_id,
+                f"Не нашёл «{query}» в TMDb. Переименуй заметку точнее и попробуй снова.",
+            )
+            await _dismiss_thread_by_id(thread_id)
+            return
         if not searched or retry:
             await _create_media(user_id, kind, thread_id, query, None)
             return
@@ -1964,7 +1976,9 @@ async def start_media_add_flow(
     candidates = [
         {"tmdb_id": f.tmdb_id, "title": f.title, "year": f.year} for f in found
     ]
-    prompt_id = await create_media_add_prompt(user_id, kind.slug, query, candidates, thread_id)
+    prompt_id = await create_media_add_prompt(
+        user_id, kind.slug, query, candidates, thread_id, note_id,
+    )
     buttons = [(f.label(), f"ma:{prompt_id}:{i}") for i, f in enumerate(found)]
     # Последней кнопкой — «ничего из этого»: выдача TMDb отсортирована по
     # популярности, и нужного там может не быть вовсе.
@@ -2051,9 +2065,30 @@ async def handle_media_add_choice(press: Press) -> None:
     if index >= len(candidates):
         return
     chosen = candidates[index]
+    if prompt["note_id"]:
+        await _fill_existing(press.chat_id, kind, prompt["thread_id"],
+                             prompt["note_id"], chosen["tmdb_id"])
+        return
     await _create_media(
         press.chat_id, kind, prompt["thread_id"], chosen["title"], chosen["tmdb_id"],
     )
+
+
+async def _fill_existing(user_id: int, kind, thread_id, note_id: str, tmdb_id: int) -> None:
+    """Дописать карточку заметке, которую человек завёл в Trilium руками."""
+    try:
+        meta = await tmdb_client.details(kind, tmdb_id)
+        await fill_media(note_id, meta)
+    except Exception as exc:
+        await _report_failure(user_id, "fill_media", "Не получилось заполнить", exc, retry=True)
+        return
+    await threads.send(
+        thread_id, user_id,
+        f"Заполнил: <b>{html.escape(meta.get('title', ''))}</b>"
+        + (f" ({meta['year']})" if meta.get("year") else ""),
+        parse_mode="HTML",
+    )
+    await _dismiss_thread_by_id(thread_id)
 
 
 async def show_media_menu(user_id: int, kind, trigger_message_id: int | None = None) -> None:
@@ -2153,6 +2188,12 @@ async def handle_media_selected(press: Press) -> None:
     def go(label: str, to: str) -> tuple[str, str]:
         return label, f"mm:{kind.slug}:{to}:{note_id}"
 
+    # Заметку могли завести руками прямо в Trilium — тогда у неё нет ни
+    # описания, ни года, ни режиссёра. Предлагаем дозаполнить, но кнопкой, а
+    # не молча: по названию «Дюна» находится пять разных фильмов, и угадать
+    # за человека значит однажды угадать неверно.
+    fill = [] if labels.get("tmdbId") else [("Заполнить из TMDb", f"mF:{kind.slug}:{note_id}")]
+
     if state == media.WANT:
         buttons = [go("Посмотрел", media.DONE)]
         if kind.has_in_progress:
@@ -2166,7 +2207,8 @@ async def handle_media_selected(press: Press) -> None:
         buttons = [go("Вернуть в «хочу»", media.WANT)]
 
     await threads.send(
-        thread_id, chat_id, text[:4000], parse_mode="HTML", buttons=buttons, row_width=2,
+        thread_id, chat_id, text[:4000], parse_mode="HTML",
+        buttons=fill + buttons, row_width=2,
     )
 
 
@@ -2180,6 +2222,24 @@ def _media_state_of(labels: dict, person_name: str) -> str:
     if labels.get(media.label_for(media.WATCHING, person_name)):
         return media.IN_PROGRESS
     return media.WANT
+
+
+async def handle_media_fill(press: Press) -> None:
+    """«Заполнить из TMDb» под карточкой без данных. Ищем по заголовку самой
+    заметки — его человек уже написал, спрашивать нечего."""
+    await answer_callback_query(press.id)
+    _prefix, kind_slug, note_id = press.data.split(":", 2)
+    kind = media.by_slug(kind_slug)
+    if kind is None:
+        return
+    if press.message_id is not None:
+        await clear_reply_markup(press.chat_id, press.message_id)
+    try:
+        title, _content, _labels, _reviews = await get_media_details(note_id)
+    except Exception as exc:
+        await _report_failure(press.chat_id, "get_media_details", "Не получилось прочитать", exc)
+        return
+    await start_media_add_flow(press.chat_id, kind, title, press.message_id, note_id=note_id)
 
 
 async def handle_media_mark(press: Press) -> None:

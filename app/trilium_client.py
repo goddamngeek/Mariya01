@@ -1579,3 +1579,36 @@ async def find_media_by_title(kind, title: str) -> Optional[str]:
         if normalize_book_title(child.get("title") or "") == wanted:
             return child_id
     return None
+
+
+@_needs_trilium
+async def fill_media(note_id: str, meta: dict) -> None:
+    """Дописать карточку заметке, заведённой руками в Trilium.
+
+    Содержимое перезаписывается целиком, а не дополняется: у заведённой
+    руками заметки тело обычно пустое, а если человек что-то написал — он
+    выбрал «Заполнить из TMDb» осознанно, и увидит результат сразу.
+
+    Лейблы PATCH-им, если они уже есть, — та же причина, что у mark_media:
+    два лейбла с одним именем на заметке хуже, чем один неверный."""
+    client = get_client()
+    await _put_content(client, note_id, _media_content(meta))
+
+    note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+    note_resp.raise_for_status()
+    attributes = note_resp.json().get("attributes", [])
+    for name, key in (("director", "creator"), ("releaseYear", "year"), ("tmdbId", "tmdb_id")):
+        value = meta.get(key)
+        if not value:
+            continue
+        existing = next(
+            (a for a in attributes if a.get("type") == "label" and a.get("name") == name), None,
+        )
+        if existing is not None:
+            patch = await client.patch(
+                f"{TRILIUM_URL}/etapi/attributes/{existing['attributeId']}",
+                json={"value": str(value)},
+            )
+            patch.raise_for_status()
+        else:
+            await _create_attribute(client, note_id, "label", name, str(value))

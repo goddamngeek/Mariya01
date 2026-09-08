@@ -1943,20 +1943,25 @@ async def start_media_add_flow(
     # создаём новую. Тогда «не нашли» это тупик, а не повод спрашивать
     # название: название и так взято из самой заметки.
 
+    # Ищем В ОБОИХ видах сразу, а не только в запрошенном.
+    #
+    # Вид угадывается словом «сериал» во фразе, и люди его опускают: «хочу
+    # посмотреть Разделение» — это сериал Apple TV+, но среди фильмов
+    # находятся пять посторонних «Разделений», и человек не понимает, куда
+    # делся нужный. Показать оба списка честнее, чем настаивать на своей
+    # догадке; сериалы подписаны, так что выбор очевиден.
+    #
+    # Заполнение уже заведённой заметки (note_id) — исключение: у неё вид
+    # уже определён тем, где она лежит, и менять его нельзя.
     searched, found = False, []
+    kinds = [kind] if note_id is not None else (
+        [kind, media.SERIES if kind is media.FILM else media.FILM]
+    )
     try:
-        found = await tmdb_client.search(kind, query)
-        searched = True
-        if not found and note_id is None:
-            # Вид определяется словом «сериал» во фразе, и человек его
-            # опускает чаще, чем ошибается в названии: «хочу посмотреть
-            # Разделение» — это сериал, но искали среди фильмов и не нашли
-            # ничего даже при верном названии. Пробуем соседний вид молча:
-            # находка сама скажет, что это было.
-            other = media.SERIES if kind is media.FILM else media.FILM
-            found = await tmdb_client.search(other, query)
-            if found:
-                kind = other
+        for candidate_kind in kinds:
+            hits = await tmdb_client.search(candidate_kind, query)
+            searched = True
+            found.extend((candidate_kind, hit) for hit in hits)
     except tmdb_client.TmdbNotConfiguredError:
         pass  # ключа нет — заводим по названию, это штатный путь
     except Exception as exc:
@@ -1995,12 +2000,16 @@ async def start_media_add_flow(
         return
 
     candidates = [
-        {"tmdb_id": f.tmdb_id, "title": f.title, "year": f.year} for f in found
+        {"tmdb_id": f.tmdb_id, "title": f.title, "year": f.year, "kind": k.slug}
+        for k, f in found
     ]
     prompt_id = await create_media_add_prompt(
         user_id, kind.slug, query, candidates, thread_id, note_id,
     )
-    buttons = [(f.label(), f"ma:{prompt_id}:{i}") for i, f in enumerate(found)]
+    buttons = [
+        (f.label() + ("" if k is kind else f" · {k.one}"), f"ma:{prompt_id}:{i}")
+        for i, (k, f) in enumerate(found)
+    ]
     # Последней кнопкой — «ничего из этого»: выдача TMDb отсортирована по
     # популярности, и нужного там может не быть вовсе.
     buttons.append(("Ничего из этого", f"ma:{prompt_id}:-1"))
@@ -2086,6 +2095,9 @@ async def handle_media_add_choice(press: Press) -> None:
     if index >= len(candidates):
         return
     chosen = candidates[index]
+    # Вид берём из самой находки: список смешанный, и «Разделение» может
+    # оказаться сериалом, хотя спрашивали про фильм.
+    kind = media.by_slug(chosen.get("kind") or kind.slug) or kind
     if prompt["note_id"]:
         await _fill_existing(press.chat_id, kind, prompt["thread_id"],
                              prompt["note_id"], chosen["tmdb_id"])

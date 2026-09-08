@@ -1905,36 +1905,60 @@ async def start_watch_intent(
         await close_book_review_prompt(prompt_id)
 
 
+async def _ask_media_title(user_id: int, kind, thread_id, text: str) -> None:
+    """Спросить название сообщением — тот же ход, что у /addbook."""
+    prompt_id = await create_media_add_prompt(user_id, kind.slug, "", [], thread_id)
+    if await threads.send(thread_id, user_id, text) is None:
+        await close_media_add_prompt(prompt_id)
+
+
 async def start_media_add_flow(
     user_id: int, kind, query: str, telegram_message_id: int | None = None,
+    retry: bool = False,
 ) -> None:
     """«хочу посмотреть Дюну» — найти в TMDb и предложить выбрать.
 
-    Без названия (просто «/addfilm») спрашиваем его сообщением. Без ключа
-    или при недоступном TMDb — тоже: добавление обязано работать всегда,
-    поиск здесь удобство, а не условие."""
+    Ничего не нашлось — СПРАШИВАЕМ название, как это делает /addbook, а не
+    заводим заметку по тому, что написано. Причина живая: по-русски пишут в
+    винительном падеже («посмотреть Дюну»), а в базе именительный («Дюна»),
+    и поиск такого не находит. Раньше здесь молча заводилась заметка с
+    названием «Дюну» — то есть кривым навсегда.
+
+    Угадывать падеж отсечением окончания я пробовал: «Дюн» действительно
+    находит «Дюну», но заодно «Воины дюн» и «В тени дюн». Спросить — честнее
+    и короче, чем угадывать.
+
+    retry=True приходит из ответа на этот самый вопрос: второй раз не
+    переспрашиваем, а заводим по написанному. Иначе человек, у которого
+    фильма в TMDb просто нет, попал бы в бесконечный круг."""
     thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
     query = query.strip()
 
-    found = []
-    if query:
-        try:
-            found = await tmdb_client.search(kind, query)
-        except tmdb_client.TmdbNotConfiguredError:
-            pass  # ключа нет — заведём по названию, это штатный путь
-        except Exception as exc:
-            print(f"tmdb search failed: {exc!r}", flush=True)
-
-    if query and not found:
-        # Искали и не нашли (или искать было нечем) — заводим как есть, а не
-        # заставляем переформулировать: название человек уже написал.
-        await _create_media(user_id, kind, thread_id, query, None)
+    if not query:
+        await _ask_media_title(user_id, kind, thread_id, f"Какой {kind.one}?")
         return
 
-    if not query:
-        prompt_id = await create_media_add_prompt(user_id, kind.slug, "", [], thread_id)
-        if await threads.send(thread_id, user_id, f"Какой {kind.one}?") is None:
-            await close_media_add_prompt(prompt_id)
+    searched, found = False, []
+    try:
+        found = await tmdb_client.search(kind, query)
+        searched = True
+    except tmdb_client.TmdbNotConfiguredError:
+        pass  # ключа нет — заводим по названию, это штатный путь
+    except Exception as exc:
+        print(f"tmdb search failed: {exc!r}", flush=True)
+
+    if not found:
+        # Не искали вовсе (нет ключа, TMDb недоступен) или уже спрашивали —
+        # заводим по написанному: переспрашивать без работающего поиска
+        # бессмысленно.
+        if not searched or retry:
+            await _create_media(user_id, kind, thread_id, query, None)
+            return
+        await _ask_media_title(
+            user_id, kind, thread_id,
+            f"Не нашёл «{query}». Напиши название как в базе — в именительном "
+            f"падеже, например «Дюна», а не «Дюну».",
+        )
         return
 
     candidates = [
@@ -1990,9 +2014,9 @@ async def _handle_media_add_reply(
         await close_media_add_prompt(prompt["id"])
         return
     await close_media_add_prompt(prompt["id"])
-    # Ищем ещё раз уже по новому названию: человек мог ответить уточнением,
-    # а не окончательным вариантом.
-    await start_media_add_flow(user_id, kind, text.strip(), telegram_message_id)
+    # retry=True: если и по уточнённому названию ничего не найдётся, заводим
+    # по нему, а не спрашиваем в третий раз.
+    await start_media_add_flow(user_id, kind, text.strip(), telegram_message_id, retry=True)
 
 
 async def handle_media_add_choice(press: Press) -> None:

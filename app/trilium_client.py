@@ -1306,6 +1306,32 @@ async def archive_done_cards(board_name: str = "КАНБАН // KANBAN") -> list
 # применительно к человеку, а не к заметке.
 
 
+async def _search_note_id_by_label(client: httpx.AsyncClient, label: str) -> Optional[str]:
+    """Заметка с такой меткой, если она одна такая.
+
+    Заголовок различать перестал: в дереве завелись две заметки «ФИЛЬМЫ»,
+    одна внутри другой, и поиск по названию брал произвольную. Метка это
+    решает — но только пока она одна: если человек повесил её на две
+    заметки, честнее вернуть None и уйти в поиск по заголовку, чем снова
+    выбирать наугад."""
+    resp = await client.get(f"{TRILIUM_URL}/etapi/notes", params={"search": f"#{label}"})
+    resp.raise_for_status()
+    results = resp.json().get("results") or []
+    return results[0].get("noteId") if len(results) == 1 else None
+
+
+async def _find_media_parent(client: httpx.AsyncClient, kind) -> Optional[str]:
+    """Куда складывать кино этого вида: сначала по метке, потом по названию."""
+    try:
+        by_label = await _search_note_id_by_label(client, kind.parent_label)
+    except httpx.HTTPError as exc:
+        print(f"trilium: поиск по метке #{kind.parent_label} не удался: {exc}", flush=True)
+        by_label = None
+    if by_label is not None:
+        return by_label
+    return await _find_note_id(client, kind.parent_note)
+
+
 async def _ensure_note(client: httpx.AsyncClient, title: str) -> str:
     """Найти заметку по заголовку или завести её в корне.
 
@@ -1357,7 +1383,9 @@ async def add_media(kind, title: str, meta: Optional[dict] = None) -> str:
     наличие. Так список «хочу» не надо ничем наполнять — он и есть всё, что
     ещё никто не тронул."""
     client = get_client()
-    parent_id = await _ensure_note(client, kind.parent_note)
+    parent_id = await _find_media_parent(client, kind)
+    if parent_id is None:
+        parent_id = await _ensure_note(client, kind.parent_note)
 
     resp = await client.post(
         f"{TRILIUM_URL}/etapi/create-note",
@@ -1402,7 +1430,7 @@ async def list_media(kind, state: str, person_name: str) -> list[dict]:
     массовой выборки, ни фильтра «нет такой метки», так что дешевле этого
     ничего не выйдет — зато _get_notes тянет их разом, а не по одному."""
     client = get_client()
-    parent_id = await _find_note_id(client, kind.parent_note)
+    parent_id = await _find_media_parent(client, kind)
     if parent_id is None:
         return []  # ещё ничего не заводили — это не ошибка, это пустой список
 
@@ -1538,7 +1566,7 @@ async def find_media_by_title(kind, title: str) -> Optional[str]:
     пробелам — тем же приёмом, что normalize_book_title сверяет названия с
     читалки: человек пишет «дюна», а в заметке «Дюна»."""
     client = get_client()
-    parent_id = await _find_note_id(client, kind.parent_note)
+    parent_id = await _find_media_parent(client, kind)
     if parent_id is None:
         return None
     parent_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{parent_id}")

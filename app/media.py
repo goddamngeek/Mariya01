@@ -25,6 +25,14 @@
 
 Лейбла `owner`, как у книг, здесь намеренно нет: он делил бы то, что делить
 не нужно.
+
+КУДА КЛАСТЬ — задаётся МЕТКОЙ на родительской заметке (`#фильмы`,
+`#сериалы`), а не её заголовком. Заголовок ненадёжен: в дереве оказалось
+две заметки «ФИЛЬМЫ», одна внутри другой, и поиск по названию брал
+произвольную. Метка снимает вопрос навсегда — заметку можно двигать,
+переименовывать и вкладывать как угодно.
+
+Заголовок остался запасным путём: пока метки нет, всё работает как раньше.
 """
 
 from dataclasses import dataclass
@@ -61,6 +69,7 @@ class MediaKind:
 
     slug: str              # film / series — едет в callback_data кнопок
     parent_note: str       # заголовок родительской заметки в Trilium
+    parent_label: str      # метка на ней же — надёжнее заголовка, см. ниже
     tmdb_path: str         # movie / tv — кусок пути в эндпоинтах TMDb
     has_in_progress: bool  # у фильмов False: «смотрю» им не показываем
 
@@ -76,6 +85,7 @@ class MediaKind:
 FILM = MediaKind(
     slug="film",
     parent_note="ФИЛЬМЫ",
+    parent_label="фильмы",
     tmdb_path="movie",
     has_in_progress=False,
     one="фильм",
@@ -88,6 +98,7 @@ FILM = MediaKind(
 SERIES = MediaKind(
     slug="series",
     parent_note="СЕРИАЛЫ",
+    parent_label="сериалы",
     tmdb_path="tv",
     has_in_progress=True,
     one="сериал",

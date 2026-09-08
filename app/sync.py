@@ -313,41 +313,6 @@ async def ledger_file(person: str):
     return await ledger.render(user_id)
 
 
-# ОДНОРАЗОВЫЙ. Прибрать за тестами: снести мусорные заметки и перенести
-# настоящую «Дюну» в размеченную #фильмы. Применить и удалить тем же днём.
-@router.post("/repair_media_parent", dependencies=[Depends(require_bearer)])
-async def repair_media_parent():
-    from app.trilium_client import get_client, TRILIUM_URL
-    client = get_client()
-    result = {}
-    target = "KqFXX24A870A"  # заметка с меткой #фильмы
-
-    # Мусор от моих тестов.
-    d = await client.delete(f"{TRILIUM_URL}/etapi/notes/P3SsTxJoXQq5")
-    result["удалено «Дюну»"] = d.status_code
-
-    # Перенос: в Trilium заметка живёт ветками, поэтому добавляем ветку к
-    # новому родителю и убираем старую, а не «переносим» одним вызовом.
-    note = await client.get(f"{TRILIUM_URL}/etapi/notes/0cx8oZiUCQMl")
-    note.raise_for_status()
-    old_branches = note.json().get("parentBranchIds") or []
-    add = await client.post(
-        f"{TRILIUM_URL}/etapi/branches",
-        json={"noteId": "0cx8oZiUCQMl", "parentNoteId": target},
-    )
-    result["ветка к новому родителю"] = add.status_code
-    if add.status_code < 300:
-        for branch_id in old_branches:
-            rm = await client.delete(f"{TRILIUM_URL}/etapi/branches/{branch_id}")
-            result[f"снята старая ветка {branch_id}"] = rm.status_code
-
-    check = await client.get(f"{TRILIUM_URL}/etapi/notes/{target}")
-    kids = await client.get(f"{TRILIUM_URL}/etapi/notes/{target}")
-    result["теперь внутри"] = kids.json().get("childNoteIds")
-    result["ok"] = check.status_code
-    return result
-
-
 @router.get("/errors", dependencies=[Depends(require_bearer)])
 async def recent_errors(limit: int = 10):
     """Последние ошибки с трейсбеками — чтобы не деплоить ради того, чтобы

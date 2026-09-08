@@ -2007,16 +2007,23 @@ async def _create_media(user_id: int, kind, thread_id, title: str, tmdb_id: int 
 async def _handle_media_add_reply(
     user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None = None,
 ) -> None:
-    """Название сообщением — когда кнопки не подошли или их не было."""
+    """Название сообщением — когда кнопки не подошли или их не было.
+
+    Текст чистим от глагола, если он там есть. На «Какой фильм?» отвечают и
+    голым названием, и целой фразой «хочу посмотреть Дюна» — а раз открытый
+    диалог перехватывает сообщение раньше разбора триггеров, без этой чистки
+    в Trilium заводилась заметка с названием «хочу посмотреть Дюна»
+    (поймано на живом проде)."""
     await threads.track(prompt["thread_id"], telegram_message_id)
     kind = media.by_slug(prompt["kind"])
     if kind is None:
         await close_media_add_prompt(prompt["id"])
         return
     await close_media_add_prompt(prompt["id"])
+    title = triggers.watch_title(text) if triggers.watch_intent(text) else text.strip()
     # retry=True: если и по уточнённому названию ничего не найдётся, заводим
     # по нему, а не спрашиваем в третий раз.
-    await start_media_add_flow(user_id, kind, text.strip(), telegram_message_id, retry=True)
+    await start_media_add_flow(user_id, kind, title, telegram_message_id, retry=True)
 
 
 async def handle_media_add_choice(press: Press) -> None:

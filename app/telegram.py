@@ -287,6 +287,9 @@ async def set_bot_commands() -> None:
         {"command": "inbox", "description": "Задачи · Разобрать новые"},
         {"command": "kanban", "description": "Задачи · Доска целиком"},
 
+        {"command": "films", "description": "Кино · Фильмы"},
+        {"command": "series", "description": "Кино · Сериалы"},
+
         {"command": "spent", "description": "Деньги · Сколько ушло за месяц"},
         {"command": "links", "description": "Ссылки · Сохранённые"},
         {"command": "addlink", "description": "Ссылки · Добавить"},

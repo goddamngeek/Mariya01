@@ -12,7 +12,7 @@
 
 from datetime import datetime
 
-from app import background, parables, threads
+from app import background, media, parables, threads
 from app.channel import send_message
 from app.config import TIMEZONE
 from app.db import get_open_activity_prompt, get_open_ezhednevnik_prompt
@@ -29,6 +29,7 @@ from app.service import (
     show_inbox,
     show_links,
     show_plan,
+    show_media_menu,
     show_reading_status,
     show_spent,
     start_book_add_flow,
@@ -53,6 +54,11 @@ HELP_TEXT = (
     "/plan — что на сегодня\n"
     "/inbox — разобрать новые задачи по дням\n"
     "/kanban — канбан-доска целиком\n"
+    "\n"
+    "КИНО\n"
+    "/films — фильмы: хочу посмотреть, посмотрел\n"
+    "/series — сериалы: плюс «смотрю»\n"
+    "— или просто «хочу посмотреть Дюну» / «посмотрел Интерстеллар»\n"
     "\n"
     "ДЕНЬГИ\n"
     "/spent — сколько ушло за месяц и на что\n"
@@ -81,6 +87,8 @@ HELP_TEXT = (
     "— отредактировать свой ответ — поправит уже записанное в Trilium\n"
     "— поставить реакцию на сообщение — свернёт всю эту ветку сразу, "
     "не дожидаясь таймера"
+    "\n\n"
+    "This product uses the TMDB API but is not endorsed or certified by TMDB."
 )
 
 
@@ -140,6 +148,14 @@ async def handle_incoming(
         background.spawn(
             start_book_add_flow(chat_id, text, telegram_message_id=message_id), "/addbook",
         )
+        return
+
+    if text.strip() == "/films":
+        background.spawn(show_media_menu(chat_id, media.FILM, message_id), "/films")
+        return
+
+    if text.strip() == "/series":
+        background.spawn(show_media_menu(chat_id, media.SERIES, message_id), "/series")
         return
 
     # По startswith, а не по равенству: у команды есть необязательный

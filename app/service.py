@@ -35,6 +35,10 @@ from app.db import (
     create_book_add_prompt,
     create_book_quote_prompt,
     create_book_review_prompt,
+    create_media_add_prompt,
+    create_media_review_prompt,
+    close_media_add_prompt,
+    get_media_add_prompt,
     filter_new_clippings,
     finalize_book_add_prompt,
     get_book_add_prompt_by_template_message,
@@ -66,7 +70,8 @@ from app.prompts import (
     ezhednevnik_step_text,
     quote_step_text,
 )
-from app import background, clippings, errors, humanize, ledger, threads, triggers
+from app import background, clippings, errors, humanize, ledger, media, threads, triggers
+from app import tmdb_client
 from app.channel import (
     answer_callback_query,
     clear_reply_markup,
@@ -75,6 +80,12 @@ from app.channel import (
     send_message_get_id,
 )
 from app.trilium_client import (
+    add_media,
+    find_media_by_title,
+    create_media_review_note,
+    get_media_details,
+    list_media,
+    mark_media,
     BOOK_DETAIL_HEADERS,
     SEED_LINKS,
     add_book,
@@ -160,6 +171,15 @@ async def process_incoming_message(
     # this stage doesn't own falls through to handle_active_message below,
     # which handles the rest of the names classify() can return.
     trigger = triggers.classify(text)
+    if trigger == "watch":
+        # Фильм или сериал решает слово «сериал» в самой фразе: по названию
+        # их не различить, а спрашивать каждый раз — лишний вопрос.
+        kind = media.SERIES if triggers.is_series_text(text) else media.FILM
+        await start_watch_intent(
+            user_id, kind, triggers.watch_intent(text), triggers.watch_title(text),
+            telegram_message_id,
+        )
+        return
     if trigger == "expense":
         await start_expense_flow(user_id, text, telegram_message_id)
         return
@@ -1445,8 +1465,15 @@ async def _handle_book_review_reply(
         return
 
     person_name = USER_NAMES.get(user_id, str(user_id))
+    # Таблица одна на книги и кино, различает их колонка kind. Отзыв
+    # ложится в разные места дерева, поэтому и функции разные, но диалог —
+    # оценка, потом текст — у них дословно один и тот же, и разводить его на
+    # две копии было бы незачем.
+    write = (
+        create_book_review_note if prompt["kind"] == "book" else create_media_review_note
+    )
     try:
-        await create_book_review_note(
+        await write(
             prompt["book_note_id"], prompt["book_title"], prompt["rating"], text.strip(), person_name,
         )
         await close_book_review_prompt(prompt["id"])
@@ -1454,7 +1481,7 @@ async def _handle_book_review_reply(
         await _dismiss_thread_by_id(thread_id)
     except Exception as exc:
         await _report_failure(
-            user_id, "create_book_review_note",
+            user_id, write.__name__,
             "Не получилось записать отзыв (Trilium недоступен)", exc, retry=True,
         )
     await ack_incoming_messages([message_id])
@@ -1810,6 +1837,361 @@ async def handle_book_edit_details(press: Press) -> None:
         await _report_failure(chat_id, "get_note_labels", "Не получилось прочитать книгу", exc)
         return
     await _offer_book_details(chat_id, note_id, title, labels.get("author", ""))
+
+
+
+
+# --- кино (см. app/media.py) ------------------------------------------------
+#
+# Отличие от книг, из которого следует всё остальное: заметка ОБЩАЯ, а
+# состояние личное. Поэтому каждый список спрашивается применительно к
+# человеку, и «посмотрел» у Маши не убирает фильм из «хочу» у Остапа.
+
+
+def _media_person(user_id: int) -> str:
+    return USER_NAMES.get(user_id, str(user_id))
+
+
+async def start_watch_intent(
+    user_id: int, kind, intent: str, title: str, telegram_message_id: int | None = None,
+) -> None:
+    """Разводит три фразы про кино по действиям.
+
+    «хочу посмотреть X» — просто завести, это и есть состояние «хочу».
+    «начал смотреть X» и «посмотрел X» — сначала найти уже заведённое, и
+    только если его нет, завести. Иначе фильм, который лежал в «хочу
+    посмотреть», раздвоился бы: один в списке, второй просмотренный."""
+    if not title:
+        return
+    if intent == "watch_want":
+        await start_media_add_flow(user_id, kind, title, telegram_message_id)
+        return
+
+    state = media.IN_PROGRESS if intent == "watch_start" else media.DONE
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
+    person = _media_person(user_id)
+
+    try:
+        note_id = await find_media_by_title(kind, title)
+    except Exception as exc:
+        await _report_failure(user_id, "find_media_by_title", "Не получилось найти", exc)
+        return
+
+    if note_id is None:
+        # Не заводили заранее — заводим сейчас и сразу помечаем. Поиск в
+        # TMDb пропускаем: человек уже посмотрел, спрашивать «что из этого?»
+        # поздно и незачем.
+        try:
+            note_id = await add_media(kind, title, None)
+        except Exception as exc:
+            await _report_failure(
+                user_id, "add_media", f"Не получилось добавить {kind.one}", exc, retry=True,
+            )
+            return
+
+    try:
+        await mark_media(kind, note_id, person, state)
+    except Exception as exc:
+        await _report_failure(user_id, "mark_media", "Не получилось отметить", exc, retry=True)
+        return
+
+    if state == media.IN_PROGRESS:
+        await threads.send(thread_id, user_id, f"Отметил, что смотришь: {title}")
+        await _dismiss_thread_by_id(thread_id)
+        return
+
+    prompt_id = await create_media_review_prompt(user_id, note_id, title, kind.slug, thread_id)
+    if await threads.send(thread_id, user_id, book_review_step_text(0)) is None:
+        await close_book_review_prompt(prompt_id)
+
+
+async def start_media_add_flow(
+    user_id: int, kind, query: str, telegram_message_id: int | None = None,
+) -> None:
+    """«хочу посмотреть Дюну» — найти в TMDb и предложить выбрать.
+
+    Без названия (просто «/addfilm») спрашиваем его сообщением. Без ключа
+    или при недоступном TMDb — тоже: добавление обязано работать всегда,
+    поиск здесь удобство, а не условие."""
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, telegram_message_id)
+    query = query.strip()
+
+    found = []
+    if query:
+        try:
+            found = await tmdb_client.search(kind, query)
+        except tmdb_client.TmdbNotConfiguredError:
+            pass  # ключа нет — заведём по названию, это штатный путь
+        except Exception as exc:
+            print(f"tmdb search failed: {exc!r}", flush=True)
+
+    if query and not found:
+        # Искали и не нашли (или искать было нечем) — заводим как есть, а не
+        # заставляем переформулировать: название человек уже написал.
+        await _create_media(user_id, kind, thread_id, query, None)
+        return
+
+    if not query:
+        prompt_id = await create_media_add_prompt(user_id, kind.slug, "", [], thread_id)
+        if await threads.send(thread_id, user_id, f"Какой {kind.one}?") is None:
+            await close_media_add_prompt(prompt_id)
+        return
+
+    candidates = [
+        {"tmdb_id": f.tmdb_id, "title": f.title, "year": f.year} for f in found
+    ]
+    prompt_id = await create_media_add_prompt(user_id, kind.slug, query, candidates, thread_id)
+    buttons = [(f.label(), f"ma:{prompt_id}:{i}") for i, f in enumerate(found)]
+    # Последней кнопкой — «ничего из этого»: выдача TMDb отсортирована по
+    # популярности, и нужного там может не быть вовсе.
+    buttons.append(("Ничего из этого", f"ma:{prompt_id}:-1"))
+    if await threads.send(
+        thread_id, user_id, "Что из этого?", buttons=buttons,
+    ) is None:
+        await close_media_add_prompt(prompt_id)
+
+
+async def _create_media(user_id: int, kind, thread_id, title: str, tmdb_id: int | None) -> None:
+    """Завести заметку и подтвердить. Подробности тянем вторым запросом
+    только когда есть что тянуть."""
+    meta = None
+    if tmdb_id is not None:
+        try:
+            meta = await tmdb_client.details(kind, tmdb_id)
+            title = meta.get("title") or title
+        except Exception as exc:
+            print(f"tmdb details failed: {exc!r}", flush=True)
+
+    try:
+        await add_media(kind, title, meta)
+    except Exception as exc:
+        await _report_failure(
+            user_id, "add_media", f"Не получилось добавить {kind.one}", exc, retry=True,
+        )
+        return
+
+    year = (meta or {}).get("year", "")
+    await threads.send(
+        thread_id, user_id,
+        f"Добавил в «хочу посмотреть»: <b>{html.escape(title)}</b>"
+        + (f" ({year})" if year else ""),
+        parse_mode="HTML",
+    )
+    await _dismiss_thread_by_id(thread_id)
+
+
+async def _handle_media_add_reply(
+    user_id: int, text: str, reply_to_text: str | None, prompt, telegram_message_id: int | None = None,
+) -> None:
+    """Название сообщением — когда кнопки не подошли или их не было."""
+    await threads.track(prompt["thread_id"], telegram_message_id)
+    kind = media.by_slug(prompt["kind"])
+    if kind is None:
+        await close_media_add_prompt(prompt["id"])
+        return
+    await close_media_add_prompt(prompt["id"])
+    # Ищем ещё раз уже по новому названию: человек мог ответить уточнением,
+    # а не окончательным вариантом.
+    await start_media_add_flow(user_id, kind, text.strip(), telegram_message_id)
+
+
+async def handle_media_add_choice(press: Press) -> None:
+    """Нажата находка TMDb — или «ничего из этого»."""
+    await answer_callback_query(press.id)
+    _prefix, prompt_id_raw, index_raw = press.data.split(":", 2)
+    prompt = await get_media_add_prompt(int(prompt_id_raw))
+    if prompt is None or not prompt["is_open"] or prompt["user_id"] != press.chat_id:
+        return
+    kind = media.by_slug(prompt["kind"])
+    if kind is None:
+        return
+
+    if press.message_id is not None:
+        await clear_reply_markup(press.chat_id, press.message_id)
+    await close_media_add_prompt(prompt["id"])
+
+    index = int(index_raw)
+    if index < 0:
+        # «Ничего из этого» — заводим по тому, что человек написал сам.
+        await _create_media(press.chat_id, kind, prompt["thread_id"], prompt["query"], None)
+        return
+
+    candidates = json.loads(prompt["candidates"] or "[]")
+    if index >= len(candidates):
+        return
+    chosen = candidates[index]
+    await _create_media(
+        press.chat_id, kind, prompt["thread_id"], chosen["title"], chosen["tmdb_id"],
+    )
+
+
+async def show_media_menu(user_id: int, kind, trigger_message_id: int | None = None) -> None:
+    """/films и /series — не список, а выбор списка.
+
+    Плоскими командами это было бы пять пунктов в меню телеграма, где и так
+    семнадцать. Здесь два, а состояния разводятся кнопками."""
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
+    buttons = [("Хочу посмотреть", f"ml:{kind.slug}:{media.WANT}")]
+    if kind.has_in_progress:
+        buttons.append(("Смотрю", f"ml:{kind.slug}:{media.IN_PROGRESS}"))
+    buttons.append(("Посмотрел", f"ml:{kind.slug}:{media.DONE}"))
+    await threads.send(
+        thread_id, user_id, f"{kind.one.capitalize()}ы — что показать?",
+        buttons=buttons, row_width=2,
+    )
+
+
+_MEDIA_EMPTY = {
+    media.WANT: lambda k: k.want_empty,
+    media.IN_PROGRESS: lambda k: k.progress_empty,
+    media.DONE: lambda k: k.done_empty,
+}
+
+
+async def handle_media_list(press: Press) -> None:
+    """Нажата кнопка списка — показать его содержимое кнопками."""
+    await answer_callback_query(press.id)
+    _prefix, kind_slug, state = press.data.split(":", 2)
+    kind = media.by_slug(kind_slug)
+    if kind is None:
+        return
+    chat_id = press.chat_id
+
+    thread = None
+    if press.message_id is not None:
+        await clear_reply_markup(chat_id, press.message_id)
+        thread = await threads.thread_for_message(chat_id, press.message_id)
+    thread_id = thread["id"] if thread is not None else None
+
+    try:
+        items = await list_media(kind, state, _media_person(chat_id))
+    except Exception:
+        traceback.print_exc()
+        await send_message(chat_id, TRILIUM_UNAVAILABLE_TEXT)
+        return
+
+    if not items:
+        await threads.send(thread_id, chat_id, _MEDIA_EMPTY[state](kind))
+        return
+
+    buttons = [
+        (_media_label(item), f"ms:{kind.slug}:{item['note_id']}") for item in items
+    ]
+    await threads.send(thread_id, chat_id, kind.accusative, buttons=buttons)
+
+
+def _media_label(item: dict) -> str:
+    """«Дюна (2021)» — год различает переснятое, как автор различает книги."""
+    year = (item.get("year") or "").strip()
+    return f"{item['title']} ({year})" if year else item["title"]
+
+
+async def handle_media_selected(press: Press) -> None:
+    """Карточка выбранного кино плюс кнопки перехода в другое состояние."""
+    await answer_callback_query(press.id)
+    _prefix, kind_slug, note_id = press.data.split(":", 2)
+    kind = media.by_slug(kind_slug)
+    if kind is None:
+        return
+    chat_id = press.chat_id
+    person = _media_person(chat_id)
+
+    thread = None
+    if press.message_id is not None:
+        await clear_reply_markup(chat_id, press.message_id)
+        thread = await threads.thread_for_message(chat_id, press.message_id)
+    thread_id = thread["id"] if thread is not None else None
+
+    try:
+        title, content, labels, reviews = await get_media_details(note_id)
+    except Exception as exc:
+        await _report_failure(chat_id, "get_media_details", "Не получилось прочитать карточку", exc)
+        return
+
+    state = _media_state_of(labels, person)
+    rating = _ratings(reviews)
+    text = f"<b>{html.escape(title)}</b>"
+    if rating:
+        text += f"\n{html.escape(rating)}"
+    if content:
+        text += f"\n\n{html.escape(content)}"
+
+    # Кнопки — только переходы, осмысленные из текущего состояния. Иначе под
+    # уже просмотренным фильмом висело бы «Не буду смотреть», а под тем, что
+    # ещё не начинали, — «Бросил».
+    def go(label: str, to: str) -> tuple[str, str]:
+        return label, f"mm:{kind.slug}:{to}:{note_id}"
+
+    if state == media.WANT:
+        buttons = [go("Посмотрел", media.DONE)]
+        if kind.has_in_progress:
+            buttons.append(go("Начал смотреть", media.IN_PROGRESS))
+        buttons.append(go("Не буду смотреть", media.DROPPED))
+    elif state == media.IN_PROGRESS:
+        buttons = [go("Посмотрел", media.DONE), go("Бросил", media.DROPPED)]
+    else:
+        # Посмотрел или бросил — оба состояния конечные, и единственное
+        # осмысленное действие это откатить, если нажали не то.
+        buttons = [go("Вернуть в «хочу»", media.WANT)]
+
+    await threads.send(
+        thread_id, chat_id, text[:4000], parse_mode="HTML", buttons=buttons, row_width=2,
+    )
+
+
+def _media_state_of(labels: dict, person_name: str) -> str:
+    """То же правило, что в trilium_client._media_state, но по уже
+    прочитанным лейблам — второй раз в сеть за ними не ходим."""
+    if labels.get(media.label_for(media.WATCHED, person_name)):
+        return media.DONE
+    if labels.get(media.label_for(media.DROPPED, person_name)):
+        return media.DROPPED
+    if labels.get(media.label_for(media.WATCHING, person_name)):
+        return media.IN_PROGRESS
+    return media.WANT
+
+
+async def handle_media_mark(press: Press) -> None:
+    """Переставить состояние. Для «посмотрел» следом идёт диалог оценки —
+    но метка ставится ДО вопросов, как у книг: брошенный диалог оставляет
+    фильм корректно отмеченным, просто без отзыва."""
+    await answer_callback_query(press.id)
+    _prefix, kind_slug, state, note_id = press.data.split(":", 3)
+    kind = media.by_slug(kind_slug)
+    if kind is None:
+        return
+    chat_id = press.chat_id
+    person = _media_person(chat_id)
+
+    thread = None
+    if press.message_id is not None:
+        await clear_reply_markup(chat_id, press.message_id)
+        thread = await threads.thread_for_message(chat_id, press.message_id)
+    thread_id = thread["id"] if thread is not None else None
+
+    try:
+        title, _content, _labels, _reviews = await get_media_details(note_id)
+        await mark_media(kind, note_id, person, state)
+    except Exception as exc:
+        await _report_failure(chat_id, "mark_media", "Не получилось отметить", exc, retry=True)
+        return
+
+    if state != media.DONE:
+        said = {
+            media.WANT: "Вернул в «хочу посмотреть»",
+            media.IN_PROGRESS: "Отметил, что смотришь",
+            media.DROPPED: "Убрал из списка",
+        }[state]
+        await threads.send(thread_id, chat_id, f"{said}: {title}")
+        await _dismiss_thread_by_id(thread_id)
+        return
+
+    prompt_id = await create_media_review_prompt(chat_id, note_id, title, kind.slug, thread_id)
+    if await threads.send(thread_id, chat_id, book_review_step_text(0)) is None:
+        await close_book_review_prompt(prompt_id)
+
+
+_PROMPT_HANDLERS["media_add"] = _handle_media_add_reply
 
 
 # Каждый вид диалога должен быть и в карте таблиц (app/db.py), и в карте

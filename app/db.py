@@ -445,6 +445,30 @@ CREATE INDEX IF NOT EXISTS ledger_entries_user_idx
 -- Подстановка счёта и категории по прошлой такой же трате — то, что заменило
 -- два вопроса из пяти. Делается на каждой трате, поэтому индекс. Ключ —
 -- описание, а не получатель: люди пишут «на креатин», а не название магазина.
+-- Отзывы теперь бывают не только на книги: та же таблица обслуживает кино
+-- (см. app/media.py). Отдельным ALTER, а не правкой CREATE TABLE выше:
+-- CREATE TABLE IF NOT EXISTS колонок существующей таблице НЕ добавляет —
+-- симптом пропущенной миграции в том, что локально всё импортируется, а на
+-- живом проде эндпоинт молча отдаёт 500.
+ALTER TABLE book_review_prompts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'book';
+
+-- Добавление фильма или сериала: ждём либо выбора из находок TMDb кнопкой,
+-- либо названия сообщением (когда ключа нет или ничего не нашлось).
+-- candidates — то, что показали кнопками, чтобы не искать заново по нажатию.
+CREATE TABLE IF NOT EXISTS media_add_prompts (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    kind TEXT NOT NULL,
+    query TEXT NOT NULL DEFAULT '',
+    candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
+    step INTEGER NOT NULL DEFAULT 0,
+    is_open BOOLEAN NOT NULL DEFAULT TRUE,
+    thread_id INTEGER,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS media_add_prompts_open_idx ON media_add_prompts (user_id) WHERE is_open;
+
 CREATE INDEX IF NOT EXISTS ledger_entries_note_idx
     ON ledger_entries (user_id, lower(narration), id DESC) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_external_idx
@@ -899,6 +923,7 @@ _PROMPT_TABLES = {
     "book_add": "book_add_prompts",
     "link_add": "link_add_prompts",
     "task_add": "task_add_prompts",
+    "media_add": "media_add_prompts",
 }
 
 # ежедневник outranks everything (priority 0): it's the one scheduled
@@ -921,6 +946,8 @@ UNION ALL
 SELECT 'link_add', id, updated_at, 1 FROM link_add_prompts WHERE user_id = $1 AND is_open
 UNION ALL
 SELECT 'task_add', id, updated_at, 1 FROM task_add_prompts WHERE user_id = $1 AND is_open
+UNION ALL
+SELECT 'media_add', id, updated_at, 1 FROM media_add_prompts WHERE user_id = $1 AND is_open
 ORDER BY priority, updated_at DESC
 LIMIT 1
 """
@@ -1338,3 +1365,52 @@ async def touch_message_thread(thread_id: int | None) -> None:
         "UPDATE message_threads SET updated_at = $1 WHERE id = $2", utcnow(), thread_id
     )
 
+
+
+# --- кино (см. app/media.py) ------------------------------------------------
+
+
+async def create_media_add_prompt(
+    user_id: int, kind_slug: str, query: str, candidates: list, thread_id: int | None,
+) -> int:
+    """Ждём, чем человек ответит: нажмёт находку или напишет название.
+
+    candidates кладём сразу — по нажатию кнопка несёт только номер, и искать
+    в TMDb второй раз, чтобы узнать, на что нажали, было бы и медленнее, и
+    ненадёжно: выдача поиска не обязана быть стабильной между запросами."""
+    pool = await get_pool()
+    now = utcnow()
+    return await pool.fetchval(
+        "INSERT INTO media_add_prompts "
+        "(user_id, kind, query, candidates, step, is_open, thread_id, created_at, updated_at) "
+        "VALUES ($1, $2, $3, $4::jsonb, $5, TRUE, $6, $7, $7) RETURNING id",
+        user_id, kind_slug, query, json.dumps(candidates),
+        0 if not candidates else 1, thread_id, now,
+    )
+
+
+async def get_media_add_prompt(prompt_id: int) -> asyncpg.Record | None:
+    pool = await get_pool()
+    return await pool.fetchrow("SELECT * FROM media_add_prompts WHERE id = $1", prompt_id)
+
+
+async def close_media_add_prompt(prompt_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE media_add_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
+
+
+async def create_media_review_prompt(
+    user_id: int, note_id: str, title: str, kind_slug: str, thread_id: int | None = None,
+) -> int:
+    """Оценка и впечатление — та же таблица, что у книг, плюс вид.
+
+    Своей заводить не стали: поля совпадают полностью, а второй почти такой
+    же таблицей пришлось бы дублировать и обработчик."""
+    pool = await get_pool()
+    now = utcnow()
+    return await pool.fetchval(
+        "INSERT INTO book_review_prompts "
+        "(user_id, book_note_id, book_title, kind, sent_at, updated_at, is_open, thread_id) "
+        "VALUES ($1, $2, $3, $4, $5, $5, TRUE, $6) RETURNING id",
+        user_id, note_id, title, kind_slug, now, thread_id,
+    )

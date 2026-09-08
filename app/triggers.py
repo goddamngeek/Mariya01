@@ -194,6 +194,71 @@ def expense_note(text: str) -> str:
     return _TAIL_PREPOSITION_RE.sub("", out).strip()
 
 
+_WATCH_WANT_RE = re.compile(r"\bхочу\s+(?:по)?смотреть\b", re.IGNORECASE)
+_WATCH_DONE_RE = re.compile(r"\b(посмотрел[аи]?|досмотрел[аи]?)\b", re.IGNORECASE)
+_WATCH_START_RE = re.compile(r"\bнача(?:л|ла|ли)\s+смотреть\b", re.IGNORECASE)
+_SERIES_RE = re.compile(r"\bсериал\w*\b", re.IGNORECASE)
+
+
+# Слова, с которых начинается придаточное, а не название. «Посмотрел, ЧТО
+# там по деньгам» — это не фильм, и отличается оно ровно этим.
+_CLAUSE_START_RE = re.compile(
+    r"^(что|как|где|когда|кто|куда|сколько|почему|зачем|какой|какая|какие|ли)\b",
+    re.IGNORECASE,
+)
+
+
+def watch_intent(text: str) -> str | None:
+    """«хочу посмотреть» / «посмотрел» / «начал смотреть» — или None.
+
+    Строже, чем кажется нужным, и намеренно. Ложное срабатывание здесь не
+    стоит лишнего вопроса, а заводит настоящую заметку в Trilium с мусорным
+    названием. Поэтому требуется всё сразу: после глагола идёт пробел, а не
+    запятая, и дальше не придаточное. «Посмотрел, что там по деньгам»
+    отсекается по обоим признакам."""
+    for name, pattern in (
+        ("watch_want", _WATCH_WANT_RE),
+        ("watch_start", _WATCH_START_RE),
+        ("watch_done", _WATCH_DONE_RE),
+    ):
+        match = pattern.search(text)
+        if match is None:
+            continue
+        tail = text[match.end():]
+        if tail[:1] not in (" ", ""):
+            continue  # сразу запятая или двоеточие — это оборот, не название
+        rest = tail.strip(" ,.:—-")
+        if rest and not _CLAUSE_START_RE.match(rest):
+            return name
+    return None
+
+
+def watch_title(text: str) -> str:
+    """Что осталось от «хочу посмотреть сериал Дюна» — «Дюна».
+
+    Слово «сериал» вырезается вместе с глаголом: оно выбрало вид (см.
+    is_series_text) и в названии ему делать нечего."""
+    out = text
+    for pattern in (_WATCH_WANT_RE, _WATCH_START_RE, _WATCH_DONE_RE, _SERIES_RE):
+        out = pattern.sub(" ", out, count=1)
+    # Предлог в начале НЕ срезаем, в отличие от описания траты: «Во все
+    # тяжкие» и «На игле» — настоящие названия, и «все тяжкие» из них
+    # получилось бы молча.
+    return " ".join(out.split()).strip(" ,.:;—-\"«»")
+
+
+def is_series_text(text: str) -> bool:
+    """Сериал это или фильм. Отличить «Дюну»-фильм от «Дюны»-сериала по
+    названию невозможно, поэтому решает слово «сериал» в самой фразе;
+    без него считаем фильмом, их смотрят чаще. Команды /films и /series
+    задают вид явно и сюда не заходят."""
+    return _SERIES_RE.search(text) is not None
+
+
+def is_watch_request(text: str) -> bool:
+    return watch_intent(text) is not None
+
+
 # Most specific first. A message satisfying two rules belongs to whichever
 # appears earlier, so anything sharing context words with a broader rule has
 # to sit above it: kanban_add over kanban_status (both say "канбан"),
@@ -201,6 +266,9 @@ def expense_note(text: str) -> str:
 # note_request, whose verbs are the most generic of the lot.
 PRECEDENCE = (
     ("expense", is_expense),
+    # Раньше книг: «хочу посмотреть» и «добавь» пересекаются по глаголам, а
+    # кино в этой фразе однозначнее.
+    ("watch", is_watch_request),
     ("activity", is_activity_log),
     ("quote", is_quote_request),
     ("reading_status", is_reading_status),

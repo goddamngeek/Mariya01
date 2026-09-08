@@ -17,6 +17,7 @@ from app.db import (
     log_chat_message,
     register_user,
 )
+from app.tmdb_client import close_client as close_tmdb_client
 from app.trilium_client import close_client as close_trilium_client
 from app import background, errors
 from app.scheduler import scheduler, start_scheduler
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
     await close_telegram_client()
     await close_trilium_client()
+    await close_tmdb_client()
     await close_pool()
 
 

@@ -4,6 +4,10 @@ from app.service import (
     handle_book_quotes_selected,
     handle_book_edit_details,
     handle_ledger_choice,
+    handle_media_add_choice,
+    handle_media_list,
+    handle_media_mark,
+    handle_media_selected,
     handle_planner_action,
     handle_finished_book_selected,
     handle_quote_book_selected,
@@ -55,6 +59,21 @@ async def handle_press(press: Press) -> None:
         # записанной строкой.
         if data.startswith("el:"):
             await handle_ledger_choice(press)
+            return
+
+        # Кино (см. app/media.py): ma — выбор находки TMDb, ml — какой
+        # список показать, ms — выбранное кино, mm — сменить состояние.
+        if data.startswith("ma:"):
+            await handle_media_add_choice(press)
+            return
+        if data.startswith("ml:"):
+            await handle_media_list(press)
+            return
+        if data.startswith("ms:"):
+            await handle_media_selected(press)
+            return
+        if data.startswith("mm:"):
+            await handle_media_mark(press)
             return
 
     await answer_callback_query(press.id)

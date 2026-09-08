@@ -29,7 +29,7 @@ from app.service import (
     show_inbox,
     show_links,
     show_plan,
-    show_media_menu,
+    show_media_list,
     start_media_add_flow,
     show_reading_status,
     show_spent,
@@ -57,8 +57,10 @@ HELP_TEXT = (
     "/kanban — канбан-доска целиком\n"
     "\n"
     "КИНО\n"
-    "/films — фильмы: хочу посмотреть, посмотрел\n"
-    "/series — сериалы: плюс «смотрю»\n"
+    "/films — я хочу посмотреть, фильмы\n"
+    "/series — я хочу посмотреть, сериалы\n"
+    "/watching — я смотрю (сериалы)\n"
+    "/watched — просмотренные\n"
     "/addfilm Название — добавить фильм\n"
     "/addseries Название — добавить сериал\n"
     "— или просто «хочу посмотреть Дюну» / «посмотрел Интерстеллар»\n"
@@ -165,12 +167,19 @@ async def handle_incoming(
             )
             return
 
-    if text.strip() == "/films":
-        background.spawn(show_media_menu(chat_id, media.FILM, message_id), "/films")
-        return
-
-    if text.strip() == "/series":
-        background.spawn(show_media_menu(chat_id, media.SERIES, message_id), "/series")
+    # Плоско, как у книг: каждый список — своя команда, без промежуточного
+    # меню «что показать?».
+    _MEDIA_COMMANDS = {
+        "/films": (media.WANT, [media.FILM]),
+        "/series": (media.WANT, [media.SERIES]),
+        "/watching": (media.IN_PROGRESS, [media.SERIES]),
+        "/watched": (media.DONE, [media.FILM, media.SERIES]),
+    }
+    if text.strip() in _MEDIA_COMMANDS:
+        state, kinds = _MEDIA_COMMANDS[text.strip()]
+        background.spawn(
+            show_media_list(chat_id, state, kinds, message_id), text.strip(),
+        )
         return
 
     # По startswith, а не по равенству: у команды есть необязательный

@@ -2159,49 +2159,40 @@ _MEDIA_LIST_NAMES = {
 }
 
 
-async def _render_media_list(user_id: int, kind, state: str, thread_id) -> None:
-    """Список одним сообщением: сам список кнопками, а под ним переходы в
-    остальные списки. Так любой из них в одном нажатии, и при этом не
-    приходится начинать с выбора."""
+async def show_media_list(
+    user_id: int, state: str, kinds: list, trigger_message_id: int | None = None,
+) -> None:
+    """Один список одной командой — ровно как /reading и /finished у книг.
+
+    Навигации кнопками между списками нет намеренно: у книг её нет, а
+    промежуточное меню «что показать?» уже один раз сбило с толку.
+
+    kinds списком, потому что «просмотренные» осмысленно показывать
+    фильмами и сериалами вместе: это архив, и делить его незачем."""
+    person = _media_person(user_id)
+    items = []
     try:
-        items = await list_media(kind, state, _media_person(user_id))
+        for kind in kinds:
+            for item in await list_media(kind, state, person):
+                items.append((kind, item))
     except Exception:
         traceback.print_exc()
         await send_message(user_id, TRILIUM_UNAVAILABLE_TEXT)
         return
 
-    buttons = [
-        (_media_label(item), f"ms:{kind.slug}:{item['note_id']}") for item in items
-    ]
-    # Переходы в соседние списки — всегда, даже когда текущий пуст: пустой
-    # список это и есть момент, когда человек ищет, где же остальное.
-    others = [
-        (name, f"ml:{kind.slug}:{other}")
-        for other, name in _MEDIA_LIST_NAMES.items()
-        if other != state and (kind.has_in_progress or other != media.IN_PROGRESS)
-    ]
-    text = (
-        f"{_MEDIA_LIST_NAMES[state]} · {kind.one}ы"
-        if items else _MEDIA_EMPTY[state](kind)
-    )
-    await threads.send(thread_id, user_id, text, buttons=buttons + others, row_width=2)
-
-
-async def handle_media_list(press: Press) -> None:
-    """Нажата кнопка перехода в другой список."""
-    await answer_callback_query(press.id)
-    _prefix, kind_slug, state = press.data.split(":", 2)
-    kind = media.by_slug(kind_slug)
-    if kind is None:
+    thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
+    if not items:
+        await threads.send(thread_id, user_id, _MEDIA_EMPTY[state](kinds[0]))
         return
 
-    thread = None
-    if press.message_id is not None:
-        await clear_reply_markup(press.chat_id, press.message_id)
-        thread = await threads.thread_for_message(press.chat_id, press.message_id)
-    await _render_media_list(
-        press.chat_id, kind, state, thread["id"] if thread is not None else None,
-    )
+    buttons = [
+        # Вид дописывается, только когда список смешанный: в списке одних
+        # фильмов подпись «фильм» у каждого — шум.
+        (_media_label(item) + ("" if len(kinds) == 1 else f" · {kind.one}"),
+         f"ms:{kind.slug}:{item['note_id']}")
+        for kind, item in items
+    ]
+    await threads.send(thread_id, user_id, _MEDIA_LIST_NAMES[state], buttons=buttons)
 
 
 def _media_label(item: dict) -> str:

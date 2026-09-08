@@ -30,6 +30,7 @@ from app.service import (
     show_links,
     show_plan,
     show_media_menu,
+    start_media_add_flow,
     show_reading_status,
     show_spent,
     start_book_add_flow,
@@ -58,6 +59,8 @@ HELP_TEXT = (
     "КИНО\n"
     "/films — фильмы: хочу посмотреть, посмотрел\n"
     "/series — сериалы: плюс «смотрю»\n"
+    "/addfilm Название — добавить фильм\n"
+    "/addseries Название — добавить сериал\n"
     "— или просто «хочу посмотреть Дюну» / «посмотрел Интерстеллар»\n"
     "\n"
     "ДЕНЬГИ\n"
@@ -149,6 +152,18 @@ async def handle_incoming(
             start_book_add_flow(chat_id, text, telegram_message_id=message_id), "/addbook",
         )
         return
+
+    # В отличие от /addbook (там строгое равенство, см. CLAUDE.md) — по
+    # startswith: «/addfilm Дюна» должно работать так же, как фраза «хочу
+    # посмотреть Дюна». Голая команда спрашивает название сама.
+    for command, kind in (("/addfilm", media.FILM), ("/addseries", media.SERIES)):
+        stripped = text.strip()
+        if stripped == command or stripped.startswith(command + " "):
+            background.spawn(
+                start_media_add_flow(chat_id, kind, stripped[len(command):], message_id),
+                command,
+            )
+            return
 
     if text.strip() == "/films":
         background.spawn(show_media_menu(chat_id, media.FILM, message_id), "/films")

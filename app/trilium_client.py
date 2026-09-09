@@ -549,7 +549,9 @@ DETAIL_SLOTS = tuple(
 
 
 @_needs_trilium
-async def fill_book_details(note_id: str, values: list[Optional[str]]) -> None:
+async def fill_book_details(
+    note_id: str, values: list[Optional[str]], headers: tuple = BOOK_DETAIL_HEADERS,
+) -> None:
     """Fills in whichever of the 4 template sections have a value (None =
     skip, leave whatever placeholder is already there) — values is
     positional, same order as BOOK_DETAIL_HEADERS. Each section is replaced
@@ -560,12 +562,14 @@ async def fill_book_details(note_id: str, values: list[Optional[str]]) -> None:
     markup shape."""
     client = get_client()
     content = await _get_content(client, note_id)
-    for spellings, value in zip(DETAIL_SLOTS, values):
+    for spellings, value, fallback in zip(DETAIL_SLOTS, values, headers):
         if not value:
             continue
         # Какая из формулировок раздела реально стоит в этой заметке —
-        # «Похожие книги» или «Похожие фильмы».
-        header = next((h for h in spellings if f"<h2>{h}</h2>" in content), spellings[0])
+        # «Похожие книги» или «Похожие фильмы». Если раздела нет вовсе,
+        # заводим тот, что соответствует виду: у фильмов, заведённых до
+        # перехода на книжный шаблон, разделов нет ни одного.
+        header = next((h for h in spellings if f"<h2>{h}</h2>" in content), fallback)
         # Stop at the next <h2> *or* at the first <hr>: quotes added by
         # /quote and by the clippings import live after the last section
         # with no <h2> of their own, so a plain "up to the next heading"

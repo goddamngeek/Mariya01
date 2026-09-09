@@ -80,6 +80,8 @@ from app.channel import (
     send_message_get_id,
 )
 from app.trilium_client import (
+    BOOK_DETAIL_HEADERS,
+    FILM_DETAIL_HEADERS,
     add_film,
     find_film_by_title,
     create_film_review_note,
@@ -690,16 +692,19 @@ def split_book_details(text: str) -> list[Optional[str]]:
     return (paragraphs + [None, None, None, None])[:4]
 
 
-async def _apply_book_details(user_id: int, thread_id: int | None, note_id: str, text: str) -> bool:
+async def _apply_book_details(
+    user_id: int, thread_id: int | None, note_id: str, text: str, kind: str = "book",
+) -> bool:
     """Shared by both ways of answering the "расскажи подробнее" template —
     the plain-message continuation (step 2 in _handle_book_add_reply below)
     and a reply to the template itself (handle_book_details_reply).
     Returns whether it succeeded — the caller only deletes the exchange's
     messages on True."""
     values = split_book_details(text)
+    headers = FILM_DETAIL_HEADERS if kind == "film" else BOOK_DETAIL_HEADERS
 
     try:
-        await fill_book_details(note_id, values)
+        await fill_book_details(note_id, values, headers)
         await threads.send(thread_id, user_id, "Спасибо, добавил книгу!")
         await _dismiss_thread_by_id(thread_id)
         return True
@@ -735,7 +740,9 @@ async def _handle_book_add_reply(
         return
 
     if step == 2:
-        await _apply_book_details(user_id, thread_id, prompt["book_note_id"], text)
+        await _apply_book_details(
+            user_id, thread_id, prompt["book_note_id"], text, prompt["kind"],
+        )
         await close_book_add_prompt(prompt["id"])
         await ack_incoming_messages([message_id])
         return

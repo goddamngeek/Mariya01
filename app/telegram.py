@@ -288,12 +288,10 @@ async def set_bot_commands() -> None:
         {"command": "inbox", "description": "Задачи · Разобрать новые"},
         {"command": "kanban", "description": "Задачи · Доска целиком"},
 
-        {"command": "films", "description": "Кино · Я хочу посмотреть, фильмы"},
-        {"command": "addfilm", "description": "Кино · Добавить фильм"},
-        {"command": "series", "description": "Кино · Я хочу посмотреть, сериалы"},
-        {"command": "watching", "description": "Кино · Я смотрю"},
+
+        {"command": "films", "description": "Кино · Я хочу посмотреть"},
         {"command": "watched", "description": "Кино · Просмотренные"},
-        {"command": "addseries", "description": "Кино · Добавить сериал"},
+        {"command": "addfilm", "description": "Кино · Добавить фильм"},
 
         {"command": "spent", "description": "Деньги · Сколько ушло за месяц"},
         {"command": "links", "description": "Ссылки · Сохранённые"},

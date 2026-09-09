@@ -458,26 +458,15 @@ ALTER TABLE book_review_prompts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFA
 -- добавляет.
 ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS start_reading BOOLEAN NOT NULL DEFAULT TRUE;
 
--- Добавление фильма или сериала: ждём либо выбора из находок TMDb кнопкой,
--- либо названия сообщением (когда ключа нет или ничего не нашлось).
--- candidates — то, что показали кнопками, чтобы не искать заново по нажатию.
-CREATE TABLE IF NOT EXISTS media_add_prompts (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    kind TEXT NOT NULL,
-    query TEXT NOT NULL DEFAULT '',
-    candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
-    step INTEGER NOT NULL DEFAULT 0,
-    is_open BOOLEAN NOT NULL DEFAULT TRUE,
-    thread_id INTEGER,
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS media_add_prompts_open_idx ON media_add_prompts (user_id) WHERE is_open;
--- Заполнение УЖЕ существующей заметки, заведённой руками в Trilium: тогда
--- выбор находки не создаёт новую, а дописывает эту. Отдельным ALTER —
--- CREATE TABLE IF NOT EXISTS колонок не добавляет.
-ALTER TABLE media_add_prompts ADD COLUMN IF NOT EXISTS note_id TEXT;
+-- Тот же диалог заводит и книгу, и фильм: вопросы одинаковые (название,
+-- потом автор либо режиссёр), шаблон описания один и тот же. Различает их
+-- только эта колонка.
+ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'book';
+
+-- У отзыва на фильм три шага, а не два: между оценкой и запомнившимся надо
+-- где-то держать сам текст впечатления.
+ALTER TABLE book_review_prompts ADD COLUMN IF NOT EXISTS review_text TEXT;
+
 
 CREATE INDEX IF NOT EXISTS ledger_entries_note_idx
     ON ledger_entries (user_id, lower(narration), id DESC) WHERE deleted_at IS NULL;
@@ -783,14 +772,15 @@ async def close_book_quote_prompt(prompt_id: int) -> None:
 
 async def create_book_add_prompt(
     user_id: int, thread_id: int | None = None, start_reading: bool = False,
+    kind: str = "book",
 ) -> int:
     pool = await get_pool()
     now = utcnow()
     return await pool.fetchval(
         "INSERT INTO book_add_prompts "
-        "(user_id, sent_at, updated_at, is_open, thread_id, start_reading) "
-        "VALUES ($1, $2, $2, TRUE, $3, $4) RETURNING id",
-        user_id, now, thread_id, start_reading,
+        "(user_id, sent_at, updated_at, is_open, thread_id, start_reading, kind) "
+        "VALUES ($1, $2, $2, TRUE, $3, $4, $5) RETURNING id",
+        user_id, now, thread_id, start_reading, kind,
     )
 
 
@@ -936,7 +926,6 @@ _PROMPT_TABLES = {
     "book_add": "book_add_prompts",
     "link_add": "link_add_prompts",
     "task_add": "task_add_prompts",
-    "media_add": "media_add_prompts",
 }
 
 # ежедневник outranks everything (priority 0): it's the one scheduled
@@ -959,8 +948,6 @@ UNION ALL
 SELECT 'link_add', id, updated_at, 1 FROM link_add_prompts WHERE user_id = $1 AND is_open
 UNION ALL
 SELECT 'task_add', id, updated_at, 1 FROM task_add_prompts WHERE user_id = $1 AND is_open
-UNION ALL
-SELECT 'media_add', id, updated_at, 1 FROM media_add_prompts WHERE user_id = $1 AND is_open
 ORDER BY priority, updated_at DESC
 LIMIT 1
 """
@@ -1379,38 +1366,7 @@ async def touch_message_thread(thread_id: int | None) -> None:
     )
 
 
-
 # --- кино (см. app/media.py) ------------------------------------------------
-
-
-async def create_media_add_prompt(
-    user_id: int, kind_slug: str, query: str, candidates: list, thread_id: int | None,
-    note_id: str | None = None,
-) -> int:
-    """Ждём, чем человек ответит: нажмёт находку или напишет название.
-
-    candidates кладём сразу — по нажатию кнопка несёт только номер, и искать
-    в TMDb второй раз, чтобы узнать, на что нажали, было бы и медленнее, и
-    ненадёжно: выдача поиска не обязана быть стабильной между запросами."""
-    pool = await get_pool()
-    now = utcnow()
-    return await pool.fetchval(
-        "INSERT INTO media_add_prompts "
-        "(user_id, kind, query, candidates, step, is_open, thread_id, note_id, created_at, updated_at) "
-        "VALUES ($1, $2, $3, $4::jsonb, $5, TRUE, $6, $7, $8, $8) RETURNING id",
-        user_id, kind_slug, query, json.dumps(candidates),
-        0 if not candidates else 1, thread_id, note_id, now,
-    )
-
-
-async def get_media_add_prompt(prompt_id: int) -> asyncpg.Record | None:
-    pool = await get_pool()
-    return await pool.fetchrow("SELECT * FROM media_add_prompts WHERE id = $1", prompt_id)
-
-
-async def close_media_add_prompt(prompt_id: int) -> None:
-    pool = await get_pool()
-    await pool.execute("UPDATE media_add_prompts SET is_open = FALSE WHERE id = $1", prompt_id)
 
 
 async def create_media_review_prompt(
@@ -1427,4 +1383,14 @@ async def create_media_review_prompt(
         "(user_id, book_note_id, book_title, kind, sent_at, updated_at, is_open, thread_id) "
         "VALUES ($1, $2, $3, $4, $5, $5, TRUE, $6) RETURNING id",
         user_id, note_id, title, kind_slug, now, thread_id,
+    )
+
+
+async def set_review_text(prompt_id: int, text: str) -> None:
+    """Впечатление между вторым и третьим вопросом отзыва на фильм."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE book_review_prompts SET review_text = $1, step = 2, updated_at = now() "
+        "WHERE id = $2",
+        text, prompt_id,
     )

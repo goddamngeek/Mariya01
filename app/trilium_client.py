@@ -1255,7 +1255,6 @@ async def log_activity(person_name: str, activity: str, feedback: str, score, du
     await _put_content(client, note_id, json.dumps(data))
 
 
-
 TASK_ARCHIVE_TITLE = "АРХИВ ЗАДАЧ // TASK ARCHIVE"
 
 
@@ -1342,314 +1341,6 @@ async def archive_done_cards(board_name: str = "КАНБАН // KANBAN") -> list
 # применительно к человеку, а не к заметке.
 
 
-async def _search_note_id_by_label(client: httpx.AsyncClient, label: str) -> Optional[str]:
-    """Заметка с такой меткой, если она одна такая.
-
-    Заголовок различать перестал: в дереве завелись две заметки «ФИЛЬМЫ»,
-    одна внутри другой, и поиск по названию брал произвольную. Метка это
-    решает — но только пока она одна: если человек повесил её на две
-    заметки, честнее вернуть None и уйти в поиск по заголовку, чем снова
-    выбирать наугад."""
-    resp = await client.get(f"{TRILIUM_URL}/etapi/notes", params={"search": f"#{label}"})
-    resp.raise_for_status()
-    results = resp.json().get("results") or []
-    return results[0].get("noteId") if len(results) == 1 else None
-
-
-async def _find_media_parent(client: httpx.AsyncClient, kind) -> Optional[str]:
-    """Куда складывать кино этого вида: сначала по метке, потом по названию."""
-    try:
-        by_label = await _search_note_id_by_label(client, kind.parent_label)
-    except httpx.HTTPError as exc:
-        print(f"trilium: поиск по метке #{kind.parent_label} не удался: {exc}", flush=True)
-        by_label = None
-    if by_label is not None:
-        return by_label
-    return await _find_note_id(client, kind.parent_note)
-
-
-async def _ensure_note(client: httpx.AsyncClient, title: str) -> str:
-    """Найти заметку по заголовку или завести её в корне.
-
-    Книги требуют, чтобы КНИГИ и _ШАБЛОН_КНИГА уже существовали, и падают,
-    если их нет. Для кино так делать не хочется: просить человека сначала
-    создать две заметки руками — это ещё один шаг, на котором всё
-    останавливается (токен Маши для Firefly так и не завели за месяц)."""
-    found = await _find_note_id(client, title)
-    if found is not None:
-        return found
-    resp = await client.post(
-        f"{TRILIUM_URL}/etapi/create-note",
-        json={"parentNoteId": "root", "title": title, "type": "text", "content": ""},
-    )
-    resp.raise_for_status()
-    note_id = resp.json()["note"]["noteId"]
-    await cache_note_id(title, note_id)
-    print(f"trilium: завёл заметку {title!r}", flush=True)
-    return note_id
-
-
-def _media_content(meta: dict) -> str:
-    """Карточка фильма из данных TMDb.
-
-    Пишет её бот, а не человек, поэтому шаблон-заметка (как _ШАБЛОН_КНИГА)
-    здесь не нужен — вместе с известной граблёй, что ETAPI не копирует тело
-    шаблона при создании."""
-    parts = []
-    if meta.get("original_title") and meta["original_title"] != meta.get("title"):
-        parts.append(f"<p><i>{html.escape(meta['original_title'])}</i></p>")
-    facts = [
-        (name, meta.get(key))
-        for name, key in (("Режиссёр", "creator"), ("Год", "year"), ("Жанр", "genres"))
-    ]
-    for name, value in facts:
-        if value:
-            parts.append(f"<p><b>{name}:</b> {html.escape(str(value))}</p>")
-    if meta.get("overview"):
-        parts.append(f"<p>{html.escape(meta['overview'])}</p>")
-    return "".join(parts)
-
-
-@_needs_trilium
-async def add_media(kind, title: str, meta: Optional[dict] = None) -> str:
-    """Завести фильм или сериал. Возвращает id заметки.
-
-    Лейблов состояния тут НЕ ставится ни одного: только что заведённое кино
-    по определению в «хочу посмотреть», а это отсутствие лейблов, а не их
-    наличие. Так список «хочу» не надо ничем наполнять — он и есть всё, что
-    ещё никто не тронул."""
-    client = get_client()
-    parent_id = await _find_media_parent(client, kind)
-    if parent_id is None:
-        parent_id = await _ensure_note(client, kind.parent_note)
-
-    resp = await client.post(
-        f"{TRILIUM_URL}/etapi/create-note",
-        json={
-            "parentNoteId": parent_id,
-            "title": title,
-            "type": "text",
-            "content": _media_content(meta or {}),
-        },
-    )
-    resp.raise_for_status()
-    note_id = resp.json()["note"]["noteId"]
-
-    for name, key in (("director", "creator"), ("releaseYear", "year"), ("tmdbId", "tmdb_id")):
-        value = (meta or {}).get(key)
-        if value:
-            await _create_attribute(client, note_id, "label", name, str(value))
-    return note_id
-
-
-def _media_state(labels: dict, person_name: str) -> str:
-    """В каком состоянии эта заметка ДЛЯ ЭТОГО человека.
-
-    Значение проверяется на истинность, а не только наличие метки — та же
-    грабля, что с readingEnd у книг: очищенная в интерфейсе дата остаётся
-    пустой строкой, а не исчезает."""
-    from app import media
-    if labels.get(media.label_for(media.WATCHED, person_name)):
-        return media.DONE
-    if labels.get(media.label_for(media.DROPPED, person_name)):
-        return media.DROPPED
-    if labels.get(media.label_for(media.WATCHING, person_name)):
-        return media.IN_PROGRESS
-    return media.WANT
-
-
-@_needs_trilium
-async def list_media(kind, state: str, person_name: str) -> list[dict]:
-    """Кино этого вида в этом состоянии для этого человека.
-
-    Как и у книг: забрать всех детей и посмотреть их лейблы. У ETAPI нет ни
-    массовой выборки, ни фильтра «нет такой метки», так что дешевле этого
-    ничего не выйдет — зато _get_notes тянет их разом, а не по одному."""
-    client = get_client()
-    parent_id = await _find_media_parent(client, kind)
-    if parent_id is None:
-        return []  # ещё ничего не заводили — это не ошибка, это пустой список
-
-    parent_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{parent_id}")
-    parent_resp.raise_for_status()
-    child_ids = parent_resp.json().get("childNoteIds") or []
-
-    result = []
-    for child_id, child in zip(child_ids, await _get_notes(client, child_ids)):
-        labels = {
-            a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
-        }
-        if _media_state(labels, person_name) != state:
-            continue
-        result.append({
-            "note_id": child_id,
-            "title": child.get("title") or "(без названия)",
-            "author": labels.get("director", ""),
-            "year": labels.get("releaseYear", ""),
-        })
-    return result
-
-
-@_needs_trilium
-async def mark_media(kind, note_id: str, person_name: str, state: str) -> None:
-    """Переставить состояние для одного человека.
-
-    Лейблы состояния взаимно исключают друг друга, поэтому чужие снимаются:
-    иначе брошенный и потом досмотренный сериал остался бы одновременно в
-    «бросил» и в «посмотрел», и _media_state выбрал бы по порядку проверок,
-    а не по действительности.
-
-    Существующий лейбл PATCH-им, а не создаём второй — та же причина, что у
-    set_reading_end: два конкурирующих лейбла с одним именем."""
-    from app import media
-    client = get_client()
-    wanted = {
-        media.DONE: media.WATCHED,
-        media.IN_PROGRESS: media.WATCHING,
-        media.DROPPED: media.DROPPED,
-    }.get(state)
-
-    note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
-    note_resp.raise_for_status()
-    attributes = note_resp.json().get("attributes", [])
-
-    value = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    for prefix in (media.WATCHED, media.WATCHING, media.DROPPED):
-        name = media.label_for(prefix, person_name)
-        existing = next(
-            (a for a in attributes if a.get("type") == "label" and a.get("name") == name), None,
-        )
-        # Снять всё лишнее, поставить нужное. Пустая строка вместо удаления
-        # атрибута: _media_state смотрит на значение, а не на наличие.
-        target = value if prefix == wanted else ""
-        if existing is not None:
-            if (existing.get("value") or "") != target:
-                patch = await client.patch(
-                    f"{TRILIUM_URL}/etapi/attributes/{existing['attributeId']}",
-                    json={"value": target},
-                )
-                patch.raise_for_status()
-        elif target:
-            await _create_attribute(client, note_id, "label", name, target)
-
-
-@_needs_trilium
-async def get_media_details(note_id: str) -> tuple[str, str, dict, list[tuple[str, str]]]:
-    """Заголовок, текст карточки, лейблы и отзывы.
-
-    Проще книжного get_book_details: там содержимое разрезано на четыре
-    раздела шаблона, а здесь карточку целиком написал бот, и разбирать её
-    обратно незачем."""
-    client = get_client()
-    note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
-    note_resp.raise_for_status()
-    note = note_resp.json()
-    labels = {a["name"]: a["value"] for a in note.get("attributes", []) if a.get("type") == "label"}
-
-    reviews = []
-    for child in await _get_notes(client, note.get("childNoteIds") or []):
-        child_labels = {
-            a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
-        }
-        if child_labels.get("rating"):
-            reviews.append((child_labels.get("owner", ""), child_labels["rating"]))
-
-    content = _strip_html(await _get_content(client, note_id))
-    return note.get("title") or "(без названия)", content, labels, reviews
-
-
-@_needs_trilium
-async def create_media_review_note(
-    note_id: str, title: str, rating: int, review_text: str, person_name: str,
-) -> None:
-    """Отзыв на фильм — то же устройство, что у книжного: заметка живёт под
-    самим фильмом и клонируется в общий список второй веткой (один и тот же
-    носитель в двух местах дерева, а не две расходящиеся копии).
-
-    Общий список заводится при первой надобности, а не требуется заранее."""
-    client = get_client()
-    reviews_id = await _ensure_note(client, "ОТЗЫВЫ НА КИНО")
-
-    content = f"<p>{int(rating)}/10</p><p>{html.escape(review_text)}</p>"
-    create_resp = await client.post(
-        f"{TRILIUM_URL}/etapi/create-note",
-        json={
-            "parentNoteId": note_id,
-            "title": f"{title} — отзыв",
-            "type": "text",
-            "content": content,
-        },
-    )
-    create_resp.raise_for_status()
-    review_id = create_resp.json()["note"]["noteId"]
-
-    clone_resp = await client.post(
-        f"{TRILIUM_URL}/etapi/branches",
-        json={"noteId": review_id, "parentNoteId": reviews_id},
-    )
-    clone_resp.raise_for_status()
-
-    await _create_attribute(client, review_id, "label", "rating", str(int(rating)))
-    await _create_attribute(client, review_id, "label", "owner", person_name)
-
-
-@_needs_trilium
-async def find_media_by_title(kind, title: str) -> Optional[str]:
-    """Уже заведённое кино с таким названием, или None.
-
-    Нужно, чтобы «посмотрел Дюну» перекладывало фильм из «хочу посмотреть»,
-    а не заводило второй такой же. Сравнение по схлопнутому регистру и
-    пробелам — тем же приёмом, что normalize_book_title сверяет названия с
-    читалки: человек пишет «дюна», а в заметке «Дюна»."""
-    client = get_client()
-    parent_id = await _find_media_parent(client, kind)
-    if parent_id is None:
-        return None
-    parent_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{parent_id}")
-    parent_resp.raise_for_status()
-    wanted = normalize_book_title(title)
-    for child_id, child in zip(
-        parent_resp.json().get("childNoteIds") or [],
-        await _get_notes(client, parent_resp.json().get("childNoteIds") or []),
-    ):
-        if normalize_book_title(child.get("title") or "") == wanted:
-            return child_id
-    return None
-
-
-@_needs_trilium
-async def fill_media(note_id: str, meta: dict) -> None:
-    """Дописать карточку заметке, заведённой руками в Trilium.
-
-    Содержимое перезаписывается целиком, а не дополняется: у заведённой
-    руками заметки тело обычно пустое, а если человек что-то написал — он
-    выбрал «Заполнить из TMDb» осознанно, и увидит результат сразу.
-
-    Лейблы PATCH-им, если они уже есть, — та же причина, что у mark_media:
-    два лейбла с одним именем на заметке хуже, чем один неверный."""
-    client = get_client()
-    await _put_content(client, note_id, _media_content(meta))
-
-    note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
-    note_resp.raise_for_status()
-    attributes = note_resp.json().get("attributes", [])
-    for name, key in (("director", "creator"), ("releaseYear", "year"), ("tmdbId", "tmdb_id")):
-        value = meta.get(key)
-        if not value:
-            continue
-        existing = next(
-            (a for a in attributes if a.get("type") == "label" and a.get("name") == name), None,
-        )
-        if existing is not None:
-            patch = await client.patch(
-                f"{TRILIUM_URL}/etapi/attributes/{existing['attributeId']}",
-                json={"value": str(value)},
-            )
-            patch.raise_for_status()
-        else:
-            await _create_attribute(client, note_id, "label", name, str(value))
-
-
 @_needs_trilium
 async def list_books_wanted() -> list[dict]:
     """Книги, которые ещё не начали читать — нет readingStart.
@@ -1678,3 +1369,186 @@ async def list_books_wanted() -> list[dict]:
             "author": labels.get("author", ""),
         })
     return books
+
+
+# --- фильмы -----------------------------------------------------------------
+#
+# Устроены как книги, намеренно: те же четыре раздела описания, тот же
+# лейбл owner, тот же отзыв дочерней заметкой. Отличий ровно два — родитель
+# и состояний не три, а два:
+#
+#   нет watchEnd    — хочу посмотреть
+#   есть watchEnd   — посмотрел
+#
+# Родитель ищется по метке #фильмы, а не по заголовку: заметок «ФИЛЬМЫ» в
+# дереве оказалось две, одна внутри другой, и поиск по названию брал
+# произвольную. Заголовок остался запасным путём.
+
+FILMS_LABEL = "фильмы"
+FILMS_NOTE = "ФИЛЬМЫ"
+
+
+async def _find_films_parent(client: httpx.AsyncClient) -> Optional[str]:
+    """Заметка с меткой #фильмы, если она одна; иначе — по заголовку.
+
+    Метка на двух заметках сразу игнорируется: выбирать наугад хуже, чем
+    откатиться к прежнему поведению."""
+    try:
+        resp = await client.get(
+            f"{TRILIUM_URL}/etapi/notes", params={"search": f"#{FILMS_LABEL}"},
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results") or []
+        if len(results) == 1:
+            return results[0].get("noteId")
+    except httpx.HTTPError as exc:
+        print(f"trilium: поиск #{FILMS_LABEL} не удался: {exc}", flush=True)
+    return await _find_note_id(client, FILMS_NOTE)
+
+
+@_needs_trilium
+async def add_film(person_name: str, title: str, director: str = "") -> str:
+    """Завести фильм. Возвращает id заметки.
+
+    Тело — те же четыре раздела, что у книги, и записываются они здесь, а
+    не копированием шаблона: отдельная заметка-шаблон означала бы ещё один
+    ручной шаг в Trilium, а грабля с тем, что ETAPI не переносит тело
+    шаблона, уже стоила отладки на книгах.
+
+    watchEnd не ставится: только что заведённый фильм по определению в
+    «хочу посмотреть», и это отсутствие метки, а не её наличие."""
+    client = get_client()
+    parent_id = await _find_films_parent(client)
+    if parent_id is None:
+        raise TriliumNoteNotFoundError(f"Не нашёл заметку {FILMS_NOTE} и метку #{FILMS_LABEL}")
+
+    content = "".join(f"<h2>{h}</h2><p>&nbsp;</p>" for h in BOOK_DETAIL_HEADERS)
+    resp = await client.post(
+        f"{TRILIUM_URL}/etapi/create-note",
+        json={"parentNoteId": parent_id, "title": title, "type": "text", "content": content},
+    )
+    resp.raise_for_status()
+    note_id = resp.json()["note"]["noteId"]
+
+    if director:
+        await _create_attribute(client, note_id, "label", "author", director)
+    await _create_attribute(client, note_id, "label", "owner", person_name)
+    return note_id
+
+
+@_needs_trilium
+async def list_films(watched: bool, person_name: str) -> list[dict]:
+    """Фильмы этого человека в одном из двух состояний.
+
+    owner фильтруется здесь, как у книг: фильм личный, а не общий."""
+    client = get_client()
+    parent_id = await _find_films_parent(client)
+    if parent_id is None:
+        return []
+
+    resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{parent_id}")
+    resp.raise_for_status()
+    child_ids = resp.json().get("childNoteIds") or []
+
+    films = []
+    for child_id, child in zip(child_ids, await _get_notes(client, child_ids)):
+        labels = {
+            a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
+        }
+        # Значение, а не наличие метки: очищенная в интерфейсе дата остаётся
+        # пустой строкой — та же грабля, что с readingEnd у книг.
+        if bool(labels.get("watchEnd")) != watched:
+            continue
+        if labels.get("owner") and labels["owner"] != person_name:
+            continue
+        films.append({
+            "note_id": child_id,
+            "title": child.get("title") or "(без названия)",
+            "author": labels.get("author", ""),
+        })
+    return films
+
+
+@_needs_trilium
+async def set_watch_end(note_id: str, when: Optional[_date] = None) -> None:
+    """Отметить фильм просмотренным. PATCH-или-создать, как set_reading_end."""
+    value = (when or datetime.now(TIMEZONE).date()).strftime("%Y-%m-%d")
+    client = get_client()
+    resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+    resp.raise_for_status()
+    existing = next(
+        (a for a in resp.json().get("attributes", [])
+         if a.get("type") == "label" and a.get("name") == "watchEnd"),
+        None,
+    )
+    if existing is not None:
+        patch = await client.patch(
+            f"{TRILIUM_URL}/etapi/attributes/{existing['attributeId']}", json={"value": value},
+        )
+        patch.raise_for_status()
+        return
+    await _create_attribute(client, note_id, "label", "watchEnd", value)
+
+
+@_needs_trilium
+async def find_film_by_title(title: str, person_name: str) -> Optional[str]:
+    """Уже заведённый фильм с таким названием, или None.
+
+    Нужно, чтобы «посмотрел X» перекладывало фильм из «хочу посмотреть», а
+    не заводило второй. Сравнение схлопнутое, как у книг."""
+    client = get_client()
+    parent_id = await _find_films_parent(client)
+    if parent_id is None:
+        return None
+    resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{parent_id}")
+    resp.raise_for_status()
+    child_ids = resp.json().get("childNoteIds") or []
+    wanted = normalize_book_title(title)
+    for child_id, child in zip(child_ids, await _get_notes(client, child_ids)):
+        if normalize_book_title(child.get("title") or "") != wanted:
+            continue
+        labels = {
+            a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
+        }
+        if labels.get("owner") and labels["owner"] != person_name:
+            continue
+        return child_id
+    return None
+
+
+@_needs_trilium
+async def create_film_review_note(
+    note_id: str, title: str, rating: int, review_text: str, person_name: str,
+    quotes: str = "",
+) -> None:
+    """Отзыв на фильм — устроен как книжный: живёт под самим фильмом и
+    клонируется второй веткой в общий список.
+
+    Отличие одно: у фильма нет читалки, с которой приезжают цитаты, поэтому
+    запомнившиеся моменты спрашиваются третьим вопросом и ложатся сюда же."""
+    client = get_client()
+    reviews_id = await _find_note_id(client, "ОТЗЫВЫ НА КИНО")
+
+    body = f"<p>{int(rating)}/10</p><p>{html.escape(review_text)}</p>"
+    if quotes:
+        body += f"<h2>Запомнилось</h2><p>{html.escape(quotes)}</p>"
+    resp = await client.post(
+        f"{TRILIUM_URL}/etapi/create-note",
+        json={"parentNoteId": note_id, "title": f"{title} — отзыв",
+              "type": "text", "content": body},
+    )
+    resp.raise_for_status()
+    review_id = resp.json()["note"]["noteId"]
+
+    # Общий список отзывов — необязателен: нет его, отзыв просто живёт под
+    # фильмом. Заводить заметку в корне самим значило бы мусорить в дереве,
+    # которое человек раскладывал сам.
+    if reviews_id is not None:
+        clone = await client.post(
+            f"{TRILIUM_URL}/etapi/branches",
+            json={"noteId": review_id, "parentNoteId": reviews_id},
+        )
+        clone.raise_for_status()
+
+    await _create_attribute(client, review_id, "label", "rating", str(int(rating)))
+    await _create_attribute(client, review_id, "label", "owner", person_name)

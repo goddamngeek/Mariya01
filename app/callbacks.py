@@ -3,13 +3,12 @@ from app.service import (
     handle_book_finished,
     handle_book_started,
     handle_wanted_book_selected,
+    handle_wanted_film_selected,
+    handle_watched_film_selected,
+    handle_film_watched,
     handle_book_quotes_selected,
     handle_book_edit_details,
     handle_ledger_choice,
-    handle_media_add_choice,
-    handle_media_fill,
-    handle_media_mark,
-    handle_media_selected,
     handle_planner_action,
     handle_finished_book_selected,
     handle_quote_book_selected,
@@ -48,6 +47,15 @@ async def handle_press(press: Press) -> None:
         if data.startswith("pb:"):
             await handle_finished_book_selected(press)
             return
+        if data.startswith("fw:"):
+            await handle_wanted_film_selected(press)
+            return
+        if data.startswith("fp:"):
+            await handle_watched_film_selected(press)
+            return
+        if data.startswith("fm:"):
+            await handle_film_watched(press)
+            return
         if data.startswith("fd:"):
             await handle_book_finished(press)
             return
@@ -67,21 +75,6 @@ async def handle_press(press: Press) -> None:
         # записанной строкой.
         if data.startswith("el:"):
             await handle_ledger_choice(press)
-            return
-
-        # Кино (см. app/media.py): ma — выбор находки TMDb, ml — какой
-        # список показать, ms — выбранное кино, mm — сменить состояние.
-        if data.startswith("ma:"):
-            await handle_media_add_choice(press)
-            return
-        if data.startswith("mF:"):
-            await handle_media_fill(press)
-            return
-        if data.startswith("ms:"):
-            await handle_media_selected(press)
-            return
-        if data.startswith("mm:"):
-            await handle_media_mark(press)
             return
 
     await answer_callback_query(press.id)

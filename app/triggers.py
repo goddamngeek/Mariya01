@@ -208,6 +208,8 @@ def expense_note(text: str) -> str:
 _WATCH_WANT_RE = re.compile(r"\bхочу\s+(?:по)?смотреть\b", re.IGNORECASE)
 _WATCH_DONE_RE = re.compile(r"\b(посмотрел[аи]?|досмотрел[аи]?)\b", re.IGNORECASE)
 _WATCH_START_RE = re.compile(r"\bнача(?:л|ла|ли)\s+смотреть\b", re.IGNORECASE)
+# «сериал» вырезается из названия, но вида больше не выбирает: сериалов у
+# бота нет, всё это фильмы.
 _SERIES_RE = re.compile(r"\bсериал\w*\b", re.IGNORECASE)
 
 
@@ -247,8 +249,8 @@ def watch_intent(text: str) -> str | None:
 def watch_title(text: str) -> str:
     """Что осталось от «хочу посмотреть сериал Дюна» — «Дюна».
 
-    Слово «сериал» вырезается вместе с глаголом: оно выбрало вид (см.
-    is_series_text) и в названии ему делать нечего."""
+    Слово «сериал» вырезается вместе с глаголом: в названии ему делать
+    нечего, а видов у бота один — фильмы."""
     out = text
     for pattern in (_WATCH_WANT_RE, _WATCH_START_RE, _WATCH_DONE_RE, _SERIES_RE):
         out = pattern.sub(" ", out, count=1)
@@ -256,14 +258,6 @@ def watch_title(text: str) -> str:
     # тяжкие» и «На игле» — настоящие названия, и «все тяжкие» из них
     # получилось бы молча.
     return " ".join(out.split()).strip(" ,.:;—-\"«»")
-
-
-def is_series_text(text: str) -> bool:
-    """Сериал это или фильм. Отличить «Дюну»-фильм от «Дюны»-сериала по
-    названию невозможно, поэтому решает слово «сериал» в самой фразе;
-    без него считаем фильмом, их смотрят чаще. Команды /films и /series
-    задают вид явно и сюда не заходят."""
-    return _SERIES_RE.search(text) is not None
 
 
 def is_watch_request(text: str) -> bool:

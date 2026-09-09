@@ -12,7 +12,7 @@
 
 from datetime import datetime
 
-from app import background, media, parables, threads
+from app import background, parables, threads
 from app.channel import send_message
 from app.config import TIMEZONE
 from app.db import get_open_activity_prompt, get_open_ezhednevnik_prompt
@@ -27,11 +27,12 @@ from app.service import (
     resend_ezhednevnik_question,
     show_finished_books,
     show_wanted_books,
+    show_wanted_films,
+    show_watched_films,
+    start_film_add_flow,
     show_inbox,
     show_links,
     show_plan,
-    show_media_list,
-    start_media_add_flow,
     show_reading_status,
     show_spent,
     start_book_add_flow,
@@ -58,17 +59,14 @@ HELP_TEXT = (
     "/inbox — разобрать новые задачи по дням\n"
     "/kanban — канбан-доска целиком\n"
     "\n"
-    "КИНО\n"
-    "/films — я хочу посмотреть, фильмы\n"
-    "/series — я хочу посмотреть, сериалы\n"
-    "/watching — я смотрю (сериалы)\n"
-    "/watched — просмотренные\n"
-    "/addfilm Название — добавить фильм\n"
-    "/addseries Название — добавить сериал\n"
-    "— или просто «хочу посмотреть Дюну» / «посмотрел Интерстеллар»\n"
-    "\n"
     "ДЕНЬГИ\n"
     "/spent — сколько ушло за месяц и на что\n"
+    "\n"
+    "КИНО\n"
+    "/films — я хочу посмотреть\n"
+    "/watched — просмотренные\n"
+    "/addfilm — добавить фильм\n"
+    "— или просто «хочу посмотреть X» / «посмотрел X»\n"
     "\n"
     "ССЫЛКИ\n"
     "/links — сохранённые\n"
@@ -94,8 +92,6 @@ HELP_TEXT = (
     "— отредактировать свой ответ — поправит уже записанное в Trilium\n"
     "— поставить реакцию на сообщение — свернёт всю эту ветку сразу, "
     "не дожидаясь таймера"
-    "\n\n"
-    "This product uses the TMDB API but is not endorsed or certified by TMDB."
 )
 
 
@@ -157,33 +153,6 @@ async def handle_incoming(
         )
         return
 
-    # В отличие от /addbook (там строгое равенство, см. CLAUDE.md) — по
-    # startswith: «/addfilm Дюна» должно работать так же, как фраза «хочу
-    # посмотреть Дюна». Голая команда спрашивает название сама.
-    for command, kind in (("/addfilm", media.FILM), ("/addseries", media.SERIES)):
-        stripped = text.strip()
-        if stripped == command or stripped.startswith(command + " "):
-            background.spawn(
-                start_media_add_flow(chat_id, kind, stripped[len(command):], message_id),
-                command,
-            )
-            return
-
-    # Плоско, как у книг: каждый список — своя команда, без промежуточного
-    # меню «что показать?».
-    _MEDIA_COMMANDS = {
-        "/films": (media.WANT, [media.FILM]),
-        "/series": (media.WANT, [media.SERIES]),
-        "/watching": (media.IN_PROGRESS, [media.SERIES]),
-        "/watched": (media.DONE, [media.FILM, media.SERIES]),
-    }
-    if text.strip() in _MEDIA_COMMANDS:
-        state, kinds = _MEDIA_COMMANDS[text.strip()]
-        background.spawn(
-            show_media_list(chat_id, state, kinds, message_id), text.strip(),
-        )
-        return
-
     # По startswith, а не по равенству: у команды есть необязательный
     # аргумент-месяц — «/spent август». Ср. /addbook по соседству, где
     # равенство строгое намеренно.
@@ -196,6 +165,20 @@ async def handle_incoming(
     if text.strip() == "/reading":
         background.spawn(
             show_reading_status(chat_id, trigger_message_id=message_id), "/reading",
+        )
+        return
+
+    if text.strip() == "/films":
+        background.spawn(show_wanted_films(chat_id, message_id), "/films")
+        return
+
+    if text.strip() == "/watched":
+        background.spawn(show_watched_films(chat_id, message_id), "/watched")
+        return
+
+    if text.strip() == "/addfilm":
+        background.spawn(
+            start_film_add_flow(chat_id, text, telegram_message_id=message_id), "/addfilm",
         )
         return
 

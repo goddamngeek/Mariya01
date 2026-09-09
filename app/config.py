@@ -51,18 +51,6 @@ SYNC_BEARER_TOKEN = os.environ.get("SYNC_BEARER_TOKEN", "")
 TRILIUM_URL = os.environ.get("TRILIUM_URL", "").rstrip("/")
 TRILIUM_ETAPI_TOKEN = os.environ.get("TRILIUM_ETAPI_TOKEN", "")
 
-# Кино — поиск метаданных в TMDb (см. app/tmdb_client.py). Бесплатно для
-# некоммерческого использования; условие — строка-упоминание в /help.
-#
-# Пустое значение НЕ ломает добавление фильма: бот спросит название
-# сообщением и заведёт карточку без описания. То есть кино работает и без
-# ключа, просто заполнять придётся руками.
-#
-# Годится любой из двух ключей, которые выдаёт TMDb — короткий v3 api_key
-# или длинный v4 read access token: какой именно, tmdb_client определяет сам.
-TMDB_TOKEN = os.environ.get("TMDB_TOKEN", "")
-
-
 # Траты — beancount вместо Firefly (см. app/ledger.py).
 #
 # Здесь, а не в переменных окружения: это не секрет, а раскладка счетов, и

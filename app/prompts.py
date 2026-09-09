@@ -127,6 +127,23 @@ BOOK_DETAILS_TEMPLATE = (
 # ОТЗЫВЫ НА КНИГИ.
 BOOK_REVIEW_STEPS = ["Оцените от 1 до 10?", "Расскажите подробнее?"]
 
+# У фильма третий шаг: цитаты и запомнившиеся моменты. У книги они приезжают
+# сами, файлом с читалки; у фильма такого источника нет, поэтому спрашиваем.
+FILM_ADD_STEPS = ["Какое название фильма?", "Кто режиссёр?"]
+FILM_REVIEW_STEPS = [
+    "Оцени от 1 до 10?",
+    "Расскажи, как тебе?",
+    "Что запомнилось — цитаты, моменты? Если нечего, напиши «нет».",
+]
+
+
+def film_add_step_text(step: int) -> str:
+    return FILM_ADD_STEPS[step]
+
+
+def film_review_step_text(step: int) -> str:
+    return FILM_REVIEW_STEPS[step]
+
 
 def book_review_step_text(step: int) -> str:
     return BOOK_REVIEW_STEPS[step]

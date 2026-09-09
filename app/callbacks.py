@@ -1,6 +1,8 @@
 from app.db import is_registered
 from app.service import (
     handle_book_finished,
+    handle_book_started,
+    handle_wanted_book_selected,
     handle_book_quotes_selected,
     handle_book_edit_details,
     handle_ledger_choice,
@@ -36,6 +38,12 @@ async def handle_press(press: Press) -> None:
             return
         if data.startswith("rb:"):
             await handle_reading_book_selected(press)
+            return
+        if data.startswith("wb:"):
+            await handle_wanted_book_selected(press)
+            return
+        if data.startswith("sb:"):
+            await handle_book_started(press)
             return
         if data.startswith("pb:"):
             await handle_finished_book_selected(press)

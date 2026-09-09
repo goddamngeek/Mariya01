@@ -485,7 +485,9 @@ async def log_reminder_to_calendar(sender_name: str, target_name: str, message: 
         print(f"log_reminder_to_calendar failed (non-fatal): {exc!r}", flush=True)
 
 @_needs_trilium
-async def add_book(person_name: str, title: str, author: str = "") -> str:
+async def add_book(
+    person_name: str, title: str, author: str = "", start_reading: bool = True,
+) -> str:
     """Add a new book note under КНИГИ, templated from _ШАБЛОН_КНИГА via a
     ~template RELATION (not a #template label — a relation's value is a
     real noteId, a label's is plain text; confirmed live which one the
@@ -516,9 +518,13 @@ async def add_book(person_name: str, title: str, author: str = "") -> str:
     await _create_attribute(client, note_id, "relation", "template", template_id)
     if author:
         await _create_attribute(client, note_id, "label", "author", author)
-    await _create_attribute(
-        client, note_id, "label", "readingStart", datetime.now(TIMEZONE).strftime("%Y-%m-%d"),
-    )
+    # readingStart ставится, только когда книгу УЖЕ читают. Без него книга
+    # лежит в «хочу прочитать» — состояние выводится из отсутствия метки, а
+    # не из отдельного поля, ровно как «прочитано» выводится из readingEnd.
+    if start_reading:
+        await _create_attribute(
+            client, note_id, "label", "readingStart", datetime.now(TIMEZONE).strftime("%Y-%m-%d"),
+        )
     await _create_attribute(client, note_id, "label", "owner", person_name)
     return note_id
 
@@ -634,6 +640,31 @@ async def get_book_quotes(note_id: str) -> list[str]:
 
 
 @_needs_trilium
+async def set_reading_start(note_id: str, when: Optional[_date] = None) -> None:
+    """Книга из «хочу прочитать» становится читаемой.
+
+    PATCH-или-создать, как у set_reading_end: очищенная в интерфейсе дата
+    остаётся пустым лейблом, а не исчезает, и слепое создание оставило бы
+    два конкурирующих readingStart."""
+    value = (when or datetime.now(TIMEZONE).date()).strftime("%Y-%m-%d")
+    client = get_client()
+    note_resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{note_id}")
+    note_resp.raise_for_status()
+    existing = next(
+        (a for a in note_resp.json().get("attributes", [])
+         if a.get("type") == "label" and a.get("name") == "readingStart"),
+        None,
+    )
+    if existing is not None:
+        patch = await client.patch(
+            f"{TRILIUM_URL}/etapi/attributes/{existing['attributeId']}", json={"value": value},
+        )
+        patch.raise_for_status()
+        return
+    await _create_attribute(client, note_id, "label", "readingStart", value)
+
+
+@_needs_trilium
 async def set_reading_end(note_id: str, when: Optional[_date] = None) -> None:
     """Stamp a book as finished. The readingEnd label may already exist with
     an EMPTY value rather than not exist at all — clearing a promoted date
@@ -700,6 +731,11 @@ async def create_book_review_note(
     await _create_attribute(client, note_id, "label", "owner", person_name)
 
 
+# Три состояния книги, все три выводятся из двух дат — отдельного поля
+# «статус» нет и не нужно:
+#   нет readingStart              — хочу прочитать (list_books_wanted)
+#   есть readingStart, нет End    — читаю (_list_books(False))
+#   есть readingEnd               — прочитано (_list_books(True))
 @_needs_trilium
 async def _list_books(finished: bool) -> list[dict]:
     """Child notes of КНИГИ (see add_book), split by whether readingEnd is
@@ -1612,3 +1648,33 @@ async def fill_media(note_id: str, meta: dict) -> None:
             patch.raise_for_status()
         else:
             await _create_attribute(client, note_id, "label", name, str(value))
+
+
+@_needs_trilium
+async def list_books_wanted() -> list[dict]:
+    """Книги, которые ещё не начали читать — нет readingStart.
+
+    Отдельной функцией, а не третьим значением в _list_books: тот принимает
+    булев «дочитана ли» и вызывается из двух мест, а переделывать его ради
+    третьего состояния значило бы трогать работающие /reading и /finished."""
+    client = get_client()
+    knigi_id = await _find_note_id(client, "КНИГИ")
+    if knigi_id is None:
+        raise TriliumNoteNotFoundError("Could not find the КНИГИ note.")
+    resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{knigi_id}")
+    resp.raise_for_status()
+    child_ids = resp.json().get("childNoteIds") or []
+
+    books = []
+    for child_id, child in zip(child_ids, await _get_notes(client, child_ids)):
+        labels = {
+            a["name"]: a["value"] for a in child.get("attributes", []) if a.get("type") == "label"
+        }
+        if labels.get("readingStart"):
+            continue
+        books.append({
+            "note_id": child_id,
+            "title": child.get("title") or "(без названия)",
+            "author": labels.get("author", ""),
+        })
+    return books

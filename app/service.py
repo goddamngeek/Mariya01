@@ -80,6 +80,8 @@ from app.channel import (
     send_message_get_id,
 )
 from app.trilium_client import (
+    list_books_wanted,
+    set_reading_start,
     add_media,
     fill_media,
     find_media_by_title,
@@ -198,7 +200,12 @@ async def process_incoming_message(
         await show_finished_books(user_id, telegram_message_id)
         return
     if trigger == "book_add":
-        await start_book_add_flow(user_id, text, reply_to_text, telegram_message_id)
+        # «начал читать X» — книга уже в руках, ставим readingStart сразу.
+        # «хочу почитать X» и «добавь книгу X» кладут её в «хочу прочитать».
+        await start_book_add_flow(
+            user_id, text, reply_to_text, telegram_message_id,
+            start_reading=triggers.book_add_starts_reading(text),
+        )
         return
 
     received_at = utcnow()
@@ -577,6 +584,7 @@ _SKIP_AUTHOR_WORDS = ("нет", "не знаю", "неизвестно", "не �
 
 async def start_book_add_flow(
     user_id: int, text: str, reply_to_text: str | None = None, telegram_message_id: int | None = None,
+    start_reading: bool = False,
 ) -> None:
     """Shared by the free-text trigger (triggers.is_book_add) and the
     /addbook command (app/main.py). Every message belonging to this
@@ -590,7 +598,10 @@ async def start_book_add_flow(
     thread_id = await threads.open_thread(
         user_id, threads.TTL_BOOK_DETAILS, telegram_message_id, closing_text="Добавил книгу",
     )
-    prompt_id = await create_book_add_prompt(user_id, thread_id)
+    # По умолчанию книга ложится в «хочу прочитать»: чаще её заводят до
+    # чтения, а не в процессе. «начал читать X» — исключение, там
+    # start_reading=True приходит от вызывающего.
+    prompt_id = await create_book_add_prompt(user_id, thread_id, start_reading)
     if await threads.send(thread_id, user_id, book_add_step_text(0)) is None:
         await close_book_add_prompt(prompt_id)
     await ack_incoming_messages([message_id])
@@ -717,7 +728,7 @@ async def _handle_book_add_reply(
     author = "" if text.strip().lower() in _SKIP_AUTHOR_WORDS else text.strip()
     person_name = USER_NAMES.get(user_id, str(user_id))
     try:
-        note_id = await add_book(person_name, title, author)
+        note_id = await add_book(person_name, title, author, prompt["start_reading"])
         template_message_id = await threads.send(
             thread_id, user_id, BOOK_DETAILS_TEMPLATE.format(title=title, author=author),
         )
@@ -807,6 +818,47 @@ async def show_reading_status(user_id: int, trigger_message_id: int | None = Non
     )
 
 
+async def show_wanted_books(user_id: int, trigger_message_id: int | None = None) -> None:
+    """/toread — книги, которые ещё не начали читать.
+
+    Третий список рядом с /reading и /finished. Раньше такого состояния у
+    книг не было вовсе: заведённая книга сразу считалась читаемой."""
+    await _show_book_list(
+        user_id, list_books_wanted, "wb",
+        "В «хочу прочитать» пусто. Заведи книгу — /addbook.", trigger_message_id,
+    )
+
+
+async def handle_wanted_book_selected(press: Press) -> None:
+    """Карточка книги из «хочу прочитать» — с кнопкой «Начал читать»
+    вместо «Я дочитал»: дочитать то, что не начинал, нельзя."""
+    await _handle_book_list_press(press, "wb", with_finish_button=False, with_start_button=True)
+
+
+async def handle_book_started(press: Press) -> None:
+    """«Начал читать» — ставит readingStart, книга уезжает в /reading.
+
+    Симметрично «Я дочитал»: метка ставится сразу, ничего не спрашивается —
+    начало чтения это факт, а не разговор."""
+    await answer_callback_query(press.id)
+    chat_id = press.chat_id
+    note_id = press.data[len("sb:"):]
+    if press.message_id is not None:
+        await clear_reply_markup(chat_id, press.message_id)
+        thread = await threads.thread_for_message(chat_id, press.message_id)
+    else:
+        thread = None
+    try:
+        title, _labels = await get_note_labels(note_id)
+        await set_reading_start(note_id)
+    except Exception as exc:
+        await _report_failure(chat_id, "set_reading_start", "Не получилось отметить", exc, retry=True)
+        return
+    thread_id = thread["id"] if thread is not None else None
+    await threads.send(thread_id, chat_id, f"Читаешь: {title}")
+    await _dismiss_thread_by_id(thread_id)
+
+
 async def show_finished_books(user_id: int, trigger_message_id: int | None = None) -> None:
     """"прочитанные" / /finished — the mirror of show_reading_status, for
     books that already have a readingEnd date. Same description on click
@@ -863,7 +915,9 @@ def _ratings(reviews: list[tuple[str, str]]) -> str:
     )
 
 
-async def _handle_book_list_press(press: Press, prefix: str, with_finish_button: bool) -> None:
+async def _handle_book_list_press(
+    press: Press, prefix: str, with_finish_button: bool, with_start_button: bool = False,
+) -> None:
     """Shared by both lists' button handlers: strip the list's keyboard (so
     a second book can't be picked from the same message), then send that
     book's description — always leading with the book's own title (per
@@ -914,6 +968,8 @@ async def _handle_book_list_press(press: Press, prefix: str, with_finish_button:
     # раньше не успевший его дозаполнить оставался с книгой в прочерках
     # навсегда.
     buttons.append(("Описание", f"bd:{note_id}"))
+    if with_start_button:
+        buttons.append(("Начал читать", f"sb:{note_id}"))
     if with_finish_button:
         buttons.append(("Я дочитал", f"fd:{note_id}"))
     await threads.send(thread_id, chat_id, body, parse_mode="HTML", buttons=buttons or None)
@@ -1510,6 +1566,8 @@ async def _offer_book_details(user_id: int, note_id: str, title: str, author: st
     thread_id = await threads.open_thread(
         user_id, threads.TTL_BOOK_DETAILS, closing_text="Добавил книгу",
     )
+    # Флаг здесь не нужен: заметка уже создана импортом выше, этот диалог
+    # только про её описание.
     prompt_id = await create_book_add_prompt(user_id, thread_id)
     template_message_id = await threads.send(
         thread_id, user_id, BOOK_DETAILS_TEMPLATE.format(title=title, author=author),
@@ -1562,6 +1620,8 @@ async def handle_clippings_file(user_id: int, raw: str) -> None:
             note_id = known_books.get(normalize_book_title(title))
             is_new_book = note_id is None
             if is_new_book:
+                # start_reading по умолчанию: книга, из которой уже есть
+                # выделения, очевидно читается.
                 note_id = await add_book(person_name, title, author)
                 # Чтобы вторая группа с тем же названием (другой автор в
                 # метаданных) попала в только что созданную заметку, а не

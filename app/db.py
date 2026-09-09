@@ -452,6 +452,12 @@ CREATE INDEX IF NOT EXISTS ledger_entries_user_idx
 -- живом проде эндпоинт молча отдаёт 500.
 ALTER TABLE book_review_prompts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'book';
 
+-- Книга заводится либо сразу читаемой («начал читать X»), либо в «хочу
+-- прочитать» (/addbook, «хочу почитать X»). Отличается это одним: ставить
+-- ли readingStart. Отдельным ALTER — CREATE TABLE IF NOT EXISTS колонок не
+-- добавляет.
+ALTER TABLE book_add_prompts ADD COLUMN IF NOT EXISTS start_reading BOOLEAN NOT NULL DEFAULT TRUE;
+
 -- Добавление фильма или сериала: ждём либо выбора из находок TMDb кнопкой,
 -- либо названия сообщением (когда ключа нет или ничего не нашлось).
 -- candidates — то, что показали кнопками, чтобы не искать заново по нажатию.
@@ -775,13 +781,16 @@ async def close_book_quote_prompt(prompt_id: int) -> None:
 
 # --- /addbook -----------------------------------------------------------
 
-async def create_book_add_prompt(user_id: int, thread_id: int | None = None) -> int:
+async def create_book_add_prompt(
+    user_id: int, thread_id: int | None = None, start_reading: bool = False,
+) -> int:
     pool = await get_pool()
     now = utcnow()
     return await pool.fetchval(
-        "INSERT INTO book_add_prompts (user_id, sent_at, updated_at, is_open, thread_id) "
-        "VALUES ($1, $2, $2, TRUE, $3) RETURNING id",
-        user_id, now, thread_id,
+        "INSERT INTO book_add_prompts "
+        "(user_id, sent_at, updated_at, is_open, thread_id, start_reading) "
+        "VALUES ($1, $2, $2, TRUE, $3, $4) RETURNING id",
+        user_id, now, thread_id, start_reading,
     )
 
 

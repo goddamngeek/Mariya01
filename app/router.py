@@ -26,6 +26,7 @@ from app.service import (
     process_incoming_message,
     resend_ezhednevnik_question,
     show_finished_books,
+    show_wanted_books,
     show_inbox,
     show_links,
     show_plan,
@@ -45,6 +46,7 @@ HELP_TEXT = (
     "/checkin — повторить текущий вопрос, если он ещё открыт\n"
     "\n"
     "КНИГИ\n"
+    "/toread — хочу прочитать\n"
     "/reading — что я сейчас читаю\n"
     "/quote — добавить интересный момент\n"
     "/addbook — добавить новую книгу\n"
@@ -194,6 +196,12 @@ async def handle_incoming(
     if text.strip() == "/reading":
         background.spawn(
             show_reading_status(chat_id, trigger_message_id=message_id), "/reading",
+        )
+        return
+
+    if text.strip() == "/toread":
+        background.spawn(
+            show_wanted_books(chat_id, trigger_message_id=message_id), "/toread",
         )
         return
 

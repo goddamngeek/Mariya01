@@ -69,6 +69,17 @@ def is_finished_books(text: str) -> bool:
     return "прочитанн" in text.lower()
 
 
+_STARTED_READING = ("начал читать", "начала читать", "начали читать")
+
+
+def book_add_starts_reading(text: str) -> bool:
+    """«начал читать X» — книга уже в руках, значит readingStart ставится
+    сразу. «хочу почитать X» и «добавь книгу X» — нет: они кладут её в
+    «хочу прочитать», откуда её потом достают кнопкой «Начал читать»."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in _STARTED_READING)
+
+
 def is_book_add(text: str) -> bool:
     """"добавь книгу X" / "хочу почитать X" / "начал читать X". "добавь"
     needs "книг" beside it (alone it collides with every other add-shaped

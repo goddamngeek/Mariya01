@@ -277,6 +277,7 @@ async def set_bot_commands() -> None:
         {"command": "week", "description": "Ежедневник · Сводка за неделю"},
         {"command": "checkin", "description": "Ежедневник · Повторить текущий вопрос"},
 
+        {"command": "toread", "description": "Книги · Хочу прочитать"},
         {"command": "reading", "description": "Книги · Что я сейчас читаю"},
         {"command": "quote", "description": "Книги · Добавить интересный момент"},
         {"command": "addbook", "description": "Книги · Добавить новую"},

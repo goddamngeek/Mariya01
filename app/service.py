@@ -787,6 +787,7 @@ _TELEGRAM_TEXT_LIMIT = 4096
 
 async def _show_book_list(
     user_id: int, fetch, prefix: str, empty_text: str, trigger_message_id: int | None,
+    question: str = "Какую книгу показать?",
 ) -> None:
     """Shared by /reading and /finished — both just list books as buttons,
     differing only in which set they fetch and what the buttons do on click.
@@ -806,7 +807,7 @@ async def _show_book_list(
 
     thread_id = await threads.open_thread(user_id, threads.TTL_DIALOG, trigger_message_id)
     buttons = [(_book_label(book), f"{prefix}:{book['note_id']}") for book in books]
-    await threads.send(thread_id, user_id, "Какую книгу показать?", buttons=buttons)
+    await threads.send(thread_id, user_id, question, buttons=buttons)
 
 
 async def show_reading_status(user_id: int, trigger_message_id: int | None = None) -> None:
@@ -1949,6 +1950,7 @@ async def show_wanted_films(user_id: int, trigger_message_id: int | None = None)
     await _show_book_list(
         user_id, lambda: list_films(False, person), "fw",
         "В «хочу посмотреть» пусто. Заведи фильм — /addfilm.", trigger_message_id,
+        question="Какой фильм показать?",
     )
 
 
@@ -1958,6 +1960,7 @@ async def show_watched_films(user_id: int, trigger_message_id: int | None = None
     await _show_book_list(
         user_id, lambda: list_films(True, person), "fp",
         "Пока нет просмотренных фильмов.", trigger_message_id,
+        question="Какой фильм показать?",
     )
 
 

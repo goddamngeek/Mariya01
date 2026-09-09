@@ -537,6 +537,15 @@ async def add_book(
 # INSIDE the book note's own content, which does still use these exact
 # <h2> headers (from _ШАБЛОН_КНИГА).
 BOOK_DETAIL_HEADERS = ("Об Авторе", "Аннотация", "Жанр", "Похожие книги")
+FILM_DETAIL_HEADERS = ("Об Авторе", "Аннотация", "Жанр", "Похожие фильмы")
+
+# Четвёртый раздел — единственный, который у книги и фильма называется
+# по-разному. Поэтому чтение и запись принимают ОБЕ формулировки и
+# сопоставляют их по месту, а не по строке: иначе пришлось бы всюду тащить
+# вид, хотя отличается одно слово.
+DETAIL_SLOTS = tuple(
+    tuple(dict.fromkeys(pair)) for pair in zip(BOOK_DETAIL_HEADERS, FILM_DETAIL_HEADERS)
+)
 
 
 @_needs_trilium
@@ -551,9 +560,12 @@ async def fill_book_details(note_id: str, values: list[Optional[str]]) -> None:
     markup shape."""
     client = get_client()
     content = await _get_content(client, note_id)
-    for header, value in zip(BOOK_DETAIL_HEADERS, values):
+    for spellings, value in zip(DETAIL_SLOTS, values):
         if not value:
             continue
+        # Какая из формулировок раздела реально стоит в этой заметке —
+        # «Похожие книги» или «Похожие фильмы».
+        header = next((h for h in spellings if f"<h2>{h}</h2>" in content), spellings[0])
         # Stop at the next <h2> *or* at the first <hr>: quotes added by
         # /quote and by the clippings import live after the last section
         # with no <h2> of their own, so a plain "up to the next heading"
@@ -612,7 +624,8 @@ async def get_book_details(note_id: str) -> tuple[str, dict[str, str], list[str]
     content = await _get_content(client, note_id)
 
     details = {}
-    for header in BOOK_DETAIL_HEADERS:
+    for spellings in DETAIL_SLOTS:
+        header = next((h for h in spellings if f"<h2>{h}</h2>" in content), spellings[0])
         # Stops at the first <hr> as well as the next <h2>, for the same
         # reason fill_book_details does: quotes live after the last section
         # with no heading of their own. Without it «Похожие книги» read back
@@ -1422,7 +1435,7 @@ async def add_film(person_name: str, title: str, director: str = "") -> str:
     if parent_id is None:
         raise TriliumNoteNotFoundError(f"Не нашёл заметку {FILMS_NOTE} и метку #{FILMS_LABEL}")
 
-    content = "".join(f"<h2>{h}</h2><p>&nbsp;</p>" for h in BOOK_DETAIL_HEADERS)
+    content = "".join(f"<h2>{h}</h2><p>&nbsp;</p>" for h in FILM_DETAIL_HEADERS)
     resp = await client.post(
         f"{TRILIUM_URL}/etapi/create-note",
         json={"parentNoteId": parent_id, "title": title, "type": "text", "content": content},

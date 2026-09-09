@@ -59,6 +59,7 @@ from app.ingest import TRILIUM_UNAVAILABLE_TEXT, handle_active_message
 from app.press import Press
 from app.people import USER_NAMES, dative
 from app.prompts import (
+    FILM_DETAILS_TEMPLATE,
     film_add_step_text,
     film_review_step_text,
     ACTIVITY_STEPS,
@@ -86,7 +87,7 @@ from app.trilium_client import (
     list_films,
     set_watch_end,
     set_reading_start,
-    BOOK_DETAIL_HEADERS,
+    DETAIL_SLOTS,
     SEED_LINKS,
     add_book,
     add_book_quote,
@@ -603,13 +604,22 @@ async def start_book_add_flow(
     await ack_incoming_messages([message_id])
 
 
+# Собирается из DETAIL_SLOTS, а не перечисляется руками: четвёртый раздел у
+# книги и фильма называется по-разному, и оба написания должны считаться
+# границей раздела. Пробел внутри заголовка — \s+, потому что человек может
+# написать «Похожие  фильмы».
 _DETAIL_HEADER_RE = re.compile(
-    r"^\s*[*_#>\-\s]*(Об\s+Авторе|Аннотация|Жанр|Похожие\s+книги)\s*:?\s*[*_]*\s*$",
+    r"^\s*[*_#>\-\s]*("
+    + "|".join(
+        r"\s+".join(re.escape(word) for word in header.split())
+        for slot in DETAIL_SLOTS for header in slot
+    )
+    + r")\s*:?\s*[*_]*\s*$",
     re.IGNORECASE,
 )
 
 
-def _normalize_header(line: str) -> Optional[str]:
+def _normalize_header(line: str) -> Optional[int]:
     """Which of the four sections this line announces, if it is a bare
     header line and nothing else. Tolerant of the shapes people and LLMs
     actually produce around a heading — a trailing colon, **bold**, a
@@ -619,8 +629,13 @@ def _normalize_header(line: str) -> Optional[str]:
     if match is None:
         return None
     collapsed = re.sub(r"\s+", " ", match.group(1)).strip().lower()
+    # Номер раздела, а не название: «Похожие книги» и «Похожие фильмы» — один
+    # и тот же четвёртый слот, а split_book_details и так отдаёт позиционный
+    # список.
     return next(
-        (h for h in BOOK_DETAIL_HEADERS if h.lower() == collapsed), None,
+        (i for i, slot in enumerate(DETAIL_SLOTS)
+         if any(h.lower() == collapsed for h in slot)),
+        None,
     )
 
 
@@ -644,18 +659,22 @@ def split_book_details(text: str) -> list[Optional[str]]:
     that bar we fall back to the original behaviour exactly: paragraphs by
     position, each one's echoed-back header line dropped."""
     lines = text.strip().splitlines()
-    found = [(i, h) for i, line in enumerate(lines) if (h := _normalize_header(line))]
+    # `is not None`, а не проверка на истинность: у первого раздела номер 0.
+    found = [
+        (i, slot) for i, line in enumerate(lines)
+        if (slot := _normalize_header(line)) is not None
+    ]
 
     if len(found) >= 2:
-        sections: dict[str, str] = {}
-        for pos, (line_index, header) in enumerate(found):
+        sections: dict[int, str] = {}
+        for pos, (line_index, slot) in enumerate(found):
             end = found[pos + 1][0] if pos + 1 < len(found) else len(lines)
             body = "\n".join(lines[line_index + 1:end]).strip()
             # First header wins a duplicate: re-stating one usually means
             # the answer wandered back to it, not that it should be replaced.
-            if body and header not in sections:
-                sections[header] = body
-        return [sections.get(header) for header in BOOK_DETAIL_HEADERS]
+            if body and slot not in sections:
+                sections[slot] = body
+        return [sections.get(i) for i in range(len(DETAIL_SLOTS))]
 
     raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
     paragraphs = []
@@ -944,9 +963,11 @@ async def _handle_book_list_press(
         await _report_failure(chat_id, "get_book_details", "Не получилось прочитать описание", exc)
         return
 
+    # По тому, что реально стоит в заметке, а не по книжному списку: у фильма
+    # четвёртый раздел называется «Похожие фильмы».
     sections = "\n\n".join(
-        f"<b>{html.escape(header)}</b>\n{html.escape(details[header]) if details[header] else '—'}"
-        for header in BOOK_DETAIL_HEADERS
+        f"<b>{html.escape(header)}</b>\n{html.escape(text) if text else '—'}"
+        for header, text in details.items()
     )
     header = f"<b>{html.escape(_book_label({'title': title, 'author': labels.get('author', '')}))}</b>"
     subtitle = " · ".join(p for p in (_reading_dates(labels), _ratings(reviews)) if p)
@@ -1574,7 +1595,9 @@ _PROMPT_HANDLERS = {
 }
 
 
-async def _offer_book_details(user_id: int, note_id: str, title: str, author: str) -> None:
+async def _offer_book_details(
+    user_id: int, note_id: str, title: str, author: str, kind: str = "book",
+) -> None:
     """Книга только что заведена по данным из «My Clippings.txt» — шлём тот
     же шаблон «расскажи подробнее», что и /addbook, и подключаем его к той
     же машинерии, чтобы ответ разложился по разделам заметки как обычно."""
@@ -1583,9 +1606,10 @@ async def _offer_book_details(user_id: int, note_id: str, title: str, author: st
     )
     # Флаг здесь не нужен: заметка уже создана импортом выше, этот диалог
     # только про её описание.
-    prompt_id = await create_book_add_prompt(user_id, thread_id)
+    prompt_id = await create_book_add_prompt(user_id, thread_id, kind=kind)
+    template = FILM_DETAILS_TEMPLATE if kind == "film" else BOOK_DETAILS_TEMPLATE
     template_message_id = await threads.send(
-        thread_id, user_id, BOOK_DETAILS_TEMPLATE.format(title=title, author=author),
+        thread_id, user_id, template.format(title=title, author=author),
     )
     if template_message_id is not None:
         await finalize_book_add_prompt(prompt_id, author, note_id, template_message_id)
@@ -1908,18 +1932,14 @@ async def handle_book_edit_details(press: Press) -> None:
     chat_id = press.chat_id
     note_id = press.data[len("bd:"):]
     try:
-        title, labels = await get_note_labels(note_id)
+        title, details, _quotes, labels, _reviews = await get_book_details(note_id)
     except Exception as exc:
-        await _report_failure(chat_id, "get_note_labels", "Не получилось прочитать книгу", exc)
+        await _report_failure(chat_id, "get_book_details", "Не получилось прочитать заметку", exc)
         return
-    await _offer_book_details(chat_id, note_id, title, labels.get("author", ""))
-
-
-# --- кино (см. app/media.py) ------------------------------------------------
-#
-# Отличие от книг, из которого следует всё остальное: заметка ОБЩАЯ, а
-# состояние личное. Поэтому каждый список спрашивается применительно к
-# человеку, и «посмотрел» у Маши не убирает фильм из «хочу» у Остапа.
+    # Вид определяем по самой заметке, а не по кнопке: так не приходится
+    # менять формат bd: и ломать кнопки, уже висящие в чате.
+    kind = "film" if "Похожие фильмы" in details else "book"
+    await _offer_book_details(chat_id, note_id, title, labels.get("author", ""), kind)
 
 
 # Каждый вид диалога должен быть и в карте таблиц (app/db.py), и в карте

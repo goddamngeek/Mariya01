@@ -120,6 +120,10 @@ BOOK_DETAILS_TEMPLATE = (
     "Похожие книги"
 )
 
+# То же для фильма. Отличается одно слово в последней строке — три раздела
+# из четырёх подходят обоим, поэтому и разбор ответа у них общий.
+FILM_DETAILS_TEMPLATE = BOOK_DETAILS_TEMPLATE.replace("Похожие книги", "Похожие фильмы")
+
 
 # "Я дочитал" flow — the button under a book's description in /reading (see
 # app/service.py's handle_book_finished). Two steps, rating then free text;

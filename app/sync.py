@@ -313,33 +313,6 @@ async def ledger_file(person: str):
     return await ledger.render(user_id)
 
 
-# ОДНОРАЗОВЫЙ: переименовать четвёртый раздел в фильмах, заведённых до того,
-# как у кино появился свой заголовок. Применить и сразу удалить.
-@router.post("/rename_film_section", dependencies=[Depends(require_bearer)])
-async def rename_film_section():
-    from app.trilium_client import (
-        _find_films_parent, _get_content, _put_content, get_client, TRILIUM_URL,
-    )
-    client = get_client()
-    parent_id = await _find_films_parent(client)
-    if parent_id is None:
-        raise HTTPException(404, "не нашёл заметку фильмов")
-    resp = await client.get(f"{TRILIUM_URL}/etapi/notes/{parent_id}")
-    resp.raise_for_status()
-
-    changed = {}
-    for note_id in resp.json().get("childNoteIds") or []:
-        content = await _get_content(client, note_id)
-        if "<h2>Похожие книги</h2>" not in content:
-            continue
-        await _put_content(
-            client, note_id,
-            content.replace("<h2>Похожие книги</h2>", "<h2>Похожие фильмы</h2>"),
-        )
-        changed[note_id] = "переименован"
-    return changed or {"итог": "нечего менять"}
-
-
 @router.get("/errors", dependencies=[Depends(require_bearer)])
 async def recent_errors(limit: int = 10):
     """Последние ошибки с трейсбеками — чтобы не деплоить ради того, чтобы

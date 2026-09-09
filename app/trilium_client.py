@@ -577,7 +577,18 @@ async def fill_book_details(note_id: str, values: list[Optional[str]]) -> None:
         replacement = r"\1" + f"<p>{html.escape(value)}</p>"
         content, count = pattern.subn(replacement, content, count=1)
         if count == 0:
-            print(f"fill_book_details: header '{header}' not found in note {note_id}, skipped", flush=True)
+            # Раздела в заметке нет — дописываем, а не пропускаем. Пропуск
+            # молча терял ответ: у фильмов, заведённых до перехода на
+            # книжный шаблон, четырёх заголовков не было вовсе, и человек
+            # писал описание в пустоту.
+            #
+            # Перед первым <hr>, если он есть: за ним живут цитаты без
+            # собственного заголовка, и новый раздел после них оказался бы
+            # внутри них.
+            block = f"<h2>{header}</h2><p>{html.escape(value)}</p>"
+            cut = content.find("<hr>")
+            content = (content[:cut] + block + content[cut:]) if cut != -1 else content + block
+            print(f"fill_book_details: раздел «{header}» дописан в {note_id}", flush=True)
     await _put_content(client, note_id, content)
 
 
